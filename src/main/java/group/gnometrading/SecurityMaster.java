@@ -23,7 +23,7 @@ public class SecurityMaster {
 
     private final IntMap<Security> securityMap;
     private final IntMap<Exchange> exchangeMap;
-    private final IntMap<IntMap<Listing>> listingMap;
+    private final IntMap<Listing> listingMap;
     private final JSONDecoder jsonDecoder;
     private final RegistryConnection registryConnection;
 
@@ -111,15 +111,9 @@ public class SecurityMaster {
         return this.exchangeMap.get(exchangeId);
     }
 
-    public Listing getListing(final int exchangeId, final int securityId) {
-        if (!this.listingMap.containsKey(exchangeId)) {
-            this.listingMap.put(exchangeId, new IntHashMap<>());
-        }
-
-        if (!this.listingMap.get(exchangeId).containsKey(securityId)) {
-            final int originalLength = addParameters(this.listingPath, "exchangeId", exchangeId);
-            this.listingPath.append((byte) '&');
-            addParameters(this.listingPath, "securityId", securityId);
+    public Listing getListing(final int listingId) {
+        if (!this.listingMap.containsKey(listingId)) {
+            final int originalLength = addParameters(this.listingPath, "listingId", listingId);
             final ByteBuffer response = this.registryConnection.get(this.listingPath);
             this.listingPath.setLength(originalLength);
 
@@ -129,7 +123,8 @@ public class SecurityMaster {
                         return null;
                     }
 
-                    int listingId = -1;
+                    int exchangeId = -1;
+                    int securityId = -1;
                     String exchangeSecurityId = null;
                     String exchangeSecuritySymbol = null;
 
@@ -137,8 +132,10 @@ public class SecurityMaster {
                         try (final var object = item.asObject()) {
                             while (object.hasNextKey()) {
                                 try (final var key = object.nextKey()) {
-                                    if (key.getName().equals("listing_id")) {
-                                        listingId = key.asInt();
+                                    if (key.getName().equals("exchange_id")) {
+                                        exchangeId = key.asInt();
+                                    } else if (key.getName().equals("security_id")) {
+                                        securityId = key.asInt();
                                     } else if (key.getName().equals("exchange_security_id")) {
                                         exchangeSecurityId = key.asString().toString();
                                     } else if (key.getName().equals("exchange_security_symbol")) {
@@ -148,11 +145,11 @@ public class SecurityMaster {
                             }
                         }
                     }
-                    this.listingMap.get(exchangeId).put(securityId, new Listing(listingId, exchangeId, securityId, exchangeSecurityId, exchangeSecuritySymbol));
+                    this.listingMap.put(listingId, new Listing(listingId, exchangeId, securityId, exchangeSecurityId, exchangeSecuritySymbol));
                 }
             }
         }
-        return this.listingMap.get(exchangeId).get(securityId);
+        return this.listingMap.get(listingId);
     }
 
     private int addParameters(final MutableString string, final String paramName, final int value) {

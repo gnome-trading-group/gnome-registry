@@ -104,17 +104,17 @@ class SecurityMasterTest {
 
     private static Stream<Arguments> testGetListingArguments() {
         return Stream.of(
-                Arguments.of(1, 1, "[]", null),
-                Arguments.of(12, 34, """
-                        [{"listing_id": 12399, "exchange_security_id": "SecId", "exchange_security_symbol": "Binance"}]""", new Listing(12399, 12, 34, "SecId", "Binance"))
+                Arguments.of(1, "[]", null),
+                Arguments.of(12, """
+                        [{"listing_id": 12, "exchange_id": 12399, "security_id": 34, "exchange_security_id": "SecId", "exchange_security_symbol": "Binance"}]""", new Listing(12, 12399, 34, "SecId", "Binance"))
         );
     }
 
     @ParameterizedTest
     @MethodSource("testGetListingArguments")
-    void testGetListing(int exchangeId, int securityId, String jsonResponse, Listing expected) {
-        when(registryConnection.get(new ViewString("/listings?exchangeId=" + exchangeId + "&securityId=" + securityId))).thenReturn(ByteBuffer.wrap(jsonResponse.getBytes()));
-        Listing result = securityMaster.getListing(exchangeId, securityId);
+    void testGetListing(int listingId, String jsonResponse, Listing expected) {
+        when(registryConnection.get(new ViewString("/listings?listingId=" + listingId))).thenReturn(ByteBuffer.wrap(jsonResponse.getBytes()));
+        Listing result = securityMaster.getListing(listingId);
         assertEquals(expected, result);
         verify(registryConnection, times(1)).get(any());
     }
@@ -122,16 +122,16 @@ class SecurityMasterTest {
     @Test
     void testStoresListing() {
         final String listingString = """
-                [{"listing_id": 1, "exchange_security_id": "SecId", "exchange_security_symbol": "Binance"}]
+                [{"listing_id": 1, "exchange_id": 99, "security_id": 101, "exchange_security_id": "SecId", "exchange_security_symbol": "Binance"}]
                 """;
 
-        when(registryConnection.get(new ViewString("/listings?exchangeId=99&securityId=101"))).thenReturn(ByteBuffer.wrap(listingString.getBytes()));
+        when(registryConnection.get(new ViewString("/listings?listingId=1"))).thenReturn(ByteBuffer.wrap(listingString.getBytes()));
 
         final Listing expected = new Listing(1, 99, 101, "SecId", "Binance");
-        Listing result = securityMaster.getListing(99, 101);
+        Listing result = securityMaster.getListing(1);
         assertEquals(expected, result);
 
-        result = securityMaster.getListing(99, 101);
+        result = securityMaster.getListing(1);
         assertEquals(expected, result);
 
         verify(registryConnection, times(1)).get(any());
