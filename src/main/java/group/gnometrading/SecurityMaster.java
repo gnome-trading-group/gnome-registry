@@ -17,9 +17,9 @@ import java.nio.ByteBuffer;
  */
 public class SecurityMaster {
 
-    private static final String SECURITY_ENDPOINT = "/securities?";
-    private static final String EXCHANGE_ENDPOINT = "/exchanges?";
-    private static final String LISTING_ENDPOINT = "/listings?";
+    private static final String SECURITY_ENDPOINT = "/prod/securities?";
+    private static final String EXCHANGE_ENDPOINT = "/prod/exchanges?";
+    private static final String LISTING_ENDPOINT = "/prod/listings?";
 
     private final IntMap<Security> securityMap;
     private final IntMap<Exchange> exchangeMap;

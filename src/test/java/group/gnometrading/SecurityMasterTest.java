@@ -41,7 +41,7 @@ class SecurityMasterTest {
     @ParameterizedTest
     @MethodSource("testGetSecurityArguments")
     void testGetSecurity(int securityId, String jsonResponse, Security expected) {
-        when(registryConnection.get(new ViewString("/securities?securityId=" + securityId))).thenReturn(ByteBuffer.wrap(jsonResponse.getBytes()));
+        when(registryConnection.get(new ViewString("/prod/securities?securityId=" + securityId))).thenReturn(ByteBuffer.wrap(jsonResponse.getBytes()));
         Security result = securityMaster.getSecurity(securityId);
         assertEquals(expected, result);
         verify(registryConnection, times(1)).get(any());
@@ -53,7 +53,7 @@ class SecurityMasterTest {
                 [{"symbol": "BTC", "type": 0, "random": 5}]
                 """;
 
-        when(registryConnection.get(new ViewString("/securities?securityId=1"))).thenReturn(ByteBuffer.wrap(securityString.getBytes()));
+        when(registryConnection.get(new ViewString("/prod/securities?securityId=1"))).thenReturn(ByteBuffer.wrap(securityString.getBytes()));
 
         final Security expected = new Security(1, "BTC", 0);
         Security result = securityMaster.getSecurity(1);
@@ -78,7 +78,7 @@ class SecurityMasterTest {
     @ParameterizedTest
     @MethodSource("testGetExchangeArguments")
     void testGetExchange(int exchangeId, String jsonResponse, Exchange expected) {
-        when(registryConnection.get(new ViewString("/exchanges?exchangeId=" + exchangeId))).thenReturn(ByteBuffer.wrap(jsonResponse.getBytes()));
+        when(registryConnection.get(new ViewString("/prod/exchanges?exchangeId=" + exchangeId))).thenReturn(ByteBuffer.wrap(jsonResponse.getBytes()));
         Exchange result = securityMaster.getExchange(exchangeId);
         assertEquals(expected, result);
         verify(registryConnection, times(1)).get(any());
@@ -90,7 +90,7 @@ class SecurityMasterTest {
                 [{"exchange_name": "Binance"}]
                 """;
 
-        when(registryConnection.get(new ViewString("/exchanges?exchangeId=99"))).thenReturn(ByteBuffer.wrap(exchangeString.getBytes()));
+        when(registryConnection.get(new ViewString("/prod/exchanges?exchangeId=99"))).thenReturn(ByteBuffer.wrap(exchangeString.getBytes()));
 
         final Exchange expected = new Exchange(99, "Binance");
         Exchange result = securityMaster.getExchange(99);
@@ -113,7 +113,7 @@ class SecurityMasterTest {
     @ParameterizedTest
     @MethodSource("testGetListingArguments")
     void testGetListing(int listingId, String jsonResponse, Listing expected) {
-        when(registryConnection.get(new ViewString("/listings?listingId=" + listingId))).thenReturn(ByteBuffer.wrap(jsonResponse.getBytes()));
+        when(registryConnection.get(new ViewString("/prod/listings?listingId=" + listingId))).thenReturn(ByteBuffer.wrap(jsonResponse.getBytes()));
         Listing result = securityMaster.getListing(listingId);
         assertEquals(expected, result);
         verify(registryConnection, times(1)).get(any());
@@ -125,7 +125,7 @@ class SecurityMasterTest {
                 [{"listing_id": 1, "exchange_id": 99, "security_id": 101, "exchange_security_id": "SecId", "exchange_security_symbol": "Binance"}]
                 """;
 
-        when(registryConnection.get(new ViewString("/listings?listingId=1"))).thenReturn(ByteBuffer.wrap(listingString.getBytes()));
+        when(registryConnection.get(new ViewString("/prod/listings?listingId=1"))).thenReturn(ByteBuffer.wrap(listingString.getBytes()));
 
         final Listing expected = new Listing(1, 99, 101, "SecId", "Binance");
         Listing result = securityMaster.getListing(1);

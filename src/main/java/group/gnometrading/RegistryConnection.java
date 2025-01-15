@@ -30,7 +30,7 @@ public class RegistryConnection {
             final HTTPResponse response = httpClient.get(HTTPProtocol.HTTPS, this.host, path, API_KEY_HEADER, this.key);
 
             if (!response.isSuccess()) {
-                throw new RuntimeException("Unable to request the security master");
+                throw new RuntimeException("Unable to request the security master. Status code: " + response.getStatusCode());
             }
             return response.getBody();
         } catch (IOException e) {
