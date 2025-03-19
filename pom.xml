@@ -76,13 +76,13 @@
         <dependency>
             <groupId>group.gnometrading</groupId>
             <artifactId>gnome-networking</artifactId>
-            <version>LATEST</version>
+            <version>1.0.43</version>
             <classifier>${os.classifier}</classifier>
         </dependency>
         <dependency>
             <groupId>group.gnometrading</groupId>
             <artifactId>gnome-core</artifactId>
-            <version>LATEST</version>
+            <version>1.0.27</version>
         </dependency>
         <dependency>
             <groupId>org.junit.jupiter</groupId>
