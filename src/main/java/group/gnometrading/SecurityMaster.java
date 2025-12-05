@@ -1,8 +1,6 @@
 package group.gnometrading;
 
 import group.gnometrading.codecs.json.JSONDecoder;
-import group.gnometrading.collections.IntHashMap;
-import group.gnometrading.collections.IntMap;
 import group.gnometrading.sm.Exchange;
 import group.gnometrading.sm.Listing;
 import group.gnometrading.sm.Security;
@@ -13,7 +11,7 @@ import java.nio.ByteBuffer;
 
 /**
  * SecurityMaster is an abstraction for the database security master layer.
- * These class will produce garbage when fetching from the API. It is *not* thread safe.
+ * These class will produce garbage when fetching from the API.
  */
 public class SecurityMaster {
 
@@ -21,9 +19,6 @@ public class SecurityMaster {
     private static final String EXCHANGE_ENDPOINT = "/api/exchanges?";
     private static final String LISTING_ENDPOINT = "/api/listings?";
 
-    private final IntMap<Security> securityMap;
-    private final IntMap<Exchange> exchangeMap;
-    private final IntMap<Listing> listingMap;
     private final JSONDecoder jsonDecoder;
     private final RegistryConnection registryConnection;
 
@@ -33,9 +28,6 @@ public class SecurityMaster {
 
     public SecurityMaster(final RegistryConnection registryConnection) {
         this.registryConnection = registryConnection;
-        this.securityMap = new IntHashMap<>();
-        this.exchangeMap = new IntHashMap<>();
-        this.listingMap = new IntHashMap<>();
         this.jsonDecoder = new JSONDecoder();
 
         this.securityPath = new ExpandingMutableString(SECURITY_ENDPOINT);
@@ -44,112 +36,115 @@ public class SecurityMaster {
     }
 
     public Security getSecurity(final int securityId) {
-        if (!this.securityMap.containsKey(securityId)) {
-            final int originalLength = addParameters(this.securityPath, "securityId", securityId);
-            final ByteBuffer response = this.registryConnection.get(this.securityPath);
-            this.securityPath.setLength(originalLength);
+        final int originalLength = addParameters(this.securityPath, "securityId", securityId);
+        final ByteBuffer response = this.registryConnection.get(this.securityPath);
+        this.securityPath.setLength(originalLength);
 
-            try (final var node = this.jsonDecoder.wrap(response)) {
-                try (final var array = node.asArray()) {
-                    if (!array.hasNextItem()) {
-                        return null;
-                    }
+        try (final var node = this.jsonDecoder.wrap(response)) {
+            try (final var array = node.asArray()) {
+                if (!array.hasNextItem()) {
+                    return null;
+                }
 
-                    int type = -1;
-                    String symbol = null;
+                int type = -1;
+                String symbol = null;
 
-                    try (final var item = array.nextItem()) {
-                        try (final var object = item.asObject()) {
-                            while (object.hasNextKey()) {
-                                try (final var key = object.nextKey()) {
-                                    if (key.getName().equals("symbol")) {
-                                        symbol = key.asString().toString();
-                                    } else if (key.getName().equals("type")) {
-                                        type = key.asInt();
-                                    }
+                try (final var item = array.nextItem()) {
+                    try (final var object = item.asObject()) {
+                        while (object.hasNextKey()) {
+                            try (final var key = object.nextKey()) {
+                                if (key.getName().equals("symbol")) {
+                                    symbol = key.asString().toString();
+                                } else if (key.getName().equals("type")) {
+                                    type = key.asInt();
                                 }
                             }
                         }
                     }
-                    this.securityMap.put(securityId, new Security(securityId, symbol, type));
                 }
+                return new Security(securityId, symbol, type);
             }
         }
-
-        return this.securityMap.get(securityId);
     }
 
     public Exchange getExchange(final int exchangeId) {
-        if (!this.exchangeMap.containsKey(exchangeId)) {
-            final int originalLength = addParameters(this.exchangePath, "exchangeId", exchangeId);
-            final ByteBuffer response = this.registryConnection.get(this.exchangePath);
-            this.exchangePath.setLength(originalLength);
+        final int originalLength = addParameters(this.exchangePath, "exchangeId", exchangeId);
+        final ByteBuffer response = this.registryConnection.get(this.exchangePath);
+        this.exchangePath.setLength(originalLength);
 
-            try (final var node = this.jsonDecoder.wrap(response)) {
-                try (final var array = node.asArray()) {
-                    if (!array.hasNextItem()) {
-                        return null;
-                    }
+        try (final var node = this.jsonDecoder.wrap(response)) {
+            try (final var array = node.asArray()) {
+                if (!array.hasNextItem()) {
+                    return null;
+                }
 
-                    String exchangeName = null;
+                String exchangeName = null;
 
-                    try (final var item = array.nextItem()) {
-                        try (final var object = item.asObject()) {
-                            while (object.hasNextKey()) {
-                                try (final var key = object.nextKey()) {
-                                    if (key.getName().equals("exchange_name")) {
-                                        exchangeName = key.asString().toString();
-                                    }
+                try (final var item = array.nextItem()) {
+                    try (final var object = item.asObject()) {
+                        while (object.hasNextKey()) {
+                            try (final var key = object.nextKey()) {
+                                if (key.getName().equals("exchange_name")) {
+                                    exchangeName = key.asString().toString();
                                 }
                             }
                         }
                     }
-                    this.exchangeMap.put(exchangeId, new Exchange(exchangeId, exchangeName));
                 }
+                return new Exchange(exchangeId, exchangeName);
             }
         }
-        return this.exchangeMap.get(exchangeId);
+    }
+
+    public Listing getListing(final int exchangeId, final int securityId) {
+        final int originalLength = addParameters(this.listingPath, "exchangeId", exchangeId, "securityId", securityId);
+        final ByteBuffer response = this.registryConnection.get(this.listingPath);
+        this.listingPath.setLength(originalLength);
+        return parseListing(response);
     }
 
     public Listing getListing(final int listingId) {
-        if (!this.listingMap.containsKey(listingId)) {
-            final int originalLength = addParameters(this.listingPath, "listingId", listingId);
-            final ByteBuffer response = this.registryConnection.get(this.listingPath);
-            this.listingPath.setLength(originalLength);
+        final int originalLength = addParameters(this.listingPath, "listingId", listingId);
+        final ByteBuffer response = this.registryConnection.get(this.listingPath);
+        this.listingPath.setLength(originalLength);
+        return parseListing(response);
+    }
 
-            try (final var node = this.jsonDecoder.wrap(response)) {
-                try (final var array = node.asArray()) {
-                    if (!array.hasNextItem()) {
-                        return null;
-                    }
+    private Listing parseListing(final ByteBuffer response) {
+        try (final var node = this.jsonDecoder.wrap(response)) {
+            try (final var array = node.asArray()) {
+                if (!array.hasNextItem()) {
+                    return null;
+                }
 
-                    int exchangeId = -1;
-                    int securityId = -1;
-                    String exchangeSecurityId = null;
-                    String exchangeSecuritySymbol = null;
+                int listingId = -1;
+                int exchangeId = -1;
+                int securityId = -1;
+                String exchangeSecurityId = null;
+                String exchangeSecuritySymbol = null;
 
-                    try (final var item = array.nextItem()) {
-                        try (final var object = item.asObject()) {
-                            while (object.hasNextKey()) {
-                                try (final var key = object.nextKey()) {
-                                    if (key.getName().equals("exchange_id")) {
-                                        exchangeId = key.asInt();
-                                    } else if (key.getName().equals("security_id")) {
-                                        securityId = key.asInt();
-                                    } else if (key.getName().equals("exchange_security_id")) {
-                                        exchangeSecurityId = key.asString().toString();
-                                    } else if (key.getName().equals("exchange_security_symbol")) {
-                                        exchangeSecuritySymbol = key.asString().toString();
-                                    }
+                try (final var item = array.nextItem()) {
+                    try (final var object = item.asObject()) {
+                        while (object.hasNextKey()) {
+                            try (final var key = object.nextKey()) {
+                                if (key.getName().equals("listing_id")) {
+                                    listingId = key.asInt();
+                                } else if (key.getName().equals("exchange_id")) {
+                                    exchangeId = key.asInt();
+                                } else if (key.getName().equals("security_id")) {
+                                    securityId = key.asInt();
+                                } else if (key.getName().equals("exchange_security_id")) {
+                                    exchangeSecurityId = key.asString().toString();
+                                } else if (key.getName().equals("exchange_security_symbol")) {
+                                    exchangeSecuritySymbol = key.asString().toString();
                                 }
                             }
                         }
                     }
-                    this.listingMap.put(listingId, new Listing(listingId, exchangeId, securityId, exchangeSecurityId, exchangeSecuritySymbol));
                 }
+                return new Listing(listingId, exchangeId, securityId, exchangeSecurityId, exchangeSecuritySymbol);
             }
         }
-        return this.listingMap.get(listingId);
     }
 
     private int addParameters(final MutableString string, final String paramName, final int value) {
@@ -157,6 +152,13 @@ public class SecurityMaster {
         string.appendString(paramName);
         string.append((byte) '=');
         string.appendNaturalIntAscii(value);
+        return originalLength;
+    }
+
+    private int addParameters(final MutableString string, final String paramName1, final int value1, final String paramName2, final int value2) {
+        int originalLength = addParameters(string, paramName1, value1);
+        string.append((byte) '&');
+        addParameters(string, paramName2, value2);
         return originalLength;
     }
 }

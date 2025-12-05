@@ -4,7 +4,6 @@ import group.gnometrading.sm.Exchange;
 import group.gnometrading.sm.Listing;
 import group.gnometrading.sm.Security;
 import group.gnometrading.strings.ViewString;
-import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.Arguments;
@@ -47,24 +46,6 @@ class SecurityMasterTest {
         verify(registryConnection, times(1)).get(any());
     }
 
-    @Test
-    void testStoresSecurity() {
-        final String securityString = """
-                [{"symbol": "BTC", "type": 0, "random": 5}]
-                """;
-
-        when(registryConnection.get(new ViewString("/api/securities?securityId=1"))).thenReturn(ByteBuffer.wrap(securityString.getBytes()));
-
-        final Security expected = new Security(1, "BTC", 0);
-        Security result = securityMaster.getSecurity(1);
-        assertEquals(expected, result);
-
-        result = securityMaster.getSecurity(1);
-        assertEquals(expected, result);
-
-        verify(registryConnection, times(1)).get(any());
-    }
-
     private static Stream<Arguments> testGetExchangeArguments() {
         return Stream.of(
                 Arguments.of(99, "[]", null),
@@ -81,24 +62,6 @@ class SecurityMasterTest {
         when(registryConnection.get(new ViewString("/api/exchanges?exchangeId=" + exchangeId))).thenReturn(ByteBuffer.wrap(jsonResponse.getBytes()));
         Exchange result = securityMaster.getExchange(exchangeId);
         assertEquals(expected, result);
-        verify(registryConnection, times(1)).get(any());
-    }
-
-    @Test
-    void testStoresExchange() {
-        final String exchangeString = """
-                [{"exchange_name": "Binance"}]
-                """;
-
-        when(registryConnection.get(new ViewString("/api/exchanges?exchangeId=99"))).thenReturn(ByteBuffer.wrap(exchangeString.getBytes()));
-
-        final Exchange expected = new Exchange(99, "Binance");
-        Exchange result = securityMaster.getExchange(99);
-        assertEquals(expected, result);
-
-        result = securityMaster.getExchange(99);
-        assertEquals(expected, result);
-
         verify(registryConnection, times(1)).get(any());
     }
 
@@ -119,21 +82,20 @@ class SecurityMasterTest {
         verify(registryConnection, times(1)).get(any());
     }
 
-    @Test
-    void testStoresListing() {
-        final String listingString = """
-                [{"listing_id": 1, "exchange_id": 99, "security_id": 101, "exchange_security_id": "SecId", "exchange_security_symbol": "Binance"}]
-                """;
+    private static Stream<Arguments> testGetListingByExchangeAndSecurityArguments() {
+        return Stream.of(
+                Arguments.of(1, 1, "[]", null),
+                Arguments.of(12399, 34, """
+                        [{"listing_id": 12, "exchange_id": 12399, "security_id": 34, "exchange_security_id": "SecId", "exchange_security_symbol": "Binance"}]""", new Listing(12, 12399, 34, "SecId", "Binance"))
+        );
+    }
 
-        when(registryConnection.get(new ViewString("/api/listings?listingId=1"))).thenReturn(ByteBuffer.wrap(listingString.getBytes()));
-
-        final Listing expected = new Listing(1, 99, 101, "SecId", "Binance");
-        Listing result = securityMaster.getListing(1);
+    @ParameterizedTest
+    @MethodSource("testGetListingByExchangeAndSecurityArguments")
+    void testGetListingByExchangeAndSecurity(int exchangeId, int securityId, String jsonResponse, Listing expected) {
+        when(registryConnection.get(new ViewString("/api/listings?exchangeId=" + exchangeId + "&securityId=" + securityId))).thenReturn(ByteBuffer.wrap(jsonResponse.getBytes()));
+        Listing result = securityMaster.getListing(exchangeId, securityId);
         assertEquals(expected, result);
-
-        result = securityMaster.getListing(1);
-        assertEquals(expected, result);
-
         verify(registryConnection, times(1)).get(any());
     }
 }
