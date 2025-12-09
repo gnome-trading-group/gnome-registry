@@ -1,6 +1,7 @@
 package group.gnometrading;
 
 import group.gnometrading.codecs.json.JSONDecoder;
+import group.gnometrading.schemas.SchemaType;
 import group.gnometrading.sm.Exchange;
 import group.gnometrading.sm.Listing;
 import group.gnometrading.sm.Security;
@@ -122,6 +123,7 @@ public class SecurityMaster {
                 int securityId = -1;
                 String exchangeSecurityId = null;
                 String exchangeSecuritySymbol = null;
+                SchemaType schemaType = null;
 
                 try (final var item = array.nextItem()) {
                     try (final var object = item.asObject()) {
@@ -137,12 +139,14 @@ public class SecurityMaster {
                                     exchangeSecurityId = key.asString().toString();
                                 } else if (key.getName().equals("exchange_security_symbol")) {
                                     exchangeSecuritySymbol = key.asString().toString();
+                                } else if (key.getName().equals("schema_type")) {
+                                    schemaType = SchemaType.findById(key.asString().toString());
                                 }
                             }
                         }
                     }
                 }
-                return new Listing(listingId, exchangeId, securityId, exchangeSecurityId, exchangeSecuritySymbol);
+                return new Listing(listingId, exchangeId, securityId, exchangeSecurityId, exchangeSecuritySymbol, schemaType);
             }
         }
     }
