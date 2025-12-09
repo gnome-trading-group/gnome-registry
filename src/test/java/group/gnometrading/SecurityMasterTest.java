@@ -1,5 +1,6 @@
 package group.gnometrading;
 
+import group.gnometrading.schemas.SchemaType;
 import group.gnometrading.sm.Exchange;
 import group.gnometrading.sm.Listing;
 import group.gnometrading.sm.Security;
@@ -69,7 +70,7 @@ class SecurityMasterTest {
         return Stream.of(
                 Arguments.of(1, "[]", null),
                 Arguments.of(12, """
-                        [{"listing_id": 12, "exchange_id": 12399, "security_id": 34, "exchange_security_id": "SecId", "exchange_security_symbol": "Binance"}]""", new Listing(12, 12399, 34, "SecId", "Binance"))
+                        [{"listing_id": 12, "exchange_id": 12399, "security_id": 34, "exchange_security_id": "SecId", "exchange_security_symbol": "Binance", "schema_type": "mbp-1"}]""", new Listing(12, 12399, 34, "SecId", "Binance", SchemaType.MBP_1))
         );
     }
 
@@ -86,7 +87,7 @@ class SecurityMasterTest {
         return Stream.of(
                 Arguments.of(1, 1, "[]", null),
                 Arguments.of(12399, 34, """
-                        [{"listing_id": 12, "exchange_id": 12399, "security_id": 34, "exchange_security_id": "SecId", "exchange_security_symbol": "Binance"}]""", new Listing(12, 12399, 34, "SecId", "Binance"))
+                        [{"listing_id": 12, "exchange_id": 12399, "security_id": 34, "exchange_security_id": "SecId", "exchange_security_symbol": "Binance", "schema_type": "mbo"}]""", new Listing(12, 12399, 34, "SecId", "Binance", SchemaType.MBO))
         );
     }
 
