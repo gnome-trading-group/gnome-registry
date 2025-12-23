@@ -51,9 +51,9 @@ class SecurityMasterTest {
         return Stream.of(
                 Arguments.of(99, "[]", null),
                 Arguments.of(12399, """
-                        [{"exchange_id": 12399, "exchange_name": "BTC"}]""", new Exchange(12399, "BTC")),
+                        [{"exchange_id": 12399, "exchange_name": "BTC", "region": "us-east-2", "schema_type": "mbp-1"}]""", new Exchange(12399, "BTC", "us-east-2", SchemaType.MBP_1)),
                 Arguments.of(12356, """
-                        [{"exchange_id": 12356}]""", new Exchange(12356, null))
+                        [{"exchange_id": 12356, "region": "us-east-1", "schema_type": "mbp-1"}]""", new Exchange(12356, null, "us-east-1", SchemaType.MBP_1))
         );
     }
 
@@ -70,7 +70,7 @@ class SecurityMasterTest {
         return Stream.of(
                 Arguments.of(1, "[]", null),
                 Arguments.of(12, """
-                        [{"listing_id": 12, "exchange_id": 12399, "security_id": 34, "exchange_security_id": "SecId", "exchange_security_symbol": "Binance", "schema_type": "mbp-1"}]""", new Listing(12, 12399, 34, "SecId", "Binance", SchemaType.MBP_1))
+                        [{"listing_id": 12, "exchange_id": 12399, "security_id": 34, "exchange_security_id": "SecId", "exchange_security_symbol": "Binance"}]""", new Listing(12, 12399, 34, "SecId", "Binance"))
         );
     }
 
@@ -87,7 +87,7 @@ class SecurityMasterTest {
         return Stream.of(
                 Arguments.of(1, 1, "[]", null),
                 Arguments.of(12399, 34, """
-                        [{"listing_id": 12, "exchange_id": 12399, "security_id": 34, "exchange_security_id": "SecId", "exchange_security_symbol": "Binance", "schema_type": "mbo"}]""", new Listing(12, 12399, 34, "SecId", "Binance", SchemaType.MBO))
+                        [{"listing_id": 12, "exchange_id": 12399, "security_id": 34, "exchange_security_id": "SecId", "exchange_security_symbol": "Binance"}]""", new Listing(12, 12399, 34, "SecId", "Binance"))
         );
     }
 

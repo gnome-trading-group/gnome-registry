@@ -80,6 +80,8 @@ public class SecurityMaster {
                 }
 
                 String exchangeName = null;
+                String region = null;
+                SchemaType schemaType = null;
 
                 try (final var item = array.nextItem()) {
                     try (final var object = item.asObject()) {
@@ -87,12 +89,16 @@ public class SecurityMaster {
                             try (final var key = object.nextKey()) {
                                 if (key.getName().equals("exchange_name")) {
                                     exchangeName = key.asString().toString();
+                                } else if (key.getName().equals("region")) {
+                                    region = key.asString().toString();
+                                } else if (key.getName().equals("schema_type")) {
+                                    schemaType = SchemaType.findById(key.asString().toString());
                                 }
                             }
                         }
                     }
                 }
-                return new Exchange(exchangeId, exchangeName);
+                return new Exchange(exchangeId, exchangeName, region, schemaType);
             }
         }
     }
@@ -123,7 +129,6 @@ public class SecurityMaster {
                 int securityId = -1;
                 String exchangeSecurityId = null;
                 String exchangeSecuritySymbol = null;
-                SchemaType schemaType = null;
 
                 try (final var item = array.nextItem()) {
                     try (final var object = item.asObject()) {
@@ -139,14 +144,12 @@ public class SecurityMaster {
                                     exchangeSecurityId = key.asString().toString();
                                 } else if (key.getName().equals("exchange_security_symbol")) {
                                     exchangeSecuritySymbol = key.asString().toString();
-                                } else if (key.getName().equals("schema_type")) {
-                                    schemaType = SchemaType.findById(key.asString().toString());
                                 }
                             }
                         }
                     }
                 }
-                return new Listing(listingId, exchangeId, securityId, exchangeSecurityId, exchangeSecuritySymbol, schemaType);
+                return new Listing(listingId, exchangeId, securityId, exchangeSecurityId, exchangeSecuritySymbol);
             }
         }
     }
