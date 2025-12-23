@@ -149,7 +149,9 @@ public class SecurityMaster {
                         }
                     }
                 }
-                return new Listing(listingId, exchangeId, securityId, exchangeSecurityId, exchangeSecuritySymbol);
+                final Exchange exchange = getExchange(exchangeId);
+                final Security security = getSecurity(securityId);
+                return new Listing(listingId, exchange, security, exchangeSecurityId, exchangeSecuritySymbol);
             }
         }
     }

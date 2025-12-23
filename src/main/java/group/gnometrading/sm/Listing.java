@@ -2,8 +2,8 @@ package group.gnometrading.sm;
 
 public record Listing(
         int listingId,
-        int exchangeId,
-        int securityId,
+        Exchange exchange,
+        Security security,
         String exchangeSecurityId,
         String exchangeSecuritySymbol
 ) {}
