@@ -5,6 +5,7 @@ import group.gnometrading.sm.Exchange;
 import group.gnometrading.sm.Listing;
 import group.gnometrading.sm.Security;
 import group.gnometrading.strings.ViewString;
+import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.Arguments;
@@ -137,5 +138,71 @@ class SecurityMasterTest {
         Listing result = securityMaster.getListing(exchangeId, securityId);
         assertEquals(expected, result);
         verify(registryConnection, times(calls)).get(any());
+    }
+
+    @Test
+    void testGetSecurityCaching() {
+        String jsonResponse = """
+                [{"security_id": 123, "type": 0, "symbol": "BTC"}]""";
+        when(registryConnection.get(new ViewString("/api/securities?securityId=123"))).thenReturn(ByteBuffer.wrap(jsonResponse.getBytes()));
+
+        Security first = securityMaster.getSecurity(123);
+        Security second = securityMaster.getSecurity(123);
+
+        assertSame(first, second);
+        verify(registryConnection, times(1)).get(any());
+    }
+
+    @Test
+    void testGetExchangeCaching() {
+        String jsonResponse = """
+                [{"exchange_id": 456, "exchange_name": "NYSE", "region": "us-east-1", "schema_type": "mbp-1"}]""";
+        when(registryConnection.get(new ViewString("/api/exchanges?exchangeId=456"))).thenReturn(ByteBuffer.wrap(jsonResponse.getBytes()));
+
+        Exchange first = securityMaster.getExchange(456);
+        Exchange second = securityMaster.getExchange(456);
+
+        assertSame(first, second);
+        verify(registryConnection, times(1)).get(any());
+    }
+
+    @Test
+    void testGetListingByIdCaching() {
+        String listingResponse = """
+                [{"listing_id": 789, "exchange_id": 456, "security_id": 123, "exchange_security_id": "SecId", "exchange_security_symbol": "SYM"}]""";
+        String exchangeResponse = """
+                [{"exchange_id": 456, "exchange_name": "NYSE", "region": "us-east-1", "schema_type": "mbp-1"}]""";
+        String securityResponse = """
+                [{"security_id": 123, "type": 0, "symbol": "BTC"}]""";
+
+        when(registryConnection.get(new ViewString("/api/listings?listingId=789"))).thenReturn(ByteBuffer.wrap(listingResponse.getBytes()));
+        when(registryConnection.get(new ViewString("/api/exchanges?exchangeId=456"))).thenReturn(ByteBuffer.wrap(exchangeResponse.getBytes()));
+        when(registryConnection.get(new ViewString("/api/securities?securityId=123"))).thenReturn(ByteBuffer.wrap(securityResponse.getBytes()));
+
+        Listing first = securityMaster.getListing(789);
+        Listing second = securityMaster.getListing(789);
+
+        assertSame(first, second);
+        verify(registryConnection, times(3)).get(any()); // listing + exchange + security, only once each
+    }
+
+    @Test
+    void testGetListingByExchangeAndSecurityCaching() {
+        String listingResponse = """
+                [{"listing_id": 789, "exchange_id": 456, "security_id": 123, "exchange_security_id": "SecId", "exchange_security_symbol": "SYM"}]""";
+        String exchangeResponse = """
+                [{"exchange_id": 456, "exchange_name": "NYSE", "region": "us-east-1", "schema_type": "mbp-1"}]""";
+        String securityResponse = """
+                [{"security_id": 123, "type": 0, "symbol": "BTC"}]""";
+
+        when(registryConnection.get(new ViewString("/api/listings?exchangeId=456&securityId=123"))).thenReturn(ByteBuffer.wrap(listingResponse.getBytes()));
+        when(registryConnection.get(new ViewString("/api/exchanges?exchangeId=456"))).thenReturn(ByteBuffer.wrap(exchangeResponse.getBytes()));
+        when(registryConnection.get(new ViewString("/api/securities?securityId=123"))).thenReturn(ByteBuffer.wrap(securityResponse.getBytes()));
+
+        Listing first = securityMaster.getListing(456, 123);
+        Listing second = securityMaster.getListing(456, 123);
+
+        assertSame(first, second);
+        verify(registryConnection, times(3)).get(any()); // listing + exchange + security, only once each
     }
 }

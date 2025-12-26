@@ -1,6 +1,9 @@
 package group.gnometrading;
 
 import group.gnometrading.codecs.json.JSONDecoder;
+import group.gnometrading.collections.GnomeMap;
+import group.gnometrading.collections.IntHashMap;
+import group.gnometrading.collections.IntMap;
 import group.gnometrading.schemas.SchemaType;
 import group.gnometrading.sm.Exchange;
 import group.gnometrading.sm.Listing;
@@ -27,6 +30,10 @@ public class SecurityMaster {
     private final MutableString exchangePath;
     private final MutableString listingPath;
 
+    private final IntMap<Security> securityCache;
+    private final IntMap<Exchange> exchangeCache;
+    private final IntMap<Listing> listingCache;
+
     public SecurityMaster(final RegistryConnection registryConnection) {
         this.registryConnection = registryConnection;
         this.jsonDecoder = new JSONDecoder();
@@ -34,9 +41,17 @@ public class SecurityMaster {
         this.securityPath = new ExpandingMutableString(SECURITY_ENDPOINT);
         this.exchangePath = new ExpandingMutableString(EXCHANGE_ENDPOINT);
         this.listingPath = new ExpandingMutableString(LISTING_ENDPOINT);
+
+        this.securityCache = new IntHashMap<>();
+        this.exchangeCache = new IntHashMap<>();
+        this.listingCache = new IntHashMap<>();
     }
 
     public Security getSecurity(final int securityId) {
+        if (this.securityCache.containsKey(securityId)) {
+            return this.securityCache.get(securityId);
+        }
+
         final int originalLength = addParameters(this.securityPath, "securityId", securityId);
         final ByteBuffer response = this.registryConnection.get(this.securityPath);
         this.securityPath.setLength(originalLength);
@@ -63,12 +78,17 @@ public class SecurityMaster {
                         }
                     }
                 }
-                return new Security(securityId, symbol, type);
+                this.securityCache.put(securityId, new Security(securityId, symbol, type));
+                return this.securityCache.get(securityId);
             }
         }
     }
 
     public Exchange getExchange(final int exchangeId) {
+        if (this.exchangeCache.containsKey(exchangeId)) {
+            return this.exchangeCache.get(exchangeId);
+        }
+
         final int originalLength = addParameters(this.exchangePath, "exchangeId", exchangeId);
         final ByteBuffer response = this.registryConnection.get(this.exchangePath);
         this.exchangePath.setLength(originalLength);
@@ -98,23 +118,42 @@ public class SecurityMaster {
                         }
                     }
                 }
-                return new Exchange(exchangeId, exchangeName, region, schemaType);
+                this.exchangeCache.put(exchangeId, new Exchange(exchangeId, exchangeName, region, schemaType));
+                return this.exchangeCache.get(exchangeId);
             }
         }
     }
 
     public Listing getListing(final int exchangeId, final int securityId) {
+        for (int listingId : this.listingCache.keys()) {
+            final Listing listing = this.listingCache.get(listingId);
+            if (listing.exchange().exchangeId() == exchangeId && listing.security().securityId() == securityId) {
+                return listing;
+            }
+        }
+
         final int originalLength = addParameters(this.listingPath, "exchangeId", exchangeId, "securityId", securityId);
         final ByteBuffer response = this.registryConnection.get(this.listingPath);
         this.listingPath.setLength(originalLength);
-        return parseListing(response);
+
+        final Listing listing = parseListing(response);
+        if (listing != null) {
+            this.listingCache.put(listing.listingId(), listing);
+        }
+        return listing;
     }
 
     public Listing getListing(final int listingId) {
+        if (this.listingCache.containsKey(listingId)) {
+            return this.listingCache.get(listingId);
+        }
+
         final int originalLength = addParameters(this.listingPath, "listingId", listingId);
         final ByteBuffer response = this.registryConnection.get(this.listingPath);
         this.listingPath.setLength(originalLength);
-        return parseListing(response);
+
+        this.listingCache.put(listingId, parseListing(response));
+        return this.listingCache.get(listingId);
     }
 
     private Listing parseListing(final ByteBuffer response) {
