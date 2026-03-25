@@ -1,6 +1,6 @@
 package group.gnometrading;
 
-import group.gnometrading.codecs.json.JSONDecoder;
+import group.gnometrading.codecs.json.JsonDecoder;
 import group.gnometrading.collections.IntHashMap;
 import group.gnometrading.collections.IntMap;
 import group.gnometrading.schemas.SchemaType;
@@ -21,7 +21,7 @@ public final class SecurityMaster {
     private static final String EXCHANGE_ENDPOINT = "/api/exchanges?";
     private static final String LISTING_ENDPOINT = "/api/listings?";
 
-    private final JSONDecoder jsonDecoder;
+    private final JsonDecoder jsonDecoder;
     private final RegistryConnection registryConnection;
 
     private final MutableString securityPath;
@@ -34,7 +34,7 @@ public final class SecurityMaster {
 
     public SecurityMaster(final RegistryConnection registryConnection) {
         this.registryConnection = registryConnection;
-        this.jsonDecoder = new JSONDecoder();
+        this.jsonDecoder = new JsonDecoder();
 
         this.securityPath = new ExpandingMutableString(SECURITY_ENDPOINT);
         this.exchangePath = new ExpandingMutableString(EXCHANGE_ENDPOINT);
