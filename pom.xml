@@ -5,7 +5,7 @@
     <parent>
         <groupId>group.gnometrading</groupId>
         <artifactId>gnome-parent</artifactId>
-        <version>1.4.2</version>
+        <version>1.5.0</version>
     </parent>
 
     <artifactId>gnome-registry</artifactId>
@@ -40,14 +40,19 @@
     <dependencies>
         <dependency>
             <groupId>group.gnometrading</groupId>
+            <artifactId>gnome-core</artifactId>
+            <version>1.2.10</version>
+        </dependency>
+        <dependency>
+            <groupId>group.gnometrading</groupId>
             <artifactId>gnome-networking</artifactId>
-            <version>1.0.64</version>
+            <version>1.0.65</version>
             <classifier>${os.classifier}</classifier>
         </dependency>
         <dependency>
             <groupId>group.gnometrading</groupId>
             <artifactId>gnome-schemas</artifactId>
-            <version>1.1.1</version>
+            <version>1.1.2</version>
         </dependency>
         <dependency>
             <groupId>org.junit.jupiter</groupId>
