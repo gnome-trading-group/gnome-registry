@@ -1,7 +1,6 @@
 package group.gnometrading;
 
 import group.gnometrading.codecs.json.JSONDecoder;
-import group.gnometrading.collections.GnomeMap;
 import group.gnometrading.collections.IntHashMap;
 import group.gnometrading.collections.IntMap;
 import group.gnometrading.schemas.SchemaType;
@@ -10,14 +9,13 @@ import group.gnometrading.sm.Listing;
 import group.gnometrading.sm.Security;
 import group.gnometrading.strings.ExpandingMutableString;
 import group.gnometrading.strings.MutableString;
-
 import java.nio.ByteBuffer;
 
 /**
  * SecurityMaster is an abstraction for the database security master layer.
  * These class will produce garbage when fetching from the API.
  */
-public class SecurityMaster {
+public final class SecurityMaster {
 
     private static final String SECURITY_ENDPOINT = "/api/securities?";
     private static final String EXCHANGE_ENDPOINT = "/api/exchanges?";
@@ -47,6 +45,7 @@ public class SecurityMaster {
         this.listingCache = new IntHashMap<>();
     }
 
+    @SuppressWarnings("checkstyle:NestedTryDepth")
     public Security getSecurity(final int securityId) {
         if (this.securityCache.containsKey(securityId)) {
             return this.securityCache.get(securityId);
@@ -56,8 +55,8 @@ public class SecurityMaster {
         final ByteBuffer response = this.registryConnection.get(this.securityPath);
         this.securityPath.setLength(originalLength);
 
-        try (final var node = this.jsonDecoder.wrap(response)) {
-            try (final var array = node.asArray()) {
+        try (var node = this.jsonDecoder.wrap(response)) {
+            try (var array = node.asArray()) {
                 if (!array.hasNextItem()) {
                     return null;
                 }
@@ -65,10 +64,10 @@ public class SecurityMaster {
                 int type = -1;
                 String symbol = null;
 
-                try (final var item = array.nextItem()) {
-                    try (final var object = item.asObject()) {
+                try (var item = array.nextItem()) {
+                    try (var object = item.asObject()) {
                         while (object.hasNextKey()) {
-                            try (final var key = object.nextKey()) {
+                            try (var key = object.nextKey()) {
                                 if (key.getName().equals("symbol")) {
                                     symbol = key.asString().toString();
                                 } else if (key.getName().equals("type")) {
@@ -84,6 +83,7 @@ public class SecurityMaster {
         }
     }
 
+    @SuppressWarnings("checkstyle:NestedTryDepth")
     public Exchange getExchange(final int exchangeId) {
         if (this.exchangeCache.containsKey(exchangeId)) {
             return this.exchangeCache.get(exchangeId);
@@ -93,8 +93,8 @@ public class SecurityMaster {
         final ByteBuffer response = this.registryConnection.get(this.exchangePath);
         this.exchangePath.setLength(originalLength);
 
-        try (final var node = this.jsonDecoder.wrap(response)) {
-            try (final var array = node.asArray()) {
+        try (var node = this.jsonDecoder.wrap(response)) {
+            try (var array = node.asArray()) {
                 if (!array.hasNextItem()) {
                     return null;
                 }
@@ -103,16 +103,17 @@ public class SecurityMaster {
                 String region = null;
                 SchemaType schemaType = null;
 
-                try (final var item = array.nextItem()) {
-                    try (final var object = item.asObject()) {
+                try (var item = array.nextItem()) {
+                    try (var object = item.asObject()) {
                         while (object.hasNextKey()) {
-                            try (final var key = object.nextKey()) {
+                            try (var key = object.nextKey()) {
                                 if (key.getName().equals("exchange_name")) {
                                     exchangeName = key.asString().toString();
                                 } else if (key.getName().equals("region")) {
                                     region = key.asString().toString();
                                 } else if (key.getName().equals("schema_type")) {
-                                    schemaType = SchemaType.findById(key.asString().toString());
+                                    schemaType =
+                                            SchemaType.findById(key.asString().toString());
                                 }
                             }
                         }
@@ -127,7 +128,8 @@ public class SecurityMaster {
     public Listing getListing(final int exchangeId, final int securityId) {
         for (int listingId : this.listingCache.keys()) {
             final Listing listing = this.listingCache.get(listingId);
-            if (listing.exchange().exchangeId() == exchangeId && listing.security().securityId() == securityId) {
+            if (listing.exchange().exchangeId() == exchangeId
+                    && listing.security().securityId() == securityId) {
                 return listing;
             }
         }
@@ -156,9 +158,10 @@ public class SecurityMaster {
         return this.listingCache.get(listingId);
     }
 
+    @SuppressWarnings("checkstyle:NestedTryDepth")
     private Listing parseListing(final ByteBuffer response) {
-        try (final var node = this.jsonDecoder.wrap(response)) {
-            try (final var array = node.asArray()) {
+        try (var node = this.jsonDecoder.wrap(response)) {
+            try (var array = node.asArray()) {
                 if (!array.hasNextItem()) {
                     return null;
                 }
@@ -169,10 +172,10 @@ public class SecurityMaster {
                 String exchangeSecurityId = null;
                 String exchangeSecuritySymbol = null;
 
-                try (final var item = array.nextItem()) {
-                    try (final var object = item.asObject()) {
+                try (var item = array.nextItem()) {
+                    try (var object = item.asObject()) {
                         while (object.hasNextKey()) {
-                            try (final var key = object.nextKey()) {
+                            try (var key = object.nextKey()) {
                                 if (key.getName().equals("listing_id")) {
                                     listingId = key.asInt();
                                 } else if (key.getName().equals("exchange_id")) {
@@ -203,7 +206,12 @@ public class SecurityMaster {
         return originalLength;
     }
 
-    private int addParameters(final MutableString string, final String paramName1, final int value1, final String paramName2, final int value2) {
+    private int addParameters(
+            final MutableString string,
+            final String paramName1,
+            final int value1,
+            final String paramName2,
+            final int value2) {
         int originalLength = addParameters(string, paramName1, value1);
         string.append((byte) '&');
         addParameters(string, paramName2, value2);

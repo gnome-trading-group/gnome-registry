@@ -5,5 +5,4 @@ public record Listing(
         Exchange exchange,
         Security security,
         String exchangeSecurityId,
-        String exchangeSecuritySymbol
-) {}
+        String exchangeSecuritySymbol) {}

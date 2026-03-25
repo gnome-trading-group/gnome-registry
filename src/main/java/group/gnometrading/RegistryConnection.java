@@ -4,11 +4,10 @@ import group.gnometrading.networking.http.HTTPClient;
 import group.gnometrading.networking.http.HTTPProtocol;
 import group.gnometrading.networking.http.HTTPResponse;
 import group.gnometrading.strings.GnomeString;
-
 import java.io.IOException;
 import java.nio.ByteBuffer;
 
-public class RegistryConnection {
+public final class RegistryConnection {
 
     private static final String API_KEY_HEADER = "x-api-key";
 
@@ -24,10 +23,12 @@ public class RegistryConnection {
 
     public ByteBuffer get(final GnomeString path) {
         try {
-            final HTTPResponse response = httpClient.get(HTTPProtocol.HTTPS, this.url, path, API_KEY_HEADER, this.apiKey);
+            final HTTPResponse response =
+                    httpClient.get(HTTPProtocol.HTTPS, this.url, path, API_KEY_HEADER, this.apiKey);
 
             if (!response.isSuccess()) {
-                throw new RuntimeException("Unable to request the security master. Status code: " + response.getStatusCode());
+                throw new RuntimeException(
+                        "Unable to request the security master. Status code: " + response.getStatusCode());
             }
             return response.getBody();
         } catch (IOException e) {
