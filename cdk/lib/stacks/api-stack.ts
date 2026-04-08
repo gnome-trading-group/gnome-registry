@@ -58,15 +58,20 @@ export class ApiStack extends cdk.Stack {
       },
     };
 
-    const resources = ['securities', 'exchanges', 'listings'];
-    for (const resourceName of resources) {
+    const crudResources = ['securities', 'exchanges', 'listings', 'listing-specs', 'strategies'];
+    for (const resourceName of crudResources) {
       const resource = api.root.addResource(resourceName);
-      const integration = this.createIntegration(`${resourceName}.ts`);
-      resource.addMethod('GET', integration, { apiKeyRequired: true });
-      resource.addMethod('POST', integration, { apiKeyRequired: true });
-      resource.addMethod('DELETE', integration, { apiKeyRequired: true });
-      resource.addMethod('PATCH', integration, { apiKeyRequired: true });
+      this.attachMethods(resource, `${resourceName}.ts`, ['GET', 'POST', 'DELETE', 'PATCH']);
     }
+
+    // /pnl/snapshots (GET + POST) and /pnl/latest (GET only)
+    const pnlResource = api.root.addResource('pnl');
+    this.attachMethods(pnlResource.addResource('snapshots'), 'pnl-snapshots.ts', ['GET', 'POST']);
+    this.attachMethods(pnlResource.addResource('latest'), 'pnl-latest.ts', ['GET']);
+
+    // /risk/policies (full CRUD)
+    const riskResource = api.root.addResource('risk');
+    this.attachMethods(riskResource.addResource('policies'), 'risk-policies.ts', ['GET', 'POST', 'DELETE', 'PATCH']);
 
     const apiKey = new apigw.ApiKey(this, 'ApiKey');
     const usagePlan = new apigw.UsagePlan(this, 'UsagePlan', {
@@ -78,6 +83,13 @@ export class ApiStack extends cdk.Stack {
     });
 
     new cdk.CfnOutput(this, 'API URL', { value: api.url });
+  }
+
+  private attachMethods(resource: apigw.Resource, fileName: string, methods: string[]) {
+    const integration = this.createIntegration(fileName);
+    for (const method of methods) {
+      resource.addMethod(method, integration, { apiKeyRequired: true });
+    }
   }
 
   private createIntegration(fileName: string) {

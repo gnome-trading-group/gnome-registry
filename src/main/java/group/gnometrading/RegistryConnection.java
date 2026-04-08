@@ -27,10 +27,31 @@ public final class RegistryConnection {
                     httpClient.get(HTTPProtocol.HTTPS, this.url, path, API_KEY_HEADER, this.apiKey);
 
             if (!response.isSuccess()) {
-                throw new RuntimeException(
-                        "Unable to request the security master. Status code: " + response.getStatusCode());
+                throw new RuntimeException("Unable to request the registry. Status code: " + response.getStatusCode());
             }
             return response.getBody();
+        } catch (IOException e) {
+            // TODO: How are we handling runtime errors?
+            throw new RuntimeException(e);
+        }
+    }
+
+    public void post(final GnomeString path, final byte[] body, final int length) {
+        try {
+            final HTTPResponse response = httpClient.post(
+                    HTTPProtocol.HTTPS,
+                    this.url,
+                    path,
+                    body,
+                    length,
+                    API_KEY_HEADER,
+                    this.apiKey,
+                    "Content-Type",
+                    "application/json");
+
+            if (!response.isSuccess()) {
+                throw new RuntimeException("Unable to post to the registry. Status code: " + response.getStatusCode());
+            }
         } catch (IOException e) {
             // TODO: How are we handling runtime errors?
             throw new RuntimeException(e);
