@@ -6,6 +6,7 @@ import static org.mockito.Mockito.*;
 import group.gnometrading.schemas.SchemaType;
 import group.gnometrading.sm.Exchange;
 import group.gnometrading.sm.Listing;
+import group.gnometrading.sm.ListingSpec;
 import group.gnometrading.sm.Security;
 import group.gnometrading.strings.ViewString;
 import java.nio.ByteBuffer;
@@ -232,6 +233,40 @@ class SecurityMasterTest {
 
         assertSame(first, second);
         verify(registryConnection, times(3)).get(any()); // listing + exchange + security, only once each
+    }
+
+    @ParameterizedTest
+    @MethodSource("testGetListingSpecArguments")
+    void testGetListingSpec(final int listingId, final String jsonResponse, final ListingSpec expected) {
+        when(registryConnection.get(new ViewString("/api/listing-specs?listingId=" + listingId)))
+                .thenReturn(ByteBuffer.wrap(jsonResponse.getBytes()));
+        assertEquals(expected, securityMaster.getListingSpec(listingId));
+        verify(registryConnection, times(1)).get(any());
+    }
+
+    private static Stream<Arguments> testGetListingSpecArguments() {
+        return Stream.of(
+                Arguments.of(1, "[]", null),
+                Arguments.of(
+                        42,
+                        """
+                        [{"listing_id": 42, "tick_size": 100, "lot_size": 1000, "min_notional": 50000}]""",
+                        new ListingSpec(42, 100L, 1000L, 50000L)),
+                Arguments.of(
+                        99,
+                        """
+                        [{"listing_id": 99, "tick_size": 10, "lot_size": 100}]""",
+                        new ListingSpec(99, 10L, 100L, 0L)));
+    }
+
+    @Test
+    void testGetListingSpecCaching() {
+        when(registryConnection.get(new ViewString("/api/listing-specs?listingId=42")))
+                .thenReturn(ByteBuffer.wrap(
+                        "[{\"listing_id\": 42, \"tick_size\": 100, \"lot_size\": 1000, \"min_notional\": 0}]"
+                                .getBytes()));
+        assertSame(securityMaster.getListingSpec(42), securityMaster.getListingSpec(42));
+        verify(registryConnection, times(1)).get(any());
     }
 
     @Test

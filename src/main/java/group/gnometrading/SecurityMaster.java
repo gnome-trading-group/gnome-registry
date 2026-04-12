@@ -6,6 +6,7 @@ import group.gnometrading.collections.IntMap;
 import group.gnometrading.schemas.SchemaType;
 import group.gnometrading.sm.Exchange;
 import group.gnometrading.sm.Listing;
+import group.gnometrading.sm.ListingSpec;
 import group.gnometrading.sm.Security;
 import group.gnometrading.strings.ExpandingMutableString;
 import group.gnometrading.strings.MutableString;
@@ -20,6 +21,7 @@ public final class SecurityMaster {
     private static final String SECURITY_ENDPOINT = "/api/securities?";
     private static final String EXCHANGE_ENDPOINT = "/api/exchanges?";
     private static final String LISTING_ENDPOINT = "/api/listings?";
+    private static final String LISTING_SPEC_ENDPOINT = "/api/listing-specs?";
 
     private final JsonDecoder jsonDecoder;
     private final RegistryConnection registryConnection;
@@ -27,10 +29,12 @@ public final class SecurityMaster {
     private final MutableString securityPath;
     private final MutableString exchangePath;
     private final MutableString listingPath;
+    private final MutableString listingSpecPath;
 
     private final IntMap<Security> securityCache;
     private final IntMap<Exchange> exchangeCache;
     private final IntMap<Listing> listingCache;
+    private final IntMap<ListingSpec> listingSpecCache;
 
     public SecurityMaster(final RegistryConnection registryConnection) {
         this.registryConnection = registryConnection;
@@ -39,10 +43,12 @@ public final class SecurityMaster {
         this.securityPath = new ExpandingMutableString(SECURITY_ENDPOINT);
         this.exchangePath = new ExpandingMutableString(EXCHANGE_ENDPOINT);
         this.listingPath = new ExpandingMutableString(LISTING_ENDPOINT);
+        this.listingSpecPath = new ExpandingMutableString(LISTING_SPEC_ENDPOINT);
 
         this.securityCache = new IntHashMap<>();
         this.exchangeCache = new IntHashMap<>();
         this.listingCache = new IntHashMap<>();
+        this.listingSpecCache = new IntHashMap<>();
     }
 
     @SuppressWarnings("checkstyle:NestedTryDepth")
@@ -156,6 +162,50 @@ public final class SecurityMaster {
 
         this.listingCache.put(listingId, parseListing(response));
         return this.listingCache.get(listingId);
+    }
+
+    @SuppressWarnings("checkstyle:NestedTryDepth")
+    public ListingSpec getListingSpec(final int listingId) {
+        if (this.listingSpecCache.containsKey(listingId)) {
+            return this.listingSpecCache.get(listingId);
+        }
+
+        final int originalLength = addParameters(this.listingSpecPath, "listingId", listingId);
+        final ByteBuffer response = this.registryConnection.get(this.listingSpecPath);
+        this.listingSpecPath.setLength(originalLength);
+
+        try (var node = this.jsonDecoder.wrap(response)) {
+            try (var array = node.asArray()) {
+                if (!array.hasNextItem()) {
+                    return null;
+                }
+
+                int parsedListingId = -1;
+                long tickSize = -1;
+                long lotSize = -1;
+                long minNotional = 0;
+
+                try (var item = array.nextItem()) {
+                    try (var object = item.asObject()) {
+                        while (object.hasNextKey()) {
+                            try (var key = object.nextKey()) {
+                                if (key.getName().equals("listing_id")) {
+                                    parsedListingId = key.asInt();
+                                } else if (key.getName().equals("tick_size")) {
+                                    tickSize = key.asLong();
+                                } else if (key.getName().equals("lot_size")) {
+                                    lotSize = key.asLong();
+                                } else if (key.getName().equals("min_notional")) {
+                                    minNotional = key.asLong();
+                                }
+                            }
+                        }
+                    }
+                }
+                this.listingSpecCache.put(listingId, new ListingSpec(parsedListingId, tickSize, lotSize, minNotional));
+                return this.listingSpecCache.get(listingId);
+            }
+        }
     }
 
     @SuppressWarnings("checkstyle:NestedTryDepth")

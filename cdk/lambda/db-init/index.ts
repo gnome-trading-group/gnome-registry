@@ -89,7 +89,7 @@ CREATE INDEX IF NOT EXISTS idx_risk_policy_scope
 	ON risk.policy (scope, strategy_id, listing_id) WHERE enabled = true;
 
 INSERT INTO risk.policy (policy_type, scope, parameters, enabled)
-	VALUES ('KILL_SWITCH', 0, '{}', true) ON CONFLICT DO NOTHING;
+	VALUES ('KILL_SWITCH', 0, '{}', false) ON CONFLICT DO NOTHING;
 `;
 
 exports.handler = async () => {

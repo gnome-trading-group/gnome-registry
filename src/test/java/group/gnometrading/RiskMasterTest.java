@@ -3,6 +3,7 @@ package group.gnometrading;
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.Mockito.*;
 
+import group.gnometrading.risk.PolicyScope;
 import group.gnometrading.risk.RiskMaster;
 import group.gnometrading.risk.RiskPolicyRecord;
 import group.gnometrading.strings.ViewString;
@@ -25,14 +26,11 @@ class RiskMasterTest {
 
     @BeforeEach
     void setUp() {
-        riskMaster = new RiskMaster(registryConnection, 5000L);
+        riskMaster = new RiskMaster(registryConnection);
     }
 
     private static final String KILL_SWITCH_ENABLED =
             "[{\"policy_id\": 1, \"policy_type\": \"KILL_SWITCH\", \"scope\": 0, \"parameters\": \"{}\", \"enabled\": true}]";
-
-    private static final String KILL_SWITCH_DISABLED =
-            "[{\"policy_id\": 1, \"policy_type\": \"KILL_SWITCH\", \"scope\": 0, \"parameters\": \"{}\", \"enabled\": false}]";
 
     private static final String MIXED_POLICIES =
             "[{\"policy_id\": 1, \"policy_type\": \"KILL_SWITCH\", \"scope\": 0, \"parameters\": \"{}\", \"enabled\": true},"
@@ -40,26 +38,44 @@ class RiskMasterTest {
                     + "{\"policy_id\": 3, \"policy_type\": \"MAX_POSITION\", \"scope\": 1, \"strategy_id\": 20, \"listing_id\": 0, \"parameters\": \"{}\", \"enabled\": true}]";
 
     @Test
-    void testIsTradingEnabledWhenKillSwitchEnabled() {
+    void testGetPolicyCountAfterRefresh() {
         when(registryConnection.get(new ViewString("/api/risk/policies")))
                 .thenReturn(ByteBuffer.wrap(KILL_SWITCH_ENABLED.getBytes()));
         riskMaster.refresh();
-        assertTrue(riskMaster.isTradingEnabled());
+        assertEquals(1, riskMaster.getPolicyCount());
     }
 
     @Test
-    void testIsTradingEnabledWhenKillSwitchDisabled() {
-        when(registryConnection.get(new ViewString("/api/risk/policies")))
-                .thenReturn(ByteBuffer.wrap(KILL_SWITCH_DISABLED.getBytes()));
-        riskMaster.refresh();
-        assertFalse(riskMaster.isTradingEnabled());
-    }
-
-    @Test
-    void testIsTradingEnabledWithNoPolicies() {
+    void testGetPolicyCountEmptyResponse() {
         when(registryConnection.get(new ViewString("/api/risk/policies"))).thenReturn(ByteBuffer.wrap("[]".getBytes()));
         riskMaster.refresh();
-        assertTrue(riskMaster.isTradingEnabled());
+        assertEquals(0, riskMaster.getPolicyCount());
+    }
+
+    @Test
+    void testGetRecordReturnsCorrectData() {
+        when(registryConnection.get(new ViewString("/api/risk/policies")))
+                .thenReturn(ByteBuffer.wrap(KILL_SWITCH_ENABLED.getBytes()));
+        riskMaster.refresh();
+
+        RiskPolicyRecord record = riskMaster.getRecord(0);
+        assertEquals(1, record.policyId);
+        assertTrue(record.policyType.equals("KILL_SWITCH"));
+        assertEquals(PolicyScope.GLOBAL, record.scope);
+        assertTrue(record.enabled);
+    }
+
+    @Test
+    void testGetPolicyCountAfterMultipleRefreshes() {
+        when(registryConnection.get(new ViewString("/api/risk/policies")))
+                .thenReturn(ByteBuffer.wrap(MIXED_POLICIES.getBytes()))
+                .thenReturn(ByteBuffer.wrap("[]".getBytes()));
+
+        riskMaster.refresh();
+        assertEquals(3, riskMaster.getPolicyCount());
+
+        riskMaster.refresh();
+        assertEquals(0, riskMaster.getPolicyCount());
     }
 
     @Test
@@ -80,44 +96,5 @@ class RiskMasterTest {
         riskMaster.forEachPolicy(99, p -> ids99.add(p.policyId));
         assertEquals(1, ids99.size()); // only KILL_SWITCH (global)
         assertEquals(1, (int) ids99.get(0));
-    }
-
-    @Test
-    void testPolicyTypeStoredAsGnomeString() {
-        when(registryConnection.get(new ViewString("/api/risk/policies")))
-                .thenReturn(ByteBuffer.wrap(KILL_SWITCH_ENABLED.getBytes()));
-        riskMaster.refresh();
-
-        List<RiskPolicyRecord> seen = new ArrayList<>();
-        riskMaster.forEachPolicy(0, seen::add);
-
-        assertEquals(1, seen.size());
-        assertTrue(seen.get(0).policyType.equals("KILL_SWITCH"));
-    }
-
-    @Test
-    void testRefreshUpdatesInPlace() {
-        when(registryConnection.get(new ViewString("/api/risk/policies")))
-                .thenReturn(ByteBuffer.wrap(KILL_SWITCH_ENABLED.getBytes()))
-                .thenReturn(ByteBuffer.wrap(KILL_SWITCH_DISABLED.getBytes()));
-
-        riskMaster.refresh();
-        assertTrue(riskMaster.isTradingEnabled());
-
-        riskMaster.refresh();
-        assertFalse(riskMaster.isTradingEnabled());
-
-        verify(registryConnection, times(2)).get(any());
-    }
-
-    @Test
-    void testMaybeRefreshOnlyRefreshesAfterInterval() {
-        when(registryConnection.get(new ViewString("/api/risk/policies")))
-                .thenReturn(ByteBuffer.wrap(KILL_SWITCH_ENABLED.getBytes()));
-
-        riskMaster.maybeRefresh(5001L); // 5001 - 0 >= 5000 → triggers refresh, sets lastRefreshMs=5001
-        riskMaster.maybeRefresh(6000L); // 6000 - 5001 = 999 < 5000 → no refresh
-
-        verify(registryConnection, times(1)).get(any());
     }
 }

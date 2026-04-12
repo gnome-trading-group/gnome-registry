@@ -7,36 +7,27 @@ import java.nio.ByteBuffer;
 import java.util.function.Consumer;
 
 /**
- * RiskMaster periodically refreshes risk policies from the registry.
+ * Fetches and parses risk policies from the registry.
  * GC-free after construction: pre-allocated records are reused on every refresh.
- * isTradingEnabled() is a single volatile read.
  */
 public final class RiskMaster {
 
     private static final String RISK_POLICIES_ENDPOINT = "/api/risk/policies";
-    private static final String KILL_SWITCH_TYPE = "KILL_SWITCH";
-    private static final int SCOPE_GLOBAL = 0;
-    private static final int MAX_POLICIES = 64;
+    static final int MAX_POLICIES = 64;
 
     private final JsonDecoder jsonDecoder;
     private final RegistryConnection registryConnection;
     private final ExpandingMutableString riskPoliciesPath;
-    private final long refreshIntervalMs;
 
     private final RiskPolicyRecord[] records;
 
-    // volatile writes on refresh establish happens-before for the array contents
-    private volatile boolean tradingEnabled = true;
+    // volatile write on refresh establishes happens-before for the array contents
     private volatile int policyCount = 0;
 
-    private long lastRefreshMs;
-
-    public RiskMaster(final RegistryConnection registryConnection, final long refreshIntervalMs) {
+    public RiskMaster(final RegistryConnection registryConnection) {
         this.registryConnection = registryConnection;
         this.jsonDecoder = new JsonDecoder();
         this.riskPoliciesPath = new ExpandingMutableString(RISK_POLICIES_ENDPOINT);
-        this.refreshIntervalMs = refreshIntervalMs;
-        this.lastRefreshMs = 0;
 
         this.records = new RiskPolicyRecord[MAX_POLICIES];
         for (int i = 0; i < MAX_POLICIES; i++) {
@@ -44,15 +35,19 @@ public final class RiskMaster {
         }
     }
 
-    public boolean isTradingEnabled() {
-        return this.tradingEnabled;
+    public int getPolicyCount() {
+        return this.policyCount;
+    }
+
+    public RiskPolicyRecord getRecord(final int index) {
+        return this.records[index];
     }
 
     public void forEachPolicy(final int strategyId, final Consumer<RiskPolicyRecord> consumer) {
         final int count = this.policyCount;
         for (int i = 0; i < count; i++) {
             final RiskPolicyRecord record = this.records[i];
-            if (record.scope == SCOPE_GLOBAL || record.strategyId == strategyId) {
+            if (record.scope == PolicyScope.GLOBAL || record.strategyId == strategyId) {
                 consumer.accept(record);
             }
         }
@@ -63,7 +58,6 @@ public final class RiskMaster {
         final ByteBuffer response = this.registryConnection.get(this.riskPoliciesPath);
 
         int count = 0;
-        boolean killSwitchEnabled = true;
 
         try (var node = this.jsonDecoder.wrap(response)) {
             try (var array = node.asArray()) {
@@ -73,24 +67,19 @@ public final class RiskMaster {
                     try (var item = array.nextItem()) {
                         parseRecord(item, record);
                     }
-                    if (record.scope == SCOPE_GLOBAL && record.policyType.equals(KILL_SWITCH_TYPE)) {
-                        killSwitchEnabled = record.enabled;
-                    }
                     count++;
                 }
             }
         }
 
-        // volatile writes flush all record field writes above — readers who read
-        // policyCount/tradingEnabled after this will see a consistent snapshot
-        this.tradingEnabled = killSwitchEnabled;
+        // volatile write flushes all record field writes above
         this.policyCount = count;
     }
 
     private static void resetRecord(final RiskPolicyRecord record) {
         record.policyId = -1;
         record.policyType.setLength(0);
-        record.scope = -1;
+        record.scope = null;
         record.strategyId = 0;
         record.listingId = 0;
         record.parametersJson.setLength(0);
@@ -107,7 +96,7 @@ public final class RiskMaster {
                     } else if (key.getName().equals("policy_type")) {
                         record.policyType.copy(key.asString());
                     } else if (key.getName().equals("scope")) {
-                        record.scope = key.asInt();
+                        record.scope = PolicyScope.fromInt(key.asInt());
                     } else if (key.getName().equals("strategy_id")) {
                         record.strategyId = key.asInt();
                     } else if (key.getName().equals("listing_id")) {
@@ -119,13 +108,6 @@ public final class RiskMaster {
                     }
                 }
             }
-        }
-    }
-
-    public void maybeRefresh(final long nowEpochMs) {
-        if (nowEpochMs - this.lastRefreshMs >= this.refreshIntervalMs) {
-            refresh();
-            this.lastRefreshMs = nowEpochMs;
         }
     }
 }
