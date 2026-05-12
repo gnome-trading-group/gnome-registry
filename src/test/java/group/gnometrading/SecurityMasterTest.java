@@ -270,6 +270,36 @@ class SecurityMasterTest {
     }
 
     @Test
+    void testGetSecurityEmptyCaching() {
+        when(registryConnection.get(new ViewString("/api/securities?securityId=1")))
+                .thenReturn(ByteBuffer.wrap("[]".getBytes()));
+
+        assertNull(securityMaster.getSecurity(1));
+        assertNull(securityMaster.getSecurity(1));
+        verify(registryConnection, times(1)).get(any());
+    }
+
+    @Test
+    void testGetExchangeEmptyCaching() {
+        when(registryConnection.get(new ViewString("/api/exchanges?exchangeId=1")))
+                .thenReturn(ByteBuffer.wrap("[]".getBytes()));
+
+        assertNull(securityMaster.getExchange(1));
+        assertNull(securityMaster.getExchange(1));
+        verify(registryConnection, times(1)).get(any());
+    }
+
+    @Test
+    void testGetListingSpecEmptyCaching() {
+        when(registryConnection.get(new ViewString("/api/listing-specs?listingId=1")))
+                .thenReturn(ByteBuffer.wrap("[]".getBytes()));
+
+        assertNull(securityMaster.getListingSpec(1));
+        assertNull(securityMaster.getListingSpec(1));
+        verify(registryConnection, times(1)).get(any());
+    }
+
+    @Test
     void testGetListingByExchangeAndSecurityCaching() {
         String listingResponse =
                 """

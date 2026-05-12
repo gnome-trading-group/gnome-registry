@@ -23,6 +23,10 @@ public final class SecurityMaster {
     private static final String LISTING_ENDPOINT = "/api/listings?";
     private static final String LISTING_SPEC_ENDPOINT = "/api/listing-specs?";
 
+    private static final Security EMPTY_SECURITY = new Security(-1, null, -1);
+    private static final Exchange EMPTY_EXCHANGE = new Exchange(-1, null, null, null);
+    private static final ListingSpec EMPTY_LISTING_SPEC = new ListingSpec(-1, -1, -1, -1);
+
     private final JsonDecoder jsonDecoder;
     private final RegistryConnection registryConnection;
 
@@ -54,7 +58,8 @@ public final class SecurityMaster {
     @SuppressWarnings("checkstyle:NestedTryDepth")
     public Security getSecurity(final int securityId) {
         if (this.securityCache.containsKey(securityId)) {
-            return this.securityCache.get(securityId);
+            final Security cached = this.securityCache.get(securityId);
+            return cached == EMPTY_SECURITY ? null : cached;
         }
 
         final int originalLength = addParameters(this.securityPath, "securityId", securityId);
@@ -64,6 +69,7 @@ public final class SecurityMaster {
         try (var node = this.jsonDecoder.wrap(response)) {
             try (var array = node.asArray()) {
                 if (!array.hasNextItem()) {
+                    this.securityCache.put(securityId, EMPTY_SECURITY);
                     return null;
                 }
 
@@ -92,7 +98,8 @@ public final class SecurityMaster {
     @SuppressWarnings("checkstyle:NestedTryDepth")
     public Exchange getExchange(final int exchangeId) {
         if (this.exchangeCache.containsKey(exchangeId)) {
-            return this.exchangeCache.get(exchangeId);
+            final Exchange cached = this.exchangeCache.get(exchangeId);
+            return cached == EMPTY_EXCHANGE ? null : cached;
         }
 
         final int originalLength = addParameters(this.exchangePath, "exchangeId", exchangeId);
@@ -102,6 +109,7 @@ public final class SecurityMaster {
         try (var node = this.jsonDecoder.wrap(response)) {
             try (var array = node.asArray()) {
                 if (!array.hasNextItem()) {
+                    this.exchangeCache.put(exchangeId, EMPTY_EXCHANGE);
                     return null;
                 }
 
@@ -167,7 +175,8 @@ public final class SecurityMaster {
     @SuppressWarnings("checkstyle:NestedTryDepth")
     public ListingSpec getListingSpec(final int listingId) {
         if (this.listingSpecCache.containsKey(listingId)) {
-            return this.listingSpecCache.get(listingId);
+            final ListingSpec cached = this.listingSpecCache.get(listingId);
+            return cached == EMPTY_LISTING_SPEC ? null : cached;
         }
 
         final int originalLength = addParameters(this.listingSpecPath, "listingId", listingId);
@@ -177,6 +186,7 @@ public final class SecurityMaster {
         try (var node = this.jsonDecoder.wrap(response)) {
             try (var array = node.asArray()) {
                 if (!array.hasNextItem()) {
+                    this.listingSpecCache.put(listingId, EMPTY_LISTING_SPEC);
                     return null;
                 }
 
