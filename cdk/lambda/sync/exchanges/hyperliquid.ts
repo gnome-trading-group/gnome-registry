@@ -20,14 +20,14 @@ interface HyperliquidSpotToken {
   szDecimals: number;
 }
 
-interface HyperliquidSpotUniverse {
+interface HyperliquidSpotPair {
   name: string;
-  tokens: number[];
+  tokens: number[]; // [baseTokenIndex, quoteTokenIndex]
 }
 
 interface HyperliquidSpotMetaResponse {
   tokens: HyperliquidSpotToken[];
-  universe: HyperliquidSpotUniverse[];
+  universe: HyperliquidSpotPair[];
 }
 
 async function fetchMeta(): Promise<Map<string, { szDecimals: number; isSpot: boolean }>> {
@@ -53,8 +53,13 @@ async function fetchMeta(): Promise<Map<string, { szDecimals: number; isSpot: bo
     assetMap.set(asset.name, { szDecimals: asset.szDecimals, isSpot: false });
   }
 
-  for (const token of spot.tokens) {
-    assetMap.set(token.name, { szDecimals: token.szDecimals, isSpot: true });
+  // universe[i].name is the pair name (e.g. "PURR/USDC", "@107") — this is what's stored
+  // as exchange_security_symbol. The base token is tokens[0]; use its szDecimals.
+  for (const pair of spot.universe) {
+    const baseToken = spot.tokens[pair.tokens[0]];
+    if (baseToken) {
+      assetMap.set(pair.name, { szDecimals: baseToken.szDecimals, isSpot: true });
+    }
   }
 
   return assetMap;

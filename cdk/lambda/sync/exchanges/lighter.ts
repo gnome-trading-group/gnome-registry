@@ -11,6 +11,7 @@ interface LighterMarket {
 
 interface LighterMarketsResponse {
   order_book_details: LighterMarket[];
+  spot_order_book_details: LighterMarket[];
 }
 
 export class LighterAdapter implements ExchangeAdapter {
@@ -19,7 +20,7 @@ export class LighterAdapter implements ExchangeAdapter {
     const data = (await res.json()) as LighterMarketsResponse;
 
     const marketMap = new Map<number, LighterMarket>();
-    for (const market of data.order_book_details ?? []) {
+    for (const market of [...(data.order_book_details ?? []), ...(data.spot_order_book_details ?? [])]) {
       marketMap.set(market.market_id, market);
     }
 
