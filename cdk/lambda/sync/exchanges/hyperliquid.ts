@@ -30,8 +30,34 @@ interface HyperliquidSpotMetaResponse {
   universe: HyperliquidSpotPair[];
 }
 
+interface PerpDex {
+  name: string;
+}
+
+async function fetchPerpDexs(): Promise<string[]> {
+  const res = await fetch(HYPERLIQUID_INFO_URL, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ type: 'perpDexs' }),
+  });
+  const dexes = (await res.json()) as (PerpDex | null)[];
+  return dexes
+    .filter((d): d is PerpDex => d !== null && typeof d.name === 'string')
+    .map(d => d.name);
+}
+
+async function fetchDexMeta(dexName: string): Promise<HyperliquidAsset[]> {
+  const res = await fetch(HYPERLIQUID_INFO_URL, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ type: 'meta', dex: dexName }),
+  });
+  const meta = (await res.json()) as HyperliquidMetaResponse;
+  return meta.universe ?? [];
+}
+
 async function fetchMeta(): Promise<Map<string, { szDecimals: number; isSpot: boolean }>> {
-  const [perpsRes, spotRes] = await Promise.all([
+  const [perpsRes, spotRes, dexNames] = await Promise.all([
     fetch(HYPERLIQUID_INFO_URL, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -42,6 +68,7 @@ async function fetchMeta(): Promise<Map<string, { szDecimals: number; isSpot: bo
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ type: 'spotMeta' }),
     }),
+    fetchPerpDexs(),
   ]);
 
   const perps = (await perpsRes.json()) as HyperliquidMetaResponse;
@@ -59,6 +86,22 @@ async function fetchMeta(): Promise<Map<string, { szDecimals: number; isSpot: bo
     const baseToken = spot.tokens[pair.tokens[0]];
     if (baseToken) {
       assetMap.set(pair.name, { szDecimals: baseToken.szDecimals, isSpot: true });
+    }
+  }
+
+  // DEX asset names are prefixed with the DEX name (e.g. "hyna:BTC"), so they merge
+  // into the same map without colliding with main-exchange symbols.
+  if (dexNames.length > 0) {
+    const dexResults = await Promise.allSettled(dexNames.map(name => fetchDexMeta(name)));
+    for (let i = 0; i < dexResults.length; i++) {
+      const result = dexResults[i];
+      if (result.status === 'rejected') {
+        console.warn(`Hyperliquid: failed to fetch meta for DEX "${dexNames[i]}":`, result.reason);
+        continue;
+      }
+      for (const asset of result.value) {
+        assetMap.set(asset.name, { szDecimals: asset.szDecimals, isSpot: false });
+      }
     }
   }
 

@@ -6,6 +6,7 @@ import { Construct } from "constructs";
 import { DatabaseStack } from "./stacks/database-stack";
 import { ApiStack } from "./stacks/api-stack";
 import { ListingSpecSyncStack } from "./stacks/listing-spec-sync-stack";
+import { MonitoringStack } from "./stacks/monitoring-stack";
 import { GnomeAccount } from "@gnome-trading-group/gnome-shared-cdk";
 
 class AppStage extends cdk.Stage {
@@ -24,10 +25,17 @@ class AppStage extends cdk.Stage {
       rootUserSecret: databaseStack.rootUserSecret,
     });
 
-    new ListingSpecSyncStack(this, "ListingSpecSyncStack", {
+    const listingSpecSyncStack = new ListingSpecSyncStack(this, "ListingSpecSyncStack", {
       ...props,
       api: apiStack.api,
       apiKey: apiStack.apiKey,
+    });
+
+    new MonitoringStack(this, "MonitoringStack", {
+      ...props,
+      api: apiStack.api,
+      syncLambda: listingSpecSyncStack.syncLambda,
+      database: databaseStack.database,
     });
   }
 }

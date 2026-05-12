@@ -24,6 +24,7 @@
     "typescript": "~5.5.3"
   },
   "dependencies": {
+    "cdk-monitoring-constructs": "^9.19.0",
     "@types/aws-lambda": "^8.10.141",
     "@types/pg": "^8.11.6",
     "aws-cdk-lib": "^2.178.1",

@@ -14,10 +14,12 @@ interface Props extends cdk.StackProps {
 }
 
 export class ListingSpecSyncStack extends cdk.Stack {
+  public readonly syncLambda: lambda.NodejsFunction;
+
   constructor(scope: Construct, id: string, props: Props) {
     super(scope, id, props);
 
-    const syncLambda = new lambda.NodejsFunction(this, 'listing-spec-sync-lambda', {
+    this.syncLambda = new lambda.NodejsFunction(this, 'listing-spec-sync-lambda', {
       entry: join(__dirname, '..', '..', 'lambda', 'sync', 'listing-spec-sync.ts'),
       runtime: Runtime.NODEJS_20_X,
       timeout: cdk.Duration.seconds(60),
@@ -31,7 +33,7 @@ export class ListingSpecSyncStack extends cdk.Stack {
       },
     });
 
-    syncLambda.addToRolePolicy(new iam.PolicyStatement({
+    this.syncLambda.addToRolePolicy(new iam.PolicyStatement({
       actions: ['apigateway:GET'],
       resources: [props.apiKey.keyArn],
     }));
@@ -39,6 +41,6 @@ export class ListingSpecSyncStack extends cdk.Stack {
     const rule = new events.Rule(this, 'ListingSpecSyncRule', {
       schedule: events.Schedule.rate(cdk.Duration.hours(1)),
     });
-    rule.addTarget(new targets.LambdaFunction(syncLambda));
+    rule.addTarget(new targets.LambdaFunction(this.syncLambda));
   }
 }
