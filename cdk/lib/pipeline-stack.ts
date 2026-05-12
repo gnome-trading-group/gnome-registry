@@ -5,6 +5,7 @@ import * as secrets from 'aws-cdk-lib/aws-secretsmanager';
 import { Construct } from "constructs";
 import { DatabaseStack } from "./stacks/database-stack";
 import { ApiStack } from "./stacks/api-stack";
+import { ListingSpecSyncStack } from "./stacks/listing-spec-sync-stack";
 import { GnomeAccount } from "@gnome-trading-group/gnome-shared-cdk";
 
 class AppStage extends cdk.Stage {
@@ -21,6 +22,12 @@ class AppStage extends cdk.Stage {
       database: databaseStack.database,
       vpc: databaseStack.vpc,
       rootUserSecret: databaseStack.rootUserSecret,
+    });
+
+    new ListingSpecSyncStack(this, "ListingSpecSyncStack", {
+      ...props,
+      api: apiStack.api,
+      apiKey: apiStack.apiKey,
     });
   }
 }

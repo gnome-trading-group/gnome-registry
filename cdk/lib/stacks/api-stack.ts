@@ -15,6 +15,8 @@ interface Props extends cdk.StackProps {
 }
 
 export class ApiStack extends cdk.Stack {
+  public readonly api: apigw.RestApi;
+  public readonly apiKey: apigw.ApiKey;
   private nodeJsProps: lambda.NodejsFunctionProps;
   private props: Props;
 
@@ -22,7 +24,7 @@ export class ApiStack extends cdk.Stack {
     super(scope, id, props);
     this.props = props;
 
-    const api = new apigw.RestApi(this, 'registry-api', {
+    this.api = new apigw.RestApi(this, 'registry-api', {
       description: "Gnome's Registry API",
       cloudWatchRole: true,
       defaultCorsPreflightOptions: {
@@ -60,29 +62,29 @@ export class ApiStack extends cdk.Stack {
 
     const crudResources = ['securities', 'exchanges', 'listings', 'listing-specs', 'strategies'];
     for (const resourceName of crudResources) {
-      const resource = api.root.addResource(resourceName);
+      const resource = this.api.root.addResource(resourceName);
       this.attachMethods(resource, `${resourceName}.ts`, ['GET', 'POST', 'DELETE', 'PATCH']);
     }
 
     // /pnl/snapshots (GET + POST) and /pnl/latest (GET only)
-    const pnlResource = api.root.addResource('pnl');
+    const pnlResource = this.api.root.addResource('pnl');
     this.attachMethods(pnlResource.addResource('snapshots'), 'pnl-snapshots.ts', ['GET', 'POST']);
     this.attachMethods(pnlResource.addResource('latest'), 'pnl-latest.ts', ['GET']);
 
     // /risk/policies (full CRUD)
-    const riskResource = api.root.addResource('risk');
+    const riskResource = this.api.root.addResource('risk');
     this.attachMethods(riskResource.addResource('policies'), 'risk-policies.ts', ['GET', 'POST', 'DELETE', 'PATCH']);
 
-    const apiKey = new apigw.ApiKey(this, 'ApiKey');
+    this.apiKey = new apigw.ApiKey(this, 'ApiKey');
     const usagePlan = new apigw.UsagePlan(this, 'UsagePlan', {
       name: 'Global Usage Plan',
     });
-    usagePlan.addApiKey(apiKey);
+    usagePlan.addApiKey(this.apiKey);
     usagePlan.addApiStage({
-      stage: api.deploymentStage
+      stage: this.api.deploymentStage
     });
 
-    new cdk.CfnOutput(this, 'API URL', { value: api.url });
+    new cdk.CfnOutput(this, 'API URL', { value: this.api.url });
   }
 
   private attachMethods(resource: apigw.Resource, fileName: string, methods: string[]) {
