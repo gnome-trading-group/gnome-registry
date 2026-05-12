@@ -38,9 +38,20 @@ export class LighterAdapter implements ExchangeAdapter {
         continue;
       }
 
-      const tickSize = Math.pow(10, market.price_decimals);
-      const lotSize = Math.pow(10, market.size_decimals);
-      const minNotional = Math.round(parseFloat(market.min_quote_amount));
+      // tickSize: smallest price step in PRICE_SCALING_FACTOR (1e9) units.
+      // e.g. price_decimals=4 → step = 0.0001 → 0.0001 * 1e9 = 1e5 = 10^(9-4)
+      // 0 if price_decimals exceeds the scaling factor — OMS skips tick enforcement when 0
+      const tickSize = market.price_decimals > 9
+        ? (console.warn(`Lighter: market ${marketId} price_decimals=${market.price_decimals} exceeds PRICE_SCALING_FACTOR (1e9) — storing tickSize=0`), 0)
+        : Math.pow(10, 9 - market.price_decimals);
+      // lotSize: smallest size step in SIZE_SCALING_FACTOR (1e6) units.
+      // e.g. size_decimals=3 → step = 0.001 → 0.001 * 1e6 = 1e3 = 10^(6-3)
+      // 0 if size_decimals exceeds the scaling factor — OMS skips lot enforcement when 0
+      const lotSize = market.size_decimals > 6
+        ? (console.warn(`Lighter: market ${marketId} size_decimals=${market.size_decimals} exceeds SIZE_SCALING_FACTOR (1e6) — storing lotSize=0`), 0)
+        : Math.pow(10, 6 - market.size_decimals);
+      // min_quote_amount is a USD value; scale to price*size units (1e9 * 1e6 = 1e15)
+      const minNotional = parseFloat(market.min_quote_amount) * 1e15;
 
       result.set(listing.listing_id, { tickSize, lotSize, minNotional });
     }
