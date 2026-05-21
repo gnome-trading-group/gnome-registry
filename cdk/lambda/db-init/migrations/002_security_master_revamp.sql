@@ -1,7 +1,6 @@
 -- Clear exchange-sourced data; sync lambda will repopulate from scratch
 DROP TABLE sm.listing_spec;
-TRUNCATE sm.listing RESTART IDENTITY;
-TRUNCATE sm.security RESTART IDENTITY;
+TRUNCATE sm.listing, sm.security RESTART IDENTITY CASCADE;
 
 CREATE TABLE sm.currency (
     currency_id   serial    PRIMARY KEY,

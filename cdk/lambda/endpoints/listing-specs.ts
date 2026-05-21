@@ -18,6 +18,15 @@ class ListingSpecHandler extends ResourceHandler {
     if (params?.before) {
       where += ` AND recorded_at <= '${params.before}'`;
     }
+    const history = params?.history === 'true';
+    if (history) {
+      return `
+        SELECT *
+        FROM sm.listing_spec
+        WHERE ${where}
+        ORDER BY recorded_at DESC
+      `;
+    }
     return `
       SELECT DISTINCT ON (listing_id) *
       FROM sm.listing_spec
