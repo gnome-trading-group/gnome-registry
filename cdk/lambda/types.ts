@@ -2,10 +2,24 @@ interface ISecurityBase {
   symbol: string;
   description?: string;
   type: number;
+  contractType?: number;
+  assetClass?: number;
+  baseCurrencyId?: number;
+  quoteCurrencyId?: number;
+  settleCurrencyId?: number;
+  inverse?: boolean;
+  quanto?: boolean;
+  expiry?: string | null;
+  strikePrice?: number | null;
+  active?: boolean;
+  underlyingSecurityId?: number | null;
 }
 export interface ICreateSecurity extends ISecurityBase {}
 export interface ISecurity extends ISecurityBase {
   securityId: number;
+  baseCurrency?: string;
+  quoteCurrency?: string;
+  settleCurrency?: string;
   dateCreated: string;
   dateModified: string;
 }

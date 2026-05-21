@@ -1,40 +1,36 @@
 import * as cdk from "aws-cdk-lib";
 import * as pipelines from "aws-cdk-lib/pipelines";
-import * as config from "./config";
 import * as secrets from 'aws-cdk-lib/aws-secretsmanager';
 import { Construct } from "constructs";
+import { Stage } from "@gnome-trading-group/gnome-shared-cdk";
 import { DatabaseStack } from "./stacks/database-stack";
 import { ApiStack } from "./stacks/api-stack";
-import { ListingSpecSyncStack } from "./stacks/listing-spec-sync-stack";
+import { ExchangeSyncStack } from "./stacks/exchange-sync-stack";
 import { MonitoringStack } from "./stacks/monitoring-stack";
-import { GnomeAccount } from "@gnome-trading-group/gnome-shared-cdk";
+import { GITHUB_REPO, GITHUB_BRANCH, CONFIGS, RegistryConfig } from "./config";
 
 class AppStage extends cdk.Stage {
 
-  constructor(scope: Construct, id: string, props?: cdk.StageProps) {
-    super(scope, id, props);
+  constructor(scope: Construct, id: string, config: RegistryConfig) {
+    super(scope, id, { env: config.account.environment });
 
-    const databaseStack = new DatabaseStack(this, "DatabaseStack", {
-      ...props,
-    });
+    const databaseStack = new DatabaseStack(this, "DatabaseStack");
 
     const apiStack = new ApiStack(this, "ApiStack", {
-      ...props,
       database: databaseStack.database,
       vpc: databaseStack.vpc,
       rootUserSecret: databaseStack.rootUserSecret,
     });
 
-    const listingSpecSyncStack = new ListingSpecSyncStack(this, "ListingSpecSyncStack", {
-      ...props,
+    const exchangeSyncStack = new ExchangeSyncStack(this, "ExchangeSyncStack", {
       api: apiStack.api,
       apiKey: apiStack.apiKey,
+      slackChannel: config.slackChannel,
     });
 
     new MonitoringStack(this, "MonitoringStack", {
-      ...props,
       api: apiStack.api,
-      syncLambda: listingSpecSyncStack.syncLambda,
+      syncLambda: exchangeSyncStack.syncLambda,
       database: databaseStack.database,
     });
   }
@@ -50,7 +46,7 @@ export class RegistryPipelineStack extends cdk.Stack {
       crossAccountKeys: true,
       pipelineName: "RegistryPipeline",
       synth: new pipelines.ShellStep("deploy", {
-        input: pipelines.CodePipelineSource.gitHub(config.GITHUB_REPO, config.GITHUB_BRANCH),
+        input: pipelines.CodePipelineSource.gitHub(GITHUB_REPO, GITHUB_BRANCH),
         commands: [
           'echo "//npm.pkg.github.com/:_authToken=${NPM_TOKEN}" > ~/.npmrc',
           "cd cdk/",
@@ -64,15 +60,9 @@ export class RegistryPipelineStack extends cdk.Stack {
       }),
     });
 
-    const dev = new AppStage(this, "Dev", {
-      env: GnomeAccount.InfraDev.environment,
-    })
-    // const staging = new AppStage(this, "Staging", {
-    //   env: GnomeAccount.InfraStaging.environment,
-    // });
-    const prod = new AppStage(this, "Prod", {
-      env: GnomeAccount.InfraProd.environment,
-    });
+    const dev = new AppStage(this, "Dev", CONFIGS[Stage.DEV]!);
+    // const staging = new AppStage(this, "Staging", CONFIGS[Stage.STAGING]!);
+    const prod = new AppStage(this, "Prod", CONFIGS[Stage.PROD]!);
 
     pipeline.addStage(dev);
     // pipeline.addStage(staging, {
@@ -81,7 +71,6 @@ export class RegistryPipelineStack extends cdk.Stack {
     pipeline.addStage(prod, {
       pre: [new pipelines.ManualApprovalStep('ApproveProd')],
     });
-
 
     pipeline.buildPipeline();
     npmSecret.grantRead(pipeline.synthProject.role!!);

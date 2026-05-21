@@ -1,3 +1,6 @@
 package group.gnometrading.sm;
 
-public record ListingSpec(int listingId, long tickSize, long lotSize, long minNotional) {}
+import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
+
+@JsonIgnoreProperties(ignoreUnknown = true)
+public record ListingSpec(int listingId, long tickSize, long lotSize, long minNotional, long contractMultiplier) {}

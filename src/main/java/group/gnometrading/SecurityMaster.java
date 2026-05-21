@@ -1,15 +1,21 @@
 package group.gnometrading;
 
-import group.gnometrading.codecs.json.JsonDecoder;
+import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
+import com.fasterxml.jackson.databind.DeserializationFeature;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.PropertyNamingStrategies;
 import group.gnometrading.collections.IntHashMap;
 import group.gnometrading.collections.IntMap;
-import group.gnometrading.schemas.SchemaType;
+import group.gnometrading.sm.AssetClass;
+import group.gnometrading.sm.ContractType;
 import group.gnometrading.sm.Exchange;
 import group.gnometrading.sm.Listing;
 import group.gnometrading.sm.ListingSpec;
 import group.gnometrading.sm.Security;
+import group.gnometrading.sm.SecurityType;
 import group.gnometrading.strings.ExpandingMutableString;
 import group.gnometrading.strings.MutableString;
+import java.io.IOException;
 import java.nio.ByteBuffer;
 
 /**
@@ -23,11 +29,32 @@ public final class SecurityMaster {
     private static final String LISTING_ENDPOINT = "/api/listings?";
     private static final String LISTING_SPEC_ENDPOINT = "/api/listing-specs?";
 
-    private static final Security EMPTY_SECURITY = new Security(-1, null, -1);
-    private static final Exchange EMPTY_EXCHANGE = new Exchange(-1, null, null, null);
-    private static final ListingSpec EMPTY_LISTING_SPEC = new ListingSpec(-1, -1, -1, -1);
+    private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper()
+            .setPropertyNamingStrategy(PropertyNamingStrategies.SNAKE_CASE)
+            .configure(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false);
 
-    private final JsonDecoder jsonDecoder;
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    private record ListingResponse(
+            int listingId, int exchangeId, int securityId, String exchangeSecurityId, String exchangeSecuritySymbol) {}
+
+    private static final Security EMPTY_SECURITY = new Security(
+            -1,
+            null,
+            SecurityType.SPOT,
+            ContractType.NONE,
+            AssetClass.CRYPTO,
+            null,
+            null,
+            null,
+            false,
+            false,
+            0L,
+            0L,
+            false,
+            0);
+    private static final Exchange EMPTY_EXCHANGE = new Exchange(-1, null, null, null);
+    private static final ListingSpec EMPTY_LISTING_SPEC = new ListingSpec(-1, -1, -1, -1, 0L);
+
     private final RegistryConnection registryConnection;
 
     private final MutableString securityPath;
@@ -42,7 +69,6 @@ public final class SecurityMaster {
 
     public SecurityMaster(final RegistryConnection registryConnection) {
         this.registryConnection = registryConnection;
-        this.jsonDecoder = new JsonDecoder();
 
         this.securityPath = new ExpandingMutableString(SECURITY_ENDPOINT);
         this.exchangePath = new ExpandingMutableString(EXCHANGE_ENDPOINT);
@@ -55,7 +81,6 @@ public final class SecurityMaster {
         this.listingSpecCache = new IntHashMap<>();
     }
 
-    @SuppressWarnings("checkstyle:NestedTryDepth")
     public Security getSecurity(final int securityId) {
         if (this.securityCache.containsKey(securityId)) {
             final Security cached = this.securityCache.get(securityId);
@@ -66,36 +91,19 @@ public final class SecurityMaster {
         final ByteBuffer response = this.registryConnection.get(this.securityPath);
         this.securityPath.setLength(originalLength);
 
-        try (var node = this.jsonDecoder.wrap(response)) {
-            try (var array = node.asArray()) {
-                if (!array.hasNextItem()) {
-                    this.securityCache.put(securityId, EMPTY_SECURITY);
-                    return null;
-                }
-
-                int type = -1;
-                String symbol = null;
-
-                try (var item = array.nextItem()) {
-                    try (var object = item.asObject()) {
-                        while (object.hasNextKey()) {
-                            try (var key = object.nextKey()) {
-                                if (key.getName().equals("symbol")) {
-                                    symbol = key.asString().toString();
-                                } else if (key.getName().equals("type")) {
-                                    type = key.asInt();
-                                }
-                            }
-                        }
-                    }
-                }
-                this.securityCache.put(securityId, new Security(securityId, symbol, type));
-                return this.securityCache.get(securityId);
+        try {
+            final Security[] result = OBJECT_MAPPER.readValue(toByteArray(response), Security[].class);
+            if (result.length == 0) {
+                this.securityCache.put(securityId, EMPTY_SECURITY);
+                return null;
             }
+            this.securityCache.put(securityId, result[0]);
+            return this.securityCache.get(securityId);
+        } catch (IOException e) {
+            throw new RuntimeException(e);
         }
     }
 
-    @SuppressWarnings("checkstyle:NestedTryDepth")
     public Exchange getExchange(final int exchangeId) {
         if (this.exchangeCache.containsKey(exchangeId)) {
             final Exchange cached = this.exchangeCache.get(exchangeId);
@@ -106,36 +114,16 @@ public final class SecurityMaster {
         final ByteBuffer response = this.registryConnection.get(this.exchangePath);
         this.exchangePath.setLength(originalLength);
 
-        try (var node = this.jsonDecoder.wrap(response)) {
-            try (var array = node.asArray()) {
-                if (!array.hasNextItem()) {
-                    this.exchangeCache.put(exchangeId, EMPTY_EXCHANGE);
-                    return null;
-                }
-
-                String exchangeName = null;
-                String region = null;
-                SchemaType schemaType = null;
-
-                try (var item = array.nextItem()) {
-                    try (var object = item.asObject()) {
-                        while (object.hasNextKey()) {
-                            try (var key = object.nextKey()) {
-                                if (key.getName().equals("exchange_name")) {
-                                    exchangeName = key.asString().toString();
-                                } else if (key.getName().equals("region")) {
-                                    region = key.asString().toString();
-                                } else if (key.getName().equals("schema_type")) {
-                                    schemaType =
-                                            SchemaType.findById(key.asString().toString());
-                                }
-                            }
-                        }
-                    }
-                }
-                this.exchangeCache.put(exchangeId, new Exchange(exchangeId, exchangeName, region, schemaType));
-                return this.exchangeCache.get(exchangeId);
+        try {
+            final Exchange[] result = OBJECT_MAPPER.readValue(toByteArray(response), Exchange[].class);
+            if (result.length == 0) {
+                this.exchangeCache.put(exchangeId, EMPTY_EXCHANGE);
+                return null;
             }
+            this.exchangeCache.put(exchangeId, result[0]);
+            return this.exchangeCache.get(exchangeId);
+        } catch (IOException e) {
+            throw new RuntimeException(e);
         }
     }
 
@@ -172,7 +160,6 @@ public final class SecurityMaster {
         return this.listingCache.get(listingId);
     }
 
-    @SuppressWarnings("checkstyle:NestedTryDepth")
     public ListingSpec getListingSpec(final int listingId) {
         if (this.listingSpecCache.containsKey(listingId)) {
             final ListingSpec cached = this.listingSpecCache.get(listingId);
@@ -183,79 +170,41 @@ public final class SecurityMaster {
         final ByteBuffer response = this.registryConnection.get(this.listingSpecPath);
         this.listingSpecPath.setLength(originalLength);
 
-        try (var node = this.jsonDecoder.wrap(response)) {
-            try (var array = node.asArray()) {
-                if (!array.hasNextItem()) {
-                    this.listingSpecCache.put(listingId, EMPTY_LISTING_SPEC);
-                    return null;
-                }
-
-                int parsedListingId = -1;
-                long tickSize = -1;
-                long lotSize = -1;
-                long minNotional = 0;
-
-                try (var item = array.nextItem()) {
-                    try (var object = item.asObject()) {
-                        while (object.hasNextKey()) {
-                            try (var key = object.nextKey()) {
-                                if (key.getName().equals("listing_id")) {
-                                    parsedListingId = key.asInt();
-                                } else if (key.getName().equals("tick_size")) {
-                                    tickSize = key.asLong();
-                                } else if (key.getName().equals("lot_size")) {
-                                    lotSize = key.asLong();
-                                } else if (key.getName().equals("min_notional")) {
-                                    minNotional = key.asLong();
-                                }
-                            }
-                        }
-                    }
-                }
-                this.listingSpecCache.put(listingId, new ListingSpec(parsedListingId, tickSize, lotSize, minNotional));
-                return this.listingSpecCache.get(listingId);
+        try {
+            final ListingSpec[] result = OBJECT_MAPPER.readValue(toByteArray(response), ListingSpec[].class);
+            if (result.length == 0) {
+                this.listingSpecCache.put(listingId, EMPTY_LISTING_SPEC);
+                return null;
             }
+            this.listingSpecCache.put(listingId, result[0]);
+            return this.listingSpecCache.get(listingId);
+        } catch (IOException e) {
+            throw new RuntimeException(e);
         }
     }
 
-    @SuppressWarnings("checkstyle:NestedTryDepth")
     private Listing parseListing(final ByteBuffer response) {
-        try (var node = this.jsonDecoder.wrap(response)) {
-            try (var array = node.asArray()) {
-                if (!array.hasNextItem()) {
-                    return null;
-                }
-
-                int listingId = -1;
-                int exchangeId = -1;
-                int securityId = -1;
-                String exchangeSecurityId = null;
-                String exchangeSecuritySymbol = null;
-
-                try (var item = array.nextItem()) {
-                    try (var object = item.asObject()) {
-                        while (object.hasNextKey()) {
-                            try (var key = object.nextKey()) {
-                                if (key.getName().equals("listing_id")) {
-                                    listingId = key.asInt();
-                                } else if (key.getName().equals("exchange_id")) {
-                                    exchangeId = key.asInt();
-                                } else if (key.getName().equals("security_id")) {
-                                    securityId = key.asInt();
-                                } else if (key.getName().equals("exchange_security_id")) {
-                                    exchangeSecurityId = key.asString().toString();
-                                } else if (key.getName().equals("exchange_security_symbol")) {
-                                    exchangeSecuritySymbol = key.asString().toString();
-                                }
-                            }
-                        }
-                    }
-                }
-                final Exchange exchange = getExchange(exchangeId);
-                final Security security = getSecurity(securityId);
-                return new Listing(listingId, exchange, security, exchangeSecurityId, exchangeSecuritySymbol);
+        try {
+            final ListingResponse[] result = OBJECT_MAPPER.readValue(toByteArray(response), ListingResponse[].class);
+            if (result.length == 0) {
+                return null;
             }
+            final ListingResponse r = result[0];
+            return new Listing(
+                    r.listingId(),
+                    getExchange(r.exchangeId()),
+                    getSecurity(r.securityId()),
+                    r.exchangeSecurityId(),
+                    r.exchangeSecuritySymbol());
+        } catch (IOException e) {
+            throw new RuntimeException(e);
         }
+    }
+
+    private static byte[] toByteArray(final ByteBuffer buffer) {
+        final byte[] bytes = new byte[buffer.remaining()];
+        buffer.get(bytes);
+        return bytes;
     }
 
     private int addParameters(final MutableString string, final String paramName, final int value) {

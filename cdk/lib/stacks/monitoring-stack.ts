@@ -38,8 +38,8 @@ export class MonitoringStack extends cdk.Stack {
       })
       .monitorLambdaFunction({
         lambdaFunction: props.syncLambda,
-        humanReadableName: 'Listing Spec Sync',
-        alarmFriendlyName: 'ListingSpecSync',
+        humanReadableName: 'Exchange Sync',
+        alarmFriendlyName: 'ExchangeSync',
         addFaultCountAlarm: {
           Critical: { maxErrorCount: 0 },
         },

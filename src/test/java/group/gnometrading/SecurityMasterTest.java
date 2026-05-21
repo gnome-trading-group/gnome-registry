@@ -4,10 +4,13 @@ import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.Mockito.*;
 
 import group.gnometrading.schemas.SchemaType;
+import group.gnometrading.sm.AssetClass;
+import group.gnometrading.sm.ContractType;
 import group.gnometrading.sm.Exchange;
 import group.gnometrading.sm.Listing;
 import group.gnometrading.sm.ListingSpec;
 import group.gnometrading.sm.Security;
+import group.gnometrading.sm.SecurityType;
 import group.gnometrading.strings.ViewString;
 import java.nio.ByteBuffer;
 import java.util.stream.Stream;
@@ -29,6 +32,15 @@ class SecurityMasterTest {
     @InjectMocks
     private SecurityMaster securityMaster;
 
+    private static Security spot(final int securityId, final String symbol) {
+        return new Security(
+                securityId, symbol, SecurityType.SPOT, null, null, null, null, null, false, false, 0L, 0L, false, 0);
+    }
+
+    private static Security empty(final int securityId) {
+        return new Security(securityId, null, null, null, null, null, null, null, false, false, 0L, 0L, false, 0);
+    }
+
     private static Stream<Arguments> testGetSecurityArguments() {
         return Stream.of(
                 Arguments.of(1, "[]", null),
@@ -36,9 +48,9 @@ class SecurityMasterTest {
                         123,
                         """
                         [{"security_id": 123, "type": 0, "symbol": "BTC"}]""",
-                        new Security(123, "BTC", 0)),
+                        spot(123, "BTC")),
                 Arguments.of(123, """
-                        [{"security_id": 123}]""", new Security(123, null, -1)));
+                        [{"security_id": 123}]""", empty(123)));
     }
 
     @ParameterizedTest
@@ -95,7 +107,7 @@ class SecurityMasterTest {
                         new Listing(
                                 12,
                                 new Exchange(12399, "BTC", "us-east-2", SchemaType.MBP_1),
-                                new Security(34, "BTC", 0),
+                                spot(34, "BTC"),
                                 "SecId",
                                 "Binance")));
     }
@@ -147,7 +159,7 @@ class SecurityMasterTest {
                         new Listing(
                                 12,
                                 new Exchange(12399, "BTC", "us-east-2", SchemaType.MBP_1),
-                                new Security(34, "BTC", 0),
+                                spot(34, "BTC"),
                                 "SecId",
                                 "Binance")));
     }
@@ -250,20 +262,20 @@ class SecurityMasterTest {
                 Arguments.of(
                         42,
                         """
-                        [{"listing_id": 42, "tick_size": 100, "lot_size": 1000, "min_notional": 50000}]""",
-                        new ListingSpec(42, 100L, 1000L, 50000L)),
+                        [{"listing_id": 42, "tick_size": 100, "lot_size": 1000, "min_notional": 50000, "contract_multiplier": 1000000000}]""",
+                        new ListingSpec(42, 100L, 1000L, 50000L, 1_000_000_000L)),
                 Arguments.of(
                         99,
                         """
                         [{"listing_id": 99, "tick_size": 10, "lot_size": 100}]""",
-                        new ListingSpec(99, 10L, 100L, 0L)));
+                        new ListingSpec(99, 10L, 100L, 0L, 0L)));
     }
 
     @Test
     void testGetListingSpecCaching() {
         when(registryConnection.get(new ViewString("/api/listing-specs?listingId=42")))
                 .thenReturn(ByteBuffer.wrap(
-                        "[{\"listing_id\": 42, \"tick_size\": 100, \"lot_size\": 1000, \"min_notional\": 0}]"
+                        "[{\"listing_id\": 42, \"tick_size\": 100, \"lot_size\": 1000, \"min_notional\": 0, \"contract_multiplier\": 1000000000}]"
                                 .getBytes()));
         assertSame(securityMaster.getListingSpec(42), securityMaster.getListingSpec(42));
         verify(registryConnection, times(1)).get(any());
@@ -322,5 +334,30 @@ class SecurityMasterTest {
 
         assertSame(first, second);
         verify(registryConnection, times(3)).get(any()); // listing + exchange + security, only once each
+    }
+
+    @Test
+    void testGetSecurityAllFields() {
+        String jsonResponse =
+                """
+                [{"security_id": 5, "symbol": "BTC-USDT-PERP", "type": 1, "contract_type": 1, \
+"asset_class": 0, "base_currency": "BTC", "quote_currency": "USDT", "settle_currency": "USDT", \
+"inverse": false, "is_quanto": false, "contract_multiplier": 1000000000, "active": true, \
+"underlying_security_id": 0}]""";
+        when(registryConnection.get(new ViewString("/api/securities?securityId=5")))
+                .thenReturn(ByteBuffer.wrap(jsonResponse.getBytes()));
+
+        Security result = securityMaster.getSecurity(5);
+
+        assertNotNull(result);
+        assertEquals(5, result.securityId());
+        assertEquals("BTC-USDT-PERP", result.symbol());
+        assertEquals(SecurityType.PERPETUAL, result.type());
+        assertEquals(ContractType.LINEAR_PERPETUAL, result.contractType());
+        assertEquals(AssetClass.CRYPTO, result.assetClass());
+        assertEquals("BTC", result.baseCurrency());
+        assertEquals("USDT", result.quoteCurrency());
+        assertEquals("USDT", result.settleCurrency());
+        assertTrue(result.active());
     }
 }

@@ -29,6 +29,15 @@ export class DatabaseInitLambda extends Construct {
       environment: {
         DATABASE_SECRET_JSON: props.rootUserSecret.secretValue.unsafeUnwrap(),
       },
+      bundling: {
+        commandHooks: {
+          afterBundling(inputDir: string, outputDir: string): string[] {
+            return [`cp -r ${inputDir}/lambda/db-init/migrations ${outputDir}/migrations`];
+          },
+          beforeBundling(): string[] { return []; },
+          beforeInstall(): string[] { return []; },
+        },
+      },
     });
     props.database.grantConnect(initLambda);
     initLambda.node.addDependency(props.database);
