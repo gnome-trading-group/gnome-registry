@@ -3,9 +3,9 @@ import { ResourceHandler } from './base';
 import { ICreateSecurity, IDeleteSecurity } from '../types';
 
 const CURRENCY_COLUMNS = `
-    (SELECT symbol FROM sm.currency WHERE currency_id = s.base_currency_id) AS base_currency,
-    (SELECT symbol FROM sm.currency WHERE currency_id = s.quote_currency_id) AS quote_currency,
-    (SELECT symbol FROM sm.currency WHERE currency_id = s.settle_currency_id) AS settle_currency`;
+    (SELECT symbol FROM sm.currency WHERE currency_id = base_currency_id) AS base_currency,
+    (SELECT symbol FROM sm.currency WHERE currency_id = quote_currency_id) AS quote_currency,
+    (SELECT symbol FROM sm.currency WHERE currency_id = settle_currency_id) AS settle_currency`;
 
 class SecurityHandler extends ResourceHandler {
   generateDeleteQuery(body: string): string {
