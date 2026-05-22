@@ -250,10 +250,10 @@ export const handler = async () => {
       if (!listing) return;
       const existing = specByListingId.get(listing.listing_id);
       const changed = !existing
-        || existing.tick_size !== sec.tickSize
-        || existing.lot_size !== sec.lotSize
-        || existing.min_notional !== sec.minNotional
-        || existing.contract_multiplier !== sec.contractMultiplier;
+        || Number(existing.tick_size) !== sec.tickSize
+        || Number(existing.lot_size) !== sec.lotSize
+        || Number(existing.min_notional) !== sec.minNotional
+        || Number(existing.contract_multiplier) !== sec.contractMultiplier;
       if (!changed) {
         skipped++;
         return;

@@ -2,10 +2,12 @@ import { APIGatewayProxyEvent, APIGatewayProxyEventQueryStringParameters } from 
 import { ResourceHandler } from './base';
 import { ICreateSecurity, IDeleteSecurity } from '../types';
 
-const CURRENCY_COLUMNS = `
-    (SELECT symbol FROM sm.currency WHERE currency_id = base_currency_id) AS base_currency,
-    (SELECT symbol FROM sm.currency WHERE currency_id = quote_currency_id) AS quote_currency,
-    (SELECT symbol FROM sm.currency WHERE currency_id = settle_currency_id) AS settle_currency`;
+function currencyColumns(alias: string): string {
+  return `
+    (SELECT symbol FROM sm.currency WHERE currency_id = ${alias}.base_currency_id) AS base_currency,
+    (SELECT symbol FROM sm.currency WHERE currency_id = ${alias}.quote_currency_id) AS quote_currency,
+    (SELECT symbol FROM sm.currency WHERE currency_id = ${alias}.settle_currency_id) AS settle_currency`;
+}
 
 class SecurityHandler extends ResourceHandler {
   generateDeleteQuery(body: string): string {
@@ -20,33 +22,37 @@ class SecurityHandler extends ResourceHandler {
   generateInsertQuery(body: string): string {
     const s = JSON.parse(body) as ICreateSecurity;
     return `
-      INSERT INTO sm.security (
-        symbol, description, type, contract_type, asset_class,
-        base_currency_id, quote_currency_id, settle_currency_id,
-        inverse, is_quanto, expiry, strike_price, active, underlying_security_id
-      ) VALUES (
-        '${s.symbol}',
-        ${s.description ? `'${s.description}'` : 'null'},
-        ${s.type},
-        ${s.contractType ?? 0},
-        ${s.assetClass ?? 0},
-        ${s.baseCurrencyId ?? 'null'},
-        ${s.quoteCurrencyId ?? 'null'},
-        ${s.settleCurrencyId ?? 'null'},
-        ${s.inverse ?? false},
-        ${s.quanto ?? false},
-        ${s.expiry != null ? `'${s.expiry}'` : 'null'},
-        ${s.strikePrice ?? 'null'},
-        ${s.active ?? true},
-        ${s.underlyingSecurityId ?? 'null'}
+      WITH ins AS (
+        INSERT INTO sm.security (
+          symbol, description, type, contract_type, asset_class,
+          base_currency_id, quote_currency_id, settle_currency_id,
+          inverse, is_quanto, expiry, strike_price, active, underlying_security_id
+        ) VALUES (
+          '${s.symbol}',
+          ${s.description ? `'${s.description}'` : 'null'},
+          ${s.type},
+          ${s.contractType ?? 0},
+          ${s.assetClass ?? 0},
+          ${s.baseCurrencyId ?? 'null'},
+          ${s.quoteCurrencyId ?? 'null'},
+          ${s.settleCurrencyId ?? 'null'},
+          ${s.inverse ?? false},
+          ${s.quanto ?? false},
+          ${s.expiry != null ? `'${s.expiry}'` : 'null'},
+          ${s.strikePrice ?? 'null'},
+          ${s.active ?? true},
+          ${s.underlyingSecurityId ?? 'null'}
+        )
+        RETURNING *
       )
-      RETURNING *,${CURRENCY_COLUMNS};
+      SELECT ins.*,${currencyColumns('ins')}
+      FROM ins
     `;
   }
 
   generateSelectQuery(params: APIGatewayProxyEventQueryStringParameters | null): string {
     let query = `
-      SELECT s.*,${CURRENCY_COLUMNS}
+      SELECT s.*,${currencyColumns('s')}
       FROM sm.security s
       WHERE 1=1`;
 
@@ -87,9 +93,13 @@ class SecurityHandler extends ResourceHandler {
     if (s.underlyingSecurityId !== undefined) updates.push(`underlying_security_id=${s.underlyingSecurityId ?? 'null'}`);
     updates.push(`date_modified=NOW()`);
     return `
-      UPDATE sm.security s SET ${updates.join(', ')}
-      WHERE security_id=${row['security_id']}
-      RETURNING *,${CURRENCY_COLUMNS};
+      WITH upd AS (
+        UPDATE sm.security SET ${updates.join(', ')}
+        WHERE security_id=${row['security_id']}
+        RETURNING *
+      )
+      SELECT upd.*,${currencyColumns('upd')}
+      FROM upd
     `;
   }
 }
