@@ -57,3 +57,51 @@ export interface IListing extends IListingBase {
 export interface IDeleteListing {
   listingId: number;
 }
+
+interface IEventBase {
+  title: string;
+  description?: string;
+  category?: string;
+  resolutionSource?: string;
+  expiry?: string | null;
+  tags?: string[] | null;
+  embedding?: number[] | null;
+}
+export interface ICreateEvent extends IEventBase {}
+export interface IDeleteEvent {
+  eventId: number;
+}
+
+interface IEventContractBase {
+  eventId: number;
+  securityId: number;
+  outcomeLabel: string;
+  complementSecurityId?: number | null;
+}
+export interface ICreateEventContract extends IEventContractBase {}
+export interface IDeleteEventContract {
+  eventContractId: number;
+}
+
+interface IContractRelationshipBase {
+  securityIdA: number;
+  securityIdB: number;
+  relationshipType: string;
+  confidence: number;
+  method: string;
+}
+export interface ICreateContractRelationship extends IContractRelationshipBase {}
+export interface IDeleteContractRelationship {
+  relationshipId: number;
+}
+
+interface IExchangeEventBase {
+  exchangeId: number;
+  eventId: number;
+  nativeEventId: string;
+  rawTitle: string;
+}
+export interface ICreateExchangeEvent extends IExchangeEventBase {}
+export interface IDeleteExchangeEvent {
+  exchangeEventId: number;
+}

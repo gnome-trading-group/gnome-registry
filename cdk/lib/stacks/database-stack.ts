@@ -77,6 +77,7 @@ export class DatabaseStack extends cdk.Stack {
       instanceType,
       engine,
       allocatedStorage: 20,
+      storageType: rds.StorageType.GP3,
       port,
       securityGroups: [sg],
       databaseName: this.databaseName,

@@ -6,6 +6,7 @@ import { Stage } from "@gnome-trading-group/gnome-shared-cdk";
 import { DatabaseStack } from "./stacks/database-stack";
 import { ApiStack } from "./stacks/api-stack";
 import { ExchangeSyncStack } from "./stacks/exchange-sync-stack";
+import { ClassifierStack } from "./stacks/classifier-stack";
 import { MonitoringStack } from "./stacks/monitoring-stack";
 import { GITHUB_REPO, GITHUB_BRANCH, CONFIGS, RegistryConfig } from "./config";
 
@@ -22,6 +23,11 @@ class AppStage extends cdk.Stage {
       rootUserSecret: databaseStack.rootUserSecret,
     });
 
+    const classifierStack = new ClassifierStack(this, "ClassifierStack", {
+      api: apiStack.api,
+      apiKey: apiStack.apiKey,
+    });
+
     const exchangeSyncStack = new ExchangeSyncStack(this, "ExchangeSyncStack", {
       api: apiStack.api,
       apiKey: apiStack.apiKey,
@@ -31,6 +37,7 @@ class AppStage extends cdk.Stage {
     new MonitoringStack(this, "MonitoringStack", {
       api: apiStack.api,
       syncLambda: exchangeSyncStack.syncLambda,
+      classifierLambda: classifierStack.classifierLambda,
       database: databaseStack.database,
     });
   }

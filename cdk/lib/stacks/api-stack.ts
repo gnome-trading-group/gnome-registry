@@ -60,7 +60,7 @@ export class ApiStack extends cdk.Stack {
       },
     };
 
-    const crudResources = ['securities', 'exchanges', 'listings', 'listing-specs', 'strategies', 'currencies'];
+    const crudResources = ['securities', 'exchanges', 'listings', 'listing-specs', 'strategies', 'currencies', 'events', 'event-contracts', 'contract-relationships', 'exchange-events'];
     for (const resourceName of crudResources) {
       const resource = this.api.root.addResource(resourceName);
       this.attachMethods(resource, `${resourceName}.ts`, ['GET', 'POST', 'DELETE', 'PATCH']);

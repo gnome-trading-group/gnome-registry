@@ -9,6 +9,7 @@ import { MonitoringFacade, SnsAlarmActionStrategy } from 'cdk-monitoring-constru
 interface Props extends cdk.StackProps {
   api: apigw.RestApi;
   syncLambda: lambda.IFunction;
+  classifierLambda: lambda.IFunction;
   database: rds.DatabaseInstance;
 }
 
@@ -40,6 +41,14 @@ export class MonitoringStack extends cdk.Stack {
         lambdaFunction: props.syncLambda,
         humanReadableName: 'Exchange Sync',
         alarmFriendlyName: 'ExchangeSync',
+        addFaultCountAlarm: {
+          Critical: { maxErrorCount: 0 },
+        },
+      })
+      .monitorLambdaFunction({
+        lambdaFunction: props.classifierLambda,
+        humanReadableName: 'Contract Classifier',
+        alarmFriendlyName: 'ContractClassifier',
         addFaultCountAlarm: {
           Critical: { maxErrorCount: 0 },
         },
