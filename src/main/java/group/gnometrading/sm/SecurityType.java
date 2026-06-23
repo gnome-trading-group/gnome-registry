@@ -7,7 +7,8 @@ public enum SecurityType {
     SPOT(0),
     PERPETUAL(1),
     FUTURE(2),
-    OPTION(3);
+    OPTION(3),
+    EVENT_CONTRACT(4);
 
     private final int code;
 
@@ -27,6 +28,7 @@ public enum SecurityType {
             case 1 -> PERPETUAL;
             case 2 -> FUTURE;
             case 3 -> OPTION;
+            case 4 -> EVENT_CONTRACT;
             default -> throw new IllegalArgumentException("Unknown SecurityType code: " + code);
         };
     }

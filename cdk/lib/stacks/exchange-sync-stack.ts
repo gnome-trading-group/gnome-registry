@@ -8,7 +8,6 @@ import * as iam from 'aws-cdk-lib/aws-iam';
 import * as secrets from 'aws-cdk-lib/aws-secretsmanager';
 import { Runtime } from 'aws-cdk-lib/aws-lambda';
 import { join } from 'path';
-import * as config from '../config';
 
 interface Props extends cdk.StackProps {
   api: apigw.RestApi;

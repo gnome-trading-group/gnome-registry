@@ -60,7 +60,7 @@ export class ApiStack extends cdk.Stack {
       },
     };
 
-    const crudResources = ['securities', 'exchanges', 'listings', 'listing-specs', 'strategies', 'currencies'];
+    const crudResources = ['securities', 'exchanges', 'listings', 'listing-specs', 'strategies', 'currencies', 'events', 'event-contracts', 'contract-relationships', 'exchange-events'];
     for (const resourceName of crudResources) {
       const resource = this.api.root.addResource(resourceName);
       this.attachMethods(resource, `${resourceName}.ts`, ['GET', 'POST', 'DELETE', 'PATCH']);
@@ -84,7 +84,18 @@ export class ApiStack extends cdk.Stack {
       stage: this.api.deploymentStage
     });
 
-    new cdk.CfnOutput(this, 'API URL', { value: this.api.url });
+    new cdk.CfnOutput(this, 'API URL', {
+      value: this.api.url,
+      exportName: 'RegistryApiUrl',
+    });
+    new cdk.CfnOutput(this, 'ApiKeyId', {
+      value: this.apiKey.keyId,
+      exportName: 'RegistryApiKeyId',
+    });
+    new cdk.CfnOutput(this, 'ApiKeyArn', {
+      value: this.apiKey.keyArn,
+      exportName: 'RegistryApiKeyArn',
+    });
   }
 
   private attachMethods(resource: apigw.Resource, fileName: string, methods: string[]) {

@@ -32,6 +32,9 @@ export class ResourceHandler {
         case 'GET':
           return await this.get(event.queryStringParameters);
         case 'POST':
+          if (event.body && event.body.trimStart().startsWith('[')) {
+            return await this.createMany(event.body);
+          }
           return await this.createOne(event.body);
         case 'DELETE':
           return await this.deleteOne(event.body);
@@ -97,6 +100,33 @@ export class ResourceHandler {
 
     const item = result.rows[0];
     return this.createResponse(200, item);
+  }
+
+  async createMany(body: string | null) {
+    if (!body) {
+      return this.createResponse(400, { message: 'Missing body' });
+    }
+    const items = JSON.parse(body);
+    if (!Array.isArray(items) || items.length === 0) {
+      return this.createResponse(400, { message: 'Expected non-empty array' });
+    }
+    const results: any[] = [];
+    try {
+      await this.client.query('BEGIN');
+      for (const item of items) {
+        const query = this.generateInsertQuery(JSON.stringify(item));
+        const result = await this.client.query(query);
+        if (result.rowCount !== 1) {
+          throw new Error(`Insert failed for item: ${JSON.stringify(item)}`);
+        }
+        results.push(result.rows[0]);
+      }
+      await this.client.query('COMMIT');
+    } catch (error) {
+      await this.client.query('ROLLBACK');
+      throw error;
+    }
+    return this.createResponse(200, results);
   }
 
   generateDeleteQuery(body: string): string {

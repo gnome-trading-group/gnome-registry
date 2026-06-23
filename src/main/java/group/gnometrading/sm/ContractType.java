@@ -10,7 +10,9 @@ public enum ContractType {
     LINEAR_FUTURE(3),
     INVERSE_FUTURE(4),
     CALL_OPTION(5),
-    PUT_OPTION(6);
+    PUT_OPTION(6),
+    BINARY(7),
+    MULTI_OUTCOME(8);
 
     private final int code;
 
@@ -33,6 +35,8 @@ public enum ContractType {
             case 4 -> INVERSE_FUTURE;
             case 5 -> CALL_OPTION;
             case 6 -> PUT_OPTION;
+            case 7 -> BINARY;
+            case 8 -> MULTI_OUTCOME;
             default -> throw new IllegalArgumentException("Unknown ContractType code: " + code);
         };
     }

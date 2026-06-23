@@ -132,7 +132,6 @@ export const handler = async () => {
   const specByListingId = new Map<number, ListingSpecResponse>(existingSpecs.map(s => [s.listing_id, s]));
   const exchangeNameById = new Map<number, string>(exchanges.map(e => [e.exchange_id, e.exchange_name]));
 
-  // Fetch from all adapters
   const byExchange: Array<{ exchangeId: number; data: ExchangeSecurityData[] }> = [];
   for (const exchange of exchanges) {
     const adapter = getAdapter(exchange.exchange_name);
@@ -179,7 +178,7 @@ export const handler = async () => {
     }
   });
 
-  // Phase 2: Securities (deduplicated by securitySymbol across exchanges)
+  // Phase 2: Securities (prediction market contracts are handled by the classifier Lambda)
   const uniqueSecurities = new Map<string, ExchangeSecurityData>();
   for (const { data } of byExchange) {
     for (const sec of data) {
@@ -215,9 +214,10 @@ export const handler = async () => {
     }
   });
 
-  // Phase 3: Listings
+  // Phase 3: Listings (prediction market contracts are handled by the classifier Lambda)
   for (const { exchangeId, data } of byExchange) {
     await batchExecute(data, 10, async (sec) => {
+
       const key = `${exchangeId}:${sec.exchangeSecurityId}`;
       if (listingByKey.has(key)) return;
       const security = securityBySymbol.get(sec.securitySymbol);
@@ -242,9 +242,10 @@ export const handler = async () => {
     });
   }
 
-  // Phase 4: Listing specs — append-only, INSERT only when values change
+  // Phase 4: Listing specs (prediction market contracts are handled by the classifier Lambda)
   for (const { exchangeId, data } of byExchange) {
     await batchExecute(data, 10, async (sec) => {
+
       const key = `${exchangeId}:${sec.exchangeSecurityId}`;
       const listing = listingByKey.get(key);
       if (!listing) return;

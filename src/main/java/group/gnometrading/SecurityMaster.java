@@ -8,6 +8,8 @@ import group.gnometrading.collections.IntHashMap;
 import group.gnometrading.collections.IntMap;
 import group.gnometrading.sm.AssetClass;
 import group.gnometrading.sm.ContractType;
+import group.gnometrading.sm.Event;
+import group.gnometrading.sm.EventContract;
 import group.gnometrading.sm.Exchange;
 import group.gnometrading.sm.Listing;
 import group.gnometrading.sm.ListingSpec;
@@ -28,6 +30,8 @@ public final class SecurityMaster {
     private static final String EXCHANGE_ENDPOINT = "/api/exchanges?";
     private static final String LISTING_ENDPOINT = "/api/listings?";
     private static final String LISTING_SPEC_ENDPOINT = "/api/listing-specs?";
+    private static final String EVENT_ENDPOINT = "/api/events?";
+    private static final String EVENT_CONTRACT_ENDPOINT = "/api/event-contracts?";
 
     private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper()
             .setPropertyNamingStrategy(PropertyNamingStrategies.SNAKE_CASE)
@@ -54,6 +58,8 @@ public final class SecurityMaster {
             0);
     private static final Exchange EMPTY_EXCHANGE = new Exchange(-1, null, null, null);
     private static final ListingSpec EMPTY_LISTING_SPEC = new ListingSpec(-1, -1, -1, -1, 0L);
+    private static final Event EMPTY_EVENT = new Event(-1, null, null, null, null, false, 0L, 0L);
+    private static final EventContract EMPTY_EVENT_CONTRACT = new EventContract(-1, -1, -1, null, -1);
 
     private final RegistryConnection registryConnection;
 
@@ -61,11 +67,15 @@ public final class SecurityMaster {
     private final MutableString exchangePath;
     private final MutableString listingPath;
     private final MutableString listingSpecPath;
+    private final MutableString eventPath;
+    private final MutableString eventContractPath;
 
     private final IntMap<Security> securityCache;
     private final IntMap<Exchange> exchangeCache;
     private final IntMap<Listing> listingCache;
     private final IntMap<ListingSpec> listingSpecCache;
+    private final IntMap<Event> eventCache;
+    private final IntMap<EventContract> eventContractBySecurityCache;
 
     public SecurityMaster(final RegistryConnection registryConnection) {
         this.registryConnection = registryConnection;
@@ -74,11 +84,15 @@ public final class SecurityMaster {
         this.exchangePath = new ExpandingMutableString(EXCHANGE_ENDPOINT);
         this.listingPath = new ExpandingMutableString(LISTING_ENDPOINT);
         this.listingSpecPath = new ExpandingMutableString(LISTING_SPEC_ENDPOINT);
+        this.eventPath = new ExpandingMutableString(EVENT_ENDPOINT);
+        this.eventContractPath = new ExpandingMutableString(EVENT_CONTRACT_ENDPOINT);
 
         this.securityCache = new IntHashMap<>();
         this.exchangeCache = new IntHashMap<>();
         this.listingCache = new IntHashMap<>();
         this.listingSpecCache = new IntHashMap<>();
+        this.eventCache = new IntHashMap<>();
+        this.eventContractBySecurityCache = new IntHashMap<>();
     }
 
     public Security getSecurity(final int securityId) {
@@ -178,6 +192,52 @@ public final class SecurityMaster {
             }
             this.listingSpecCache.put(listingId, result[0]);
             return this.listingSpecCache.get(listingId);
+        } catch (IOException e) {
+            throw new RuntimeException(e);
+        }
+    }
+
+    public Event getEvent(final int eventId) {
+        if (this.eventCache.containsKey(eventId)) {
+            final Event cached = this.eventCache.get(eventId);
+            return cached == EMPTY_EVENT ? null : cached;
+        }
+
+        final int originalLength = addParameters(this.eventPath, "eventId", eventId);
+        final ByteBuffer response = this.registryConnection.get(this.eventPath);
+        this.eventPath.setLength(originalLength);
+
+        try {
+            final Event[] result = OBJECT_MAPPER.readValue(toByteArray(response), Event[].class);
+            if (result.length == 0) {
+                this.eventCache.put(eventId, EMPTY_EVENT);
+                return null;
+            }
+            this.eventCache.put(eventId, result[0]);
+            return this.eventCache.get(eventId);
+        } catch (IOException e) {
+            throw new RuntimeException(e);
+        }
+    }
+
+    public EventContract getEventContractBySecurity(final int securityId) {
+        if (this.eventContractBySecurityCache.containsKey(securityId)) {
+            final EventContract cached = this.eventContractBySecurityCache.get(securityId);
+            return cached == EMPTY_EVENT_CONTRACT ? null : cached;
+        }
+
+        final int originalLength = addParameters(this.eventContractPath, "securityId", securityId);
+        final ByteBuffer response = this.registryConnection.get(this.eventContractPath);
+        this.eventContractPath.setLength(originalLength);
+
+        try {
+            final EventContract[] result = OBJECT_MAPPER.readValue(toByteArray(response), EventContract[].class);
+            if (result.length == 0) {
+                this.eventContractBySecurityCache.put(securityId, EMPTY_EVENT_CONTRACT);
+                return null;
+            }
+            this.eventContractBySecurityCache.put(securityId, result[0]);
+            return this.eventContractBySecurityCache.get(securityId);
         } catch (IOException e) {
             throw new RuntimeException(e);
         }
