@@ -76,7 +76,6 @@ interface IEventContractBase {
   eventId: number;
   securityId: number;
   outcomeLabel: string;
-  complementSecurityId?: number | null;
 }
 export interface ICreateEventContract extends IEventContractBase {}
 export interface IDeleteEventContract {

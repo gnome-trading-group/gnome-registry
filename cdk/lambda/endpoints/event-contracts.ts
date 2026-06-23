@@ -14,10 +14,9 @@ class EventContractHandler extends ResourceHandler {
 
   generateInsertQuery(body: string): string {
     const ec = JSON.parse(body) as ICreateEventContract;
-    const complementId = ec.complementSecurityId != null ? ec.complementSecurityId : 'NULL';
     return `
-      INSERT INTO sm.event_contract (event_id, security_id, outcome_label, complement_security_id)
-      VALUES (${ec.eventId}, ${ec.securityId}, '${ec.outcomeLabel.replace(/'/g, "''")}', ${complementId})
+      INSERT INTO sm.event_contract (event_id, security_id, outcome_label)
+      VALUES (${ec.eventId}, ${ec.securityId}, '${ec.outcomeLabel.replace(/'/g, "''")}')
       RETURNING *;
     `;
   }
@@ -41,7 +40,6 @@ class EventContractHandler extends ResourceHandler {
     const ec = JSON.parse(body) as Partial<ICreateEventContract>;
     const updates: string[] = [];
     if (ec.outcomeLabel !== undefined) updates.push(`outcome_label = '${ec.outcomeLabel.replace(/'/g, "''")}'`);
-    if (ec.complementSecurityId !== undefined) updates.push(`complement_security_id = ${ec.complementSecurityId != null ? ec.complementSecurityId : 'NULL'}`);
     return `UPDATE sm.event_contract SET ${updates.join(', ')} WHERE event_contract_id = ${row['event_contract_id']} RETURNING *`;
   }
 }

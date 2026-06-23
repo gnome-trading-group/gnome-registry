@@ -50,7 +50,6 @@ export interface ExchangeSecurityData {
   eventCategory?: string;
   eventExpiry?: string;        // ISO 8601 timestamp
   outcomeLabel?: string;       // e.g. "Yes", "No", "Trump wins"
-  complementExchangeSecurityId?: string;  // exchangeSecurityId of the opposing contract
 }
 
 export interface ExchangeAdapter {
@@ -109,5 +108,4 @@ export interface EventContractResponse {
   event_id: number;
   security_id: number;
   outcome_label: string;
-  complement_security_id?: number;
 }

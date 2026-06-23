@@ -23,7 +23,6 @@ CREATE TABLE sm.event_contract (
     event_id               integer NOT NULL REFERENCES sm.event(event_id),
     security_id            integer NOT NULL REFERENCES sm.security(security_id),
     outcome_label          varchar NOT NULL,
-    complement_security_id integer REFERENCES sm.security(security_id),
     date_created           timestamp NOT NULL DEFAULT now(),
     UNIQUE (event_id, security_id)
 );
