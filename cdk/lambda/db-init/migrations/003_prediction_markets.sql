@@ -48,9 +48,6 @@ CREATE TABLE sm.contract_relationship (
     UNIQUE (security_id_a, security_id_b)
 );
 
-ALTER TABLE sm.security ADD CONSTRAINT chk_event_contract_requires_expiry
-    CHECK (type != 4 OR expiry IS NOT NULL);
-
 CREATE TABLE sm.exchange_event (
     exchange_event_id  serial    PRIMARY KEY,
     exchange_id        integer   NOT NULL REFERENCES sm.exchange(exchange_id),
