@@ -84,7 +84,18 @@ export class ApiStack extends cdk.Stack {
       stage: this.api.deploymentStage
     });
 
-    new cdk.CfnOutput(this, 'API URL', { value: this.api.url });
+    new cdk.CfnOutput(this, 'API URL', {
+      value: this.api.url,
+      exportName: 'RegistryApiUrl',
+    });
+    new cdk.CfnOutput(this, 'ApiKeyId', {
+      value: this.apiKey.keyId,
+      exportName: 'RegistryApiKeyId',
+    });
+    new cdk.CfnOutput(this, 'ApiKeyArn', {
+      value: this.apiKey.keyArn,
+      exportName: 'RegistryApiKeyArn',
+    });
   }
 
   private attachMethods(resource: apigw.Resource, fileName: string, methods: string[]) {
