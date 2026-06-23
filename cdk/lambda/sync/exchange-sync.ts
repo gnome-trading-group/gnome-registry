@@ -182,7 +182,6 @@ export const handler = async () => {
   const uniqueSecurities = new Map<string, ExchangeSecurityData>();
   for (const { data } of byExchange) {
     for (const sec of data) {
-      if (sec.eventTitle) continue;
       if (!uniqueSecurities.has(sec.securitySymbol)) {
         uniqueSecurities.set(sec.securitySymbol, sec);
       }
@@ -218,7 +217,7 @@ export const handler = async () => {
   // Phase 3: Listings (prediction market contracts are handled by the classifier Lambda)
   for (const { exchangeId, data } of byExchange) {
     await batchExecute(data, 10, async (sec) => {
-      if (sec.eventTitle) return;
+
       const key = `${exchangeId}:${sec.exchangeSecurityId}`;
       if (listingByKey.has(key)) return;
       const security = securityBySymbol.get(sec.securitySymbol);
@@ -246,7 +245,7 @@ export const handler = async () => {
   // Phase 4: Listing specs (prediction market contracts are handled by the classifier Lambda)
   for (const { exchangeId, data } of byExchange) {
     await batchExecute(data, 10, async (sec) => {
-      if (sec.eventTitle) return;
+
       const key = `${exchangeId}:${sec.exchangeSecurityId}`;
       const listing = listingByKey.get(key);
       if (!listing) return;

@@ -44,12 +44,6 @@ export interface ExchangeSecurityData {
   lotSize: number;
   minNotional: number;
   contractMultiplier: number;
-  // Prediction market fields (optional)
-  eventTitle?: string;
-  eventDescription?: string;
-  eventCategory?: string;
-  eventExpiry?: string;        // ISO 8601 timestamp
-  outcomeLabel?: string;       // e.g. "Yes", "No", "Trump wins"
 }
 
 export interface ExchangeAdapter {
@@ -90,22 +84,3 @@ export interface ListingSpecResponse {
   contract_multiplier: number;
 }
 
-export interface EventResponse {
-  event_id: number;
-  title: string;
-  description?: string;
-  category?: string;
-  resolution_source?: string;
-  tags?: string[];
-  embedding?: number[];
-  resolved: boolean;
-  resolved_at?: string;
-  expiry?: string;
-}
-
-export interface EventContractResponse {
-  event_contract_id: number;
-  event_id: number;
-  security_id: number;
-  outcome_label: string;
-}
