@@ -8,5 +8,4 @@ public record Event(
         String resolutionSource,
         boolean resolved,
         long resolvedAt,
-        long expiry) {
-}
+        long expiry) {}
