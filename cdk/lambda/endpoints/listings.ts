@@ -15,7 +15,7 @@ class ListingHandler extends ResourceHandler {
     const listing = JSON.parse(body) as ICreateListing;
     return `
       INSERT INTO sm.listing (exchange_id,security_id,exchange_security_id,exchange_security_symbol)
-      VALUES ('${listing.exchangeId}',${listing.securityId},'${listing.exchangeSecurityId}','${listing.exchangeSecuritySymbol}')
+      VALUES (${listing.exchangeId},${listing.securityId},'${listing.exchangeSecurityId.replace(/'/g, "''")}','${listing.exchangeSecuritySymbol.replace(/'/g, "''")}')
       RETURNING *;
     `;
   }
