@@ -40,6 +40,23 @@ async function resolveSlackToken(): Promise<string | undefined> {
   return cachedSlackToken;
 }
 
+const PAGE_SIZE = 5000;
+
+async function registryFetchAll<T>(path: string, apiKey: string): Promise<T[]> {
+  const items: T[] = [];
+  let offset = 0;
+  while (true) {
+    const separator = path.includes('?') ? '&' : '?';
+    const page = await registryFetch<T[]>(
+      `${path}${separator}limit=${PAGE_SIZE}&offset=${offset}`, 'GET', apiKey
+    );
+    items.push(...page);
+    if (page.length < PAGE_SIZE) break;
+    offset += PAGE_SIZE;
+  }
+  return items;
+}
+
 async function registryFetch<T>(path: string, method: string, apiKey: string, body?: unknown): Promise<T> {
   const baseUrl = process.env.REGISTRY_API_URL!.replace(/\/$/, '');
   const res = await fetch(`${baseUrl}${path}`, {
@@ -117,11 +134,11 @@ export const handler = async () => {
   const apiKey = await resolveApiKey();
 
   const [exchanges, currencies, securities, listings, existingSpecs] = await Promise.all([
-    registryFetch<ExchangeResponse[]>('/exchanges', 'GET', apiKey),
-    registryFetch<CurrencyResponse[]>('/currencies', 'GET', apiKey),
-    registryFetch<SecurityResponse[]>('/securities', 'GET', apiKey),
-    registryFetch<ListingResponse[]>('/listings', 'GET', apiKey),
-    registryFetch<ListingSpecResponse[]>('/listing-specs', 'GET', apiKey),
+    registryFetchAll<ExchangeResponse>('/exchanges', apiKey),
+    registryFetchAll<CurrencyResponse>('/currencies', apiKey),
+    registryFetchAll<SecurityResponse>('/securities', apiKey),
+    registryFetchAll<ListingResponse>('/listings', apiKey),
+    registryFetchAll<ListingSpecResponse>('/listing-specs', apiKey),
   ]);
 
   const currencyBySymbol = new Map<string, CurrencyResponse>(currencies.map(c => [c.symbol, c]));

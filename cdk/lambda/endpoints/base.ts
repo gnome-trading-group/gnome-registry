@@ -2,6 +2,8 @@ import { APIGatewayProxyEvent, APIGatewayProxyEventQueryStringParameters } from 
 import { connectDatabase } from "../connections";
 import { Pool } from 'pg';
 
+const DEFAULT_PAGE_SIZE = 5000;
+
 const CORS_HEADERS = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Credentials': 'true',
@@ -150,7 +152,16 @@ export class ResourceHandler {
   }
 
   async get(params: APIGatewayProxyEventQueryStringParameters | null) {
-    const query = this.generateSelectQuery(params);
+    const limit = params?.limit ? parseInt(params.limit, 10) : DEFAULT_PAGE_SIZE;
+    const offset = params?.offset ? parseInt(params.offset, 10) : 0;
+
+    let query = this.generateSelectQuery(params);
+
+    if (!query.toUpperCase().includes('ORDER BY')) {
+      query += ' ORDER BY 1';
+    }
+    query += ` LIMIT ${limit} OFFSET ${offset}`;
+
     const result = await this.client.query(query);
     return this.createResponse(200, result.rows);
   }
