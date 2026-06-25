@@ -21,18 +21,15 @@ class EventHandler extends ResourceHandler {
     const tags = event.tags && event.tags.length > 0
       ? `ARRAY[${event.tags.map(t => `'${t.replace(/'/g, "''")}'`).join(',')}]::text[]`
       : 'NULL';
-    const embedding = event.embedding && event.embedding.length > 0
-      ? `'[${event.embedding.join(',')}]'::vector`
-      : 'NULL';
     return `
-      INSERT INTO sm.event (title, description, category, resolution_source, expiry, tags, embedding)
-      VALUES ('${event.title.replace(/'/g, "''")}', ${description}, ${category}, ${resolutionSource}, ${expiry}, ${tags}, ${embedding})
+      INSERT INTO sm.event (title, description, category, resolution_source, expiry, tags)
+      VALUES ('${event.title.replace(/'/g, "''")}', ${description}, ${category}, ${resolutionSource}, ${expiry}, ${tags})
       RETURNING *;
     `;
   }
 
   generateSelectQuery(params: APIGatewayProxyEventQueryStringParameters | null): string {
-    let query = 'SELECT * FROM sm.event WHERE 1=1';
+    let query = `SELECT * FROM sm.event WHERE 1=1`;
     if (params?.eventId) {
       query += ` AND event_id = ${params.eventId}`;
     }

@@ -1,0 +1,1 @@
+ALTER TABLE sm.event DROP COLUMN IF EXISTS embedding;
