@@ -9,6 +9,10 @@ interface ICurrency {
 }
 
 class CurrencyHandler extends ResourceHandler {
+  allowedSortColumns(): string[] {
+    return ['currency_id', 'symbol', 'name', 'decimals', 'date_created', 'date_modified'];
+  }
+
   generateSelectQuery(params: APIGatewayProxyEventQueryStringParameters | null): string {
     let query = 'SELECT * FROM sm.currency WHERE 1=1';
     if (params?.currencyId) {
@@ -16,6 +20,10 @@ class CurrencyHandler extends ResourceHandler {
     }
     if (params?.symbol) {
       query += ` AND symbol='${params.symbol}'`;
+    }
+    if (params?.search) {
+      const escaped = params.search.replace(/'/g, "''");
+      query += ` AND (symbol ILIKE '%${escaped}%' OR name ILIKE '%${escaped}%')`;
     }
     return query;
   }

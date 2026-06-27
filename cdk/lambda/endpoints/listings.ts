@@ -3,6 +3,10 @@ import { ResourceHandler } from './base';
 import { ICreateListing, IDeleteListing } from '../types';
 
 class ListingHandler extends ResourceHandler {
+  allowedSortColumns(): string[] {
+    return ['listing_id', 'security_id', 'exchange_id', 'exchange_security_symbol', 'date_created', 'date_modified'];
+  }
+
   generateDeleteQuery(body: string): string {
     const listing = JSON.parse(body) as IDeleteListing;
     return `
@@ -21,22 +25,38 @@ class ListingHandler extends ResourceHandler {
   }
 
   generateSelectQuery(params: APIGatewayProxyEventQueryStringParameters | null): string {
-    let query = "SELECT * FROM sm.listing WHERE 1=1";
+    const denormalize = params?.denormalize === 'true';
+
+    let query = denormalize
+      ? `SELECT l.*, e.exchange_name, s.symbol AS security_symbol, s.type AS security_type, s.active AS security_active
+         FROM sm.listing l
+         JOIN sm.exchange e ON l.exchange_id = e.exchange_id
+         JOIN sm.security s ON l.security_id = s.security_id
+         WHERE 1=1`
+      : 'SELECT * FROM sm.listing WHERE 1=1';
 
     if (params?.listingId) {
-      query += ` AND listing_id=${params.listingId}`;
+      query += denormalize ? ` AND l.listing_id=${params.listingId}` : ` AND listing_id=${params.listingId}`;
     }
     if (params?.securityId) {
-      query += ` AND security_id=${params.securityId}`;
+      query += denormalize ? ` AND l.security_id=${params.securityId}` : ` AND security_id=${params.securityId}`;
     }
     if (params?.exchangeId) {
-      query += ` AND exchange_id=${params.exchangeId}`;
+      query += denormalize ? ` AND l.exchange_id=${params.exchangeId}` : ` AND exchange_id=${params.exchangeId}`;
     }
     if (params?.exchangeSecurityId) {
-      query += ` AND exchange_security_id='${params.exchangeSecurityId}'`;
+      query += denormalize
+        ? ` AND l.exchange_security_id='${params.exchangeSecurityId}'`
+        : ` AND exchange_security_id='${params.exchangeSecurityId}'`;
     }
     if (params?.exchangeSecuritySymbol) {
-      query += ` AND exchange_security_symbol='${params.exchangeSecuritySymbol}'`;
+      query += denormalize
+        ? ` AND l.exchange_security_symbol='${params.exchangeSecuritySymbol}'`
+        : ` AND exchange_security_symbol='${params.exchangeSecuritySymbol}'`;
+    }
+    if (params?.search && denormalize) {
+      const escaped = params.search.replace(/'/g, "''");
+      query += ` AND (s.symbol ILIKE '%${escaped}%' OR e.exchange_name ILIKE '%${escaped}%' OR l.exchange_security_symbol ILIKE '%${escaped}%')`;
     }
     return query;
   }

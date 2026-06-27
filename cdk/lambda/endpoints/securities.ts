@@ -10,6 +10,10 @@ function currencyColumns(alias: string): string {
 }
 
 class SecurityHandler extends ResourceHandler {
+  allowedSortColumns(): string[] {
+    return ['security_id', 'symbol', 'type', 'asset_class', 'active', 'date_created', 'date_modified'];
+  }
+
   generateDeleteQuery(body: string): string {
     const security = JSON.parse(body) as IDeleteSecurity;
     return `
@@ -70,6 +74,10 @@ class SecurityHandler extends ResourceHandler {
     }
     if (params?.contractType) {
       query += ` AND s.contract_type=${params.contractType}`;
+    }
+    if (params?.search) {
+      const escaped = params.search.replace(/'/g, "''");
+      query += ` AND (s.symbol ILIKE '%${escaped}%' OR s.description ILIKE '%${escaped}%')`;
     }
     return query;
   }

@@ -151,14 +151,28 @@ export class ResourceHandler {
     return this.createResponse(200, item);
   }
 
+  allowedSortColumns(): string[] {
+    return [];
+  }
+
   async get(params: APIGatewayProxyEventQueryStringParameters | null) {
+    if (params?.count === 'true') {
+      const selectQuery = this.generateSelectQuery(params);
+      const countQuery = `SELECT COUNT(*) FROM (${selectQuery}) t`;
+      const result = await this.client.query(countQuery);
+      return this.createResponse(200, { count: parseInt(result.rows[0].count, 10) });
+    }
+
     const limit = params?.limit ? parseInt(params.limit, 10) : DEFAULT_PAGE_SIZE;
     const offset = params?.offset ? parseInt(params.offset, 10) : 0;
 
     let query = this.generateSelectQuery(params);
 
     if (!query.toUpperCase().includes('ORDER BY')) {
-      query += ' ORDER BY 1';
+      const allowed = this.allowedSortColumns();
+      const sortBy = params?.sortBy && allowed.includes(params.sortBy) ? params.sortBy : null;
+      const sortOrder = params?.sortOrder === 'desc' ? 'DESC' : 'ASC';
+      query += sortBy ? ` ORDER BY ${sortBy} ${sortOrder}` : ' ORDER BY 1';
     }
     query += ` LIMIT ${limit} OFFSET ${offset}`;
 
