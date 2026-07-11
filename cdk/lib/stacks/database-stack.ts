@@ -40,11 +40,18 @@ export class DatabaseStack extends cdk.Stack {
     );
 
     this.vpc = new ec2.Vpc(this, 'registry-database-vpc', {
-      natGateways: 0,
+      vpcName: 'registry-database-vpc',
+      natGateways: 1,
       subnetConfiguration: [
+        {
+          name: 'public',
+          subnetType: ec2.SubnetType.PUBLIC,
+          cidrMask: 24,
+        },
         {
           name: 'rds',
           subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS,
+          cidrMask: 24,
         },
       ],
     });
@@ -89,6 +96,24 @@ export class DatabaseStack extends cdk.Stack {
       database: this.database,
       vpc: this.vpc,
       rootUserSecret: this.rootUserSecret,
+    });
+
+    // SSM bastion for local dev tunneling to RDS/Redis
+    // No SSH keys or open ports — access is SSM-only via IAM
+    const bastion = new ec2.BastionHostLinux(this, 'Bastion', {
+      vpc: this.vpc,
+      instanceType: ec2.InstanceType.of(ec2.InstanceClass.T4G, ec2.InstanceSize.NANO),
+      subnetSelection: { subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS },
+      securityGroup: new ec2.SecurityGroup(this, 'BastionSg', {
+        vpc: this.vpc,
+        description: 'Bastion host — no inbound, SSM outbound only',
+        allowAllOutbound: true,
+      }),
+    });
+
+    new cdk.CfnOutput(this, 'BastionInstanceId', {
+      value: bastion.instanceId,
+      description: 'SSM bastion instance ID for local dev tunneling',
     });
   }
 }
