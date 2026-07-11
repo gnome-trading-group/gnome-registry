@@ -44,13 +44,13 @@ export class DatabaseStack extends cdk.Stack {
       natGateways: 1,
       subnetConfiguration: [
         {
-          name: 'public',
-          subnetType: ec2.SubnetType.PUBLIC,
+          name: 'rds',
+          subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS,
           cidrMask: 24,
         },
         {
-          name: 'rds',
-          subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS,
+          name: 'public',
+          subnetType: ec2.SubnetType.PUBLIC,
           cidrMask: 24,
         },
       ],
