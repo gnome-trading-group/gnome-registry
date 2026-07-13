@@ -46,12 +46,12 @@ export class DatabaseStack extends cdk.Stack {
         {
           name: 'rds',
           subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS,
-          cidrMask: 24,
+          cidrMask: 18,
         },
         {
           name: 'public',
           subnetType: ec2.SubnetType.PUBLIC,
-          cidrMask: 24,
+          cidrMask: 20,
         },
       ],
     });
