@@ -61,10 +61,15 @@ export class ApiStack extends cdk.Stack {
     };
 
     const crudResources = ['securities', 'exchanges', 'listings', 'listing-specs', 'strategies', 'currencies', 'events', 'event-contracts', 'contract-relationships', 'exchange-events'];
+    let securitiesResource: apigw.Resource | undefined;
     for (const resourceName of crudResources) {
       const resource = this.api.root.addResource(resourceName);
+      if (resourceName === 'securities') securitiesResource = resource;
       this.attachMethods(resource, `${resourceName}.ts`, ['GET', 'POST', 'DELETE', 'PATCH']);
     }
+
+    // /securities/symbols — lightweight GET-only endpoint returning only security_id + symbol
+    this.attachMethods(securitiesResource!.addResource('symbols'), 'security-symbols.ts', ['GET']);
 
     // /pnl/snapshots (GET + POST) and /pnl/latest (GET only)
     const pnlResource = this.api.root.addResource('pnl');
