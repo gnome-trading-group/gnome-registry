@@ -106,7 +106,7 @@ export class DatabaseStack extends cdk.Stack {
       subnetSelection: { subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS },
       securityGroup: new ec2.SecurityGroup(this, 'BastionSg', {
         vpc: this.vpc,
-        description: 'Bastion host — no inbound, SSM outbound only',
+        description: 'Bastion host - no inbound, SSM outbound only',
         allowAllOutbound: true,
       }),
     });
