@@ -3,6 +3,10 @@ import { ResourceHandler } from './base';
 import { ICreateEvent, IDeleteEvent } from '../types';
 
 class EventHandler extends ResourceHandler {
+  allowedSortColumns(): string[] {
+    return ['event_id', 'title', 'category', 'resolved', 'expiry', 'date_created', 'date_modified'];
+  }
+
   generateDeleteQuery(body: string): string {
     const event = JSON.parse(body) as IDeleteEvent;
     return `
@@ -39,7 +43,9 @@ class EventHandler extends ResourceHandler {
     if (params?.resolved !== undefined) {
       query += ` AND resolved = ${params.resolved === 'true'}`;
     }
-    query += ' ORDER BY date_created DESC';
+    if (params?.tag) {
+      query += ` AND '${params.tag.replace(/'/g, "''")}' = ANY(tags)`;
+    }
     return query;
   }
 
