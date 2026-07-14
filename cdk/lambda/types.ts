@@ -47,6 +47,7 @@ interface IListingBase {
   securityId: number;
   exchangeSecurityId: string;
   exchangeSecuritySymbol: string;
+  active?: boolean;
 }
 export interface ICreateListing extends IListingBase {}
 export interface IListing extends IListingBase {

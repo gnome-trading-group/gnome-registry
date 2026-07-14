@@ -3,6 +3,9 @@ import { ResourceHandler } from './base';
 import { ICreateEvent, IDeleteEvent } from '../types';
 
 class EventHandler extends ResourceHandler {
+  getPrimaryKey(): string { return 'event_id'; }
+  getCamelPrimaryKey(): string { return 'eventId'; }
+
   allowedSortColumns(): string[] {
     return ['event_id', 'title', 'category', 'resolved', 'expiry', 'date_created', 'date_modified'];
   }

@@ -3,6 +3,9 @@ import { ResourceHandler } from './base';
 import { ICreateListing, IDeleteListing } from '../types';
 
 class ListingHandler extends ResourceHandler {
+  getPrimaryKey(): string { return 'listing_id'; }
+  getCamelPrimaryKey(): string { return 'listingId'; }
+
   allowedSortColumns(): string[] {
     return ['listing_id', 'security_id', 'exchange_id', 'exchange_security_symbol', 'date_created', 'date_modified'];
   }
@@ -58,6 +61,9 @@ class ListingHandler extends ResourceHandler {
       const escaped = params.search.replace(/'/g, "''");
       query += ` AND (s.symbol ILIKE '%${escaped}%' OR e.exchange_name ILIKE '%${escaped}%' OR l.exchange_security_symbol ILIKE '%${escaped}%')`;
     }
+    if (params?.active !== undefined) {
+      query += denormalize ? ` AND l.active=${params.active === 'true'}` : ` AND active=${params.active === 'true'}`;
+    }
     return query;
   }
 
@@ -76,6 +82,9 @@ class ListingHandler extends ResourceHandler {
     }
     if (listing.securityId) {
       updates.push(`security_id=${listing.securityId}`);
+    }
+    if (listing.active != null) {
+      updates.push(`active=${listing.active}`);
     }
     updates.push(`date_modified=NOW()`);
     const updateString = updates.join(", ");

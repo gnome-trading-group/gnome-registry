@@ -41,6 +41,9 @@ export class ResourceHandler {
         case 'DELETE':
           return await this.deleteOne(event.body);
         case 'PATCH':
+          if (event.body && event.body.trimStart().startsWith('[')) {
+            return await this.modifyMany(event.body);
+          }
           return await this.modifyOne(event.queryStringParameters, event.body);
         default:
           return this.createResponse(400, { message: 'Invalid HTTP method' });
@@ -57,6 +60,42 @@ export class ResourceHandler {
 
   generateModifyQuery(row: any, body: string): string {
     throw new Error("Must override");
+  }
+
+  getPrimaryKey(): string {
+    throw new Error("Must override for bulk operations");
+  }
+
+  getCamelPrimaryKey(): string {
+    throw new Error("Must override for bulk operations");
+  }
+
+  async modifyMany(body: string | null) {
+    if (!body) {
+      return this.createResponse(400, { message: 'Missing body' });
+    }
+    const items = JSON.parse(body);
+    if (!Array.isArray(items) || items.length === 0) {
+      return this.createResponse(400, { message: 'Expected non-empty array' });
+    }
+    const results: any[] = [];
+    try {
+      await this.client.query('BEGIN');
+      for (const item of items) {
+        const row = { [this.getPrimaryKey()]: item[this.getCamelPrimaryKey()] };
+        const query = this.generateModifyQuery(row, JSON.stringify(item));
+        const result = await this.client.query(query);
+        if (result.rowCount !== 1) {
+          throw new Error(`Modify failed for item: ${JSON.stringify(item)}`);
+        }
+        results.push(result.rows[0]);
+      }
+      await this.client.query('COMMIT');
+    } catch (error) {
+      await this.client.query('ROLLBACK');
+      throw error;
+    }
+    return this.createResponse(200, results);
   }
 
   async modifyOne(params: APIGatewayProxyEventQueryStringParameters | null, body: string | null) {

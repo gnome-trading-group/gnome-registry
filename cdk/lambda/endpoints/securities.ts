@@ -10,6 +10,9 @@ function currencyColumns(alias: string): string {
 }
 
 class SecurityHandler extends ResourceHandler {
+  getPrimaryKey(): string { return 'security_id'; }
+  getCamelPrimaryKey(): string { return 'securityId'; }
+
   allowedSortColumns(): string[] {
     return ['security_id', 'symbol', 'type', 'asset_class', 'active', 'date_created', 'date_modified'];
   }
