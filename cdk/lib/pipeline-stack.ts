@@ -14,7 +14,9 @@ class AppStage extends cdk.Stage {
   constructor(scope: Construct, id: string, config: RegistryConfig) {
     super(scope, id, { env: config.account.environment });
 
-    const databaseStack = new DatabaseStack(this, "DatabaseStack");
+    const databaseStack = new DatabaseStack(this, "DatabaseStack", {
+      instanceType: config.dbInstanceType,
+    });
 
     const apiStack = new ApiStack(this, "ApiStack", {
       database: databaseStack.database,

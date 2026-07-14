@@ -5,19 +5,23 @@ import * as ec2 from 'aws-cdk-lib/aws-ec2';
 import * as secrets from 'aws-cdk-lib/aws-secretsmanager';
 import { DatabaseInitLambda } from '../constructs/db-init-lambda';
 
+export interface DatabaseStackProps extends cdk.StackProps {
+  instanceType?: ec2.InstanceType;
+}
+
 export class DatabaseStack extends cdk.Stack {
   public database: rds.DatabaseInstance;
   public databaseName: string;
   public rootUserSecret: secrets.Secret;
   public vpc: ec2.Vpc;
 
-  constructor(scope: Construct, id: string, props?: cdk.StackProps) {
+  constructor(scope: Construct, id: string, props?: DatabaseStackProps) {
     super(scope, id, props);
 
     const engine = rds.DatabaseInstanceEngine.postgres({
       version: rds.PostgresEngineVersion.VER_16_3,
     });
-    const instanceType = ec2.InstanceType.of(
+    const instanceType = props?.instanceType ?? ec2.InstanceType.of(
       ec2.InstanceClass.T3,
       ec2.InstanceSize.MICRO
     );
