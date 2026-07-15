@@ -5,6 +5,7 @@ import static org.mockito.Mockito.*;
 
 import group.gnometrading.schemas.SchemaType;
 import group.gnometrading.sm.AssetClass;
+import group.gnometrading.sm.ContractRelationship;
 import group.gnometrading.sm.ContractType;
 import group.gnometrading.sm.Exchange;
 import group.gnometrading.sm.Listing;
@@ -334,6 +335,73 @@ class SecurityMasterTest {
 
         assertSame(first, second);
         verify(registryConnection, times(3)).get(any()); // listing + exchange + security, only once each
+    }
+
+    @Test
+    void testGetAllContractRelationships() {
+        String json =
+                """
+                [{"relationship_id": 1, "security_id_a": 100, "security_id_b": 200,
+                  "relationship_type": "EQUIVALENT", "confidence": 0.95, "method": "semantic"}]""";
+        when(registryConnection.get(new ViewString("/api/contract-relationships?")))
+                .thenReturn(ByteBuffer.wrap(json.getBytes()));
+
+        ContractRelationship[] result = securityMaster.getAllContractRelationships();
+        assertEquals(1, result.length);
+        assertEquals(1, result[0].relationshipId());
+        assertEquals(100, result[0].securityIdA());
+        assertEquals(200, result[0].securityIdB());
+        assertEquals("EQUIVALENT", result[0].relationshipType());
+        assertEquals(0.95f, result[0].confidence(), 0.001f);
+        assertEquals("semantic", result[0].method());
+    }
+
+    @Test
+    void testGetAllContractRelationshipsEmpty() {
+        when(registryConnection.get(new ViewString("/api/contract-relationships?")))
+                .thenReturn(ByteBuffer.wrap("[]".getBytes()));
+        ContractRelationship[] result = securityMaster.getAllContractRelationships();
+        assertEquals(0, result.length);
+    }
+
+    @Test
+    void testGetAllContractRelationshipsCaching() {
+        String json =
+                """
+                [{"relationship_id": 1, "security_id_a": 100, "security_id_b": 200,
+                  "relationship_type": "EQUIVALENT", "confidence": 0.95, "method": "semantic"}]""";
+        when(registryConnection.get(new ViewString("/api/contract-relationships?")))
+                .thenReturn(ByteBuffer.wrap(json.getBytes()));
+
+        ContractRelationship[] first = securityMaster.getAllContractRelationships();
+        ContractRelationship[] second = securityMaster.getAllContractRelationships();
+
+        assertSame(first, second);
+        verify(registryConnection, times(1)).get(any());
+    }
+
+    @Test
+    void testGetContractRelationships() {
+        String json =
+                """
+                [{"relationship_id": 2, "security_id_a": 100, "security_id_b": 300,
+                  "relationship_type": "COMPLEMENT", "confidence": 1.0, "method": "structural"}]""";
+        when(registryConnection.get(new ViewString("/api/contract-relationships?securityId=100")))
+                .thenReturn(ByteBuffer.wrap(json.getBytes()));
+
+        ContractRelationship[] result = securityMaster.getContractRelationships(100);
+        assertEquals(1, result.length);
+        assertEquals(2, result[0].relationshipId());
+        assertEquals("COMPLEMENT", result[0].relationshipType());
+        verify(registryConnection, times(1)).get(any());
+    }
+
+    @Test
+    void testGetContractRelationshipsEmpty() {
+        when(registryConnection.get(new ViewString("/api/contract-relationships?securityId=999")))
+                .thenReturn(ByteBuffer.wrap("[]".getBytes()));
+        ContractRelationship[] result = securityMaster.getContractRelationships(999);
+        assertEquals(0, result.length);
     }
 
     @Test

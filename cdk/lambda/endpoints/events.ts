@@ -23,14 +23,13 @@ class EventHandler extends ResourceHandler {
     const event = JSON.parse(body) as ICreateEvent;
     const description = event.description ? `'${event.description.replace(/'/g, "''")}'` : 'NULL';
     const category = event.category ? `'${event.category.replace(/'/g, "''")}'` : 'NULL';
-    const resolutionSource = event.resolutionSource ? `'${event.resolutionSource.replace(/'/g, "''")}'` : 'NULL';
     const expiry = event.expiry ? `'${event.expiry}'` : 'NULL';
     const tags = event.tags && event.tags.length > 0
       ? `ARRAY[${event.tags.map(t => `'${t.replace(/'/g, "''")}'`).join(',')}]::text[]`
       : 'NULL';
     return `
-      INSERT INTO sm.event (title, description, category, resolution_source, expiry, tags)
-      VALUES ('${event.title.replace(/'/g, "''")}', ${description}, ${category}, ${resolutionSource}, ${expiry}, ${tags})
+      INSERT INTO sm.event (title, description, category, expiry, tags)
+      VALUES ('${event.title.replace(/'/g, "''")}', ${description}, ${category}, ${expiry}, ${tags})
       RETURNING *;
     `;
   }
@@ -58,7 +57,6 @@ class EventHandler extends ResourceHandler {
     if (event.title !== undefined) updates.push(`title = '${event.title.replace(/'/g, "''")}'`);
     if (event.description !== undefined) updates.push(`description = ${event.description ? `'${event.description.replace(/'/g, "''")}'` : 'NULL'}`);
     if (event.category !== undefined) updates.push(`category = ${event.category ? `'${event.category}'` : 'NULL'}`);
-    if (event.resolutionSource !== undefined) updates.push(`resolution_source = ${event.resolutionSource ? `'${event.resolutionSource}'` : 'NULL'}`);
     if (event.expiry !== undefined) updates.push(`expiry = ${event.expiry ? `'${event.expiry}'` : 'NULL'}`);
     if (event.tags !== undefined) updates.push(`tags = ${event.tags && event.tags.length > 0 ? `ARRAY[${event.tags.map(t => `'${t.replace(/'/g, "''")}'`).join(',')}]::text[]` : 'NULL'}`);
     if (event.embedding !== undefined) updates.push(`embedding = ${event.embedding && event.embedding.length > 0 ? `'[${event.embedding.join(',')}]'::vector` : 'NULL'}`);

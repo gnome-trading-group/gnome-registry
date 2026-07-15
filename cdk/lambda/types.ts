@@ -63,7 +63,6 @@ interface IEventBase {
   title: string;
   description?: string;
   category?: string;
-  resolutionSource?: string;
   expiry?: string | null;
   tags?: string[] | null;
   embedding?: number[] | null;

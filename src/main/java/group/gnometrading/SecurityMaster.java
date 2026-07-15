@@ -7,6 +7,7 @@ import com.fasterxml.jackson.databind.PropertyNamingStrategies;
 import group.gnometrading.collections.IntHashMap;
 import group.gnometrading.collections.IntMap;
 import group.gnometrading.sm.AssetClass;
+import group.gnometrading.sm.ContractRelationship;
 import group.gnometrading.sm.ContractType;
 import group.gnometrading.sm.Event;
 import group.gnometrading.sm.EventContract;
@@ -32,6 +33,7 @@ public final class SecurityMaster {
     private static final String LISTING_SPEC_ENDPOINT = "/api/listing-specs?";
     private static final String EVENT_ENDPOINT = "/api/events?";
     private static final String EVENT_CONTRACT_ENDPOINT = "/api/event-contracts?";
+    private static final String CONTRACT_RELATIONSHIP_ENDPOINT = "/api/contract-relationships?";
 
     private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper()
             .setPropertyNamingStrategy(PropertyNamingStrategies.SNAKE_CASE)
@@ -69,6 +71,7 @@ public final class SecurityMaster {
     private final MutableString listingSpecPath;
     private final MutableString eventPath;
     private final MutableString eventContractPath;
+    private final MutableString contractRelationshipPath;
 
     private final IntMap<Security> securityCache;
     private final IntMap<Exchange> exchangeCache;
@@ -76,6 +79,8 @@ public final class SecurityMaster {
     private final IntMap<ListingSpec> listingSpecCache;
     private final IntMap<Event> eventCache;
     private final IntMap<EventContract> eventContractBySecurityCache;
+
+    private ContractRelationship[] allContractRelationships;
 
     public SecurityMaster(final RegistryConnection registryConnection) {
         this.registryConnection = registryConnection;
@@ -86,6 +91,7 @@ public final class SecurityMaster {
         this.listingSpecPath = new ExpandingMutableString(LISTING_SPEC_ENDPOINT);
         this.eventPath = new ExpandingMutableString(EVENT_ENDPOINT);
         this.eventContractPath = new ExpandingMutableString(EVENT_CONTRACT_ENDPOINT);
+        this.contractRelationshipPath = new ExpandingMutableString(CONTRACT_RELATIONSHIP_ENDPOINT);
 
         this.securityCache = new IntHashMap<>();
         this.exchangeCache = new IntHashMap<>();
@@ -238,6 +244,34 @@ public final class SecurityMaster {
             }
             this.eventContractBySecurityCache.put(securityId, result[0]);
             return this.eventContractBySecurityCache.get(securityId);
+        } catch (IOException e) {
+            throw new RuntimeException(e);
+        }
+    }
+
+    public ContractRelationship[] getAllContractRelationships() {
+        if (this.allContractRelationships != null) {
+            return this.allContractRelationships;
+        }
+
+        final ByteBuffer response = this.registryConnection.get(this.contractRelationshipPath);
+
+        try {
+            this.allContractRelationships =
+                    OBJECT_MAPPER.readValue(toByteArray(response), ContractRelationship[].class);
+            return this.allContractRelationships;
+        } catch (IOException e) {
+            throw new RuntimeException(e);
+        }
+    }
+
+    public ContractRelationship[] getContractRelationships(final int securityId) {
+        final int originalLength = addParameters(this.contractRelationshipPath, "securityId", securityId);
+        final ByteBuffer response = this.registryConnection.get(this.contractRelationshipPath);
+        this.contractRelationshipPath.setLength(originalLength);
+
+        try {
+            return OBJECT_MAPPER.readValue(toByteArray(response), ContractRelationship[].class);
         } catch (IOException e) {
             throw new RuntimeException(e);
         }

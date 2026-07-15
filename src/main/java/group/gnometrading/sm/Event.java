@@ -5,7 +5,6 @@ public record Event(
         String title,
         String description,
         String category,
-        String resolutionSource,
         boolean resolved,
         long resolvedAt,
         long expiry) {}
