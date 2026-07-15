@@ -60,7 +60,7 @@ public final class SecurityMaster {
             0);
     private static final Exchange EMPTY_EXCHANGE = new Exchange(-1, null, null, null);
     private static final ListingSpec EMPTY_LISTING_SPEC = new ListingSpec(-1, -1, -1, -1, 0L);
-    private static final Event EMPTY_EVENT = new Event(-1, null, null, null, null, false, 0L, 0L);
+    private static final Event EMPTY_EVENT = new Event(-1, null, null, null, false, 0L, 0L);
     private static final EventContract EMPTY_EVENT_CONTRACT = new EventContract(-1, -1, -1, null);
 
     private final RegistryConnection registryConnection;
