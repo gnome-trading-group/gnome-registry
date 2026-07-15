@@ -104,3 +104,12 @@ export interface ICreateExchangeEvent extends IExchangeEventBase {}
 export interface IDeleteExchangeEvent {
   exchangeEventId: number;
 }
+
+interface IHedgeKeywordBase {
+  securityId: number;
+  keyword: string;
+}
+export interface ICreateHedgeKeyword extends IHedgeKeywordBase {}
+export interface IDeleteHedgeKeyword {
+  hedgeKeywordId: number;
+}

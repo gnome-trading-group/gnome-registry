@@ -60,7 +60,7 @@ export class ApiStack extends cdk.Stack {
       },
     };
 
-    const crudResources = ['securities', 'exchanges', 'listings', 'listing-specs', 'strategies', 'currencies', 'events', 'event-contracts', 'contract-relationships', 'exchange-events'];
+    const crudResources = ['securities', 'exchanges', 'listings', 'listing-specs', 'strategies', 'currencies', 'events', 'event-contracts', 'contract-relationships', 'exchange-events', 'hedge-keywords'];
     let securitiesResource: apigw.Resource | undefined;
     for (const resourceName of crudResources) {
       const resource = this.api.root.addResource(resourceName);
