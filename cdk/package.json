@@ -13,6 +13,8 @@
   },
   "devDependencies": {
     "@aws-sdk/client-api-gateway": "^3.1045.0",
+    "@aws-sdk/client-ec2": "^3.1045.0",
+    "@aws-sdk/client-ecs": "^3.1045.0",
     "@aws-sdk/client-secrets-manager": "^3.1051.0",
     "@gnome-trading-group/gnome-shared-cdk": "^1.0.7",
     "@types/jest": "^29.5.12",

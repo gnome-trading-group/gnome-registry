@@ -15,7 +15,7 @@ export class ResourceHandler {
   pool: Pool;
   client: any; // This will be a PoolClient from pg
 
-  private createResponse(statusCode: number, body: any) {
+  protected createResponse(statusCode: number, body: any) {
     return {
       statusCode,
       body: typeof body === 'string' ? body : JSON.stringify(body),

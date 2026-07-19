@@ -6,6 +6,7 @@ import { Stage } from "@gnome-trading-group/gnome-shared-cdk";
 import { DatabaseStack } from "./stacks/database-stack";
 import { ApiStack } from "./stacks/api-stack";
 import { ExchangeSyncStack } from "./stacks/exchange-sync-stack";
+import { StrategySessionMonitorStack } from "./stacks/strategy-session-monitor-stack";
 import { MonitoringStack } from "./stacks/monitoring-stack";
 import { GITHUB_REPO, GITHUB_BRANCH, CONFIGS, RegistryConfig } from "./config";
 
@@ -28,6 +29,12 @@ class AppStage extends cdk.Stage {
       api: apiStack.api,
       apiKey: apiStack.apiKey,
       slackChannel: config.slackChannel,
+    });
+
+    new StrategySessionMonitorStack(this, "StrategySessionMonitorStack", {
+      database: databaseStack.database,
+      vpc: databaseStack.vpc,
+      rootUserSecret: databaseStack.rootUserSecret,
     });
 
     new MonitoringStack(this, "MonitoringStack", {

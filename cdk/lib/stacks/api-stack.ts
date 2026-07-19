@@ -5,6 +5,7 @@ import * as rds from 'aws-cdk-lib/aws-rds';
 import * as lambda from 'aws-cdk-lib/aws-lambda-nodejs';
 import * as ec2 from 'aws-cdk-lib/aws-ec2';
 import * as secrets from 'aws-cdk-lib/aws-secretsmanager';
+import * as iam from 'aws-cdk-lib/aws-iam';
 import { join } from 'path';
 import { Runtime } from 'aws-cdk-lib/aws-lambda';
 
@@ -79,6 +80,36 @@ export class ApiStack extends cdk.Stack {
     // /risk/policies (full CRUD)
     const riskResource = this.api.root.addResource('risk');
     this.attachMethods(riskResource.addResource('policies'), 'risk-policies.ts', ['GET', 'POST', 'DELETE', 'PATCH']);
+
+    // /strategy-sessions — separate Lambda with ECS/EC2 IAM permissions for RunTask/StopTask
+    const strategySessionsLambda = new lambda.NodejsFunction(this, 'strategy-sessions-lambda', {
+      entry: join(__dirname, '..', '..', 'lambda', 'endpoints', 'strategy-sessions.ts'),
+      ...this.nodeJsProps,
+      bundling: {
+        ...this.nodeJsProps.bundling,
+        externalModules: ['pg-native', '@aws-sdk/*'],
+      },
+      vpc: this.props.vpc,
+      vpcSubnets: this.props.vpc.selectSubnets({ subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS }),
+    });
+    this.props.database.grantConnect(strategySessionsLambda);
+    strategySessionsLambda.addToRolePolicy(new iam.PolicyStatement({
+      actions: ['ecs:RunTask', 'ecs:StopTask'],
+      resources: ['*'],
+    }));
+    strategySessionsLambda.addToRolePolicy(new iam.PolicyStatement({
+      actions: ['iam:PassRole'],
+      resources: ['arn:aws:iam::*:role/gnome-orchestrator-*'],
+    }));
+    strategySessionsLambda.addToRolePolicy(new iam.PolicyStatement({
+      actions: ['ec2:DescribeSubnets', 'ec2:DescribeSecurityGroups'],
+      resources: ['*'],
+    }));
+    const strategySessionsResource = this.api.root.addResource('strategy-sessions');
+    const strategySessionsIntegration = new apigw.LambdaIntegration(strategySessionsLambda);
+    for (const method of ['GET', 'POST', 'DELETE', 'PATCH']) {
+      strategySessionsResource.addMethod(method, strategySessionsIntegration, { apiKeyRequired: true });
+    }
 
     this.apiKey = new apigw.ApiKey(this, 'ApiKey');
     const usagePlan = new apigw.UsagePlan(this, 'UsagePlan', {
