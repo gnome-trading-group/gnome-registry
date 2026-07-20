@@ -2,7 +2,6 @@ import { APIGatewayProxyEvent, APIGatewayProxyEventQueryStringParameters } from 
 import { ResourceHandler } from './base';
 
 interface ICreateStrategy {
-  strategyId: number;
   name: string;
   description?: string;
   status?: number;
@@ -37,8 +36,8 @@ class StrategyHandler extends ResourceHandler {
     const status = s.status != null ? s.status : 0;
     const parameters = s.parameters != null ? `'${JSON.stringify(s.parameters)}'` : 'null';
     return `
-      INSERT INTO strategy.strategy (strategy_id, name, description, status, parameters)
-      VALUES (${s.strategyId}, '${s.name}', ${description}, ${status}, ${parameters})
+      INSERT INTO strategy.strategy (name, description, status, parameters)
+      VALUES ('${s.name}', ${description}, ${status}, ${parameters})
       RETURNING *;
     `;
   }
