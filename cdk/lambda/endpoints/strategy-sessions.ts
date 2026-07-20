@@ -142,6 +142,7 @@ class StrategySessionHandler extends ResourceHandler {
     }));
     envOverrides.push({ name: 'STRATEGY_ID', value: String(s.strategyId) });
     envOverrides.push({ name: 'MODE', value: s.mode });
+    envOverrides.push({ name: 'SESSION_ID', value: s.sessionId });
 
     const ecs = new ECSClient({ region });
     const runResult = await ecs.send(new RunTaskCommand({
