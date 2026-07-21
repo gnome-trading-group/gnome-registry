@@ -40,12 +40,12 @@ export const handler = async (event: APIGatewayProxyEvent) => {
       if (snapshots.length === 0) return createResponse(400, { message: 'Empty array' });
 
       const values = snapshots.map(s =>
-        `(${s.strategyId}, ${s.listingId}, ${s.netQuantity}, ${s.avgEntryPrice}, ${s.realizedPnl}, ${s.totalFees}, ${s.leavesBuyQty ?? 0}, ${s.leavesSellQty ?? 0})`
+        `(${s.strategyId}, ${s.listingId}, ${s.netQuantity}, ${s.avgEntryPrice}, ${s.realizedPnl}, ${s.totalFees}, ${s.leavesBuyQty ?? 0}, ${s.leavesSellQty ?? 0}, ${s.sessionId ? `'${s.sessionId}'` : 'NULL'})`
       ).join(', ');
 
       const query = `
         INSERT INTO pnl.snapshot
-          (strategy_id, listing_id, net_quantity, avg_entry_price, realized_pnl, total_fees, leaves_buy_qty, leaves_sell_qty)
+          (strategy_id, listing_id, net_quantity, avg_entry_price, realized_pnl, total_fees, leaves_buy_qty, leaves_sell_qty, session_id)
         VALUES ${values}
         RETURNING *;
       `;

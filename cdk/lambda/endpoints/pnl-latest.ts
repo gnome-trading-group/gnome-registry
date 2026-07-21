@@ -21,15 +21,16 @@ export const handler = async (event: APIGatewayProxyEvent) => {
   const client = await pool.connect();
   try {
     const params = event.queryStringParameters;
-    let where = '1=1';
-    if (params?.strategyId) where += ` AND strategy_id=${params.strategyId}`;
-    if (params?.listingId) where += ` AND listing_id=${params.listingId}`;
+    let where = 'ss.mode = \'LIVE\'';
+    if (params?.strategyId) where += ` AND ps.strategy_id=${params.strategyId}`;
+    if (params?.listingId) where += ` AND ps.listing_id=${params.listingId}`;
 
     const query = `
-      SELECT DISTINCT ON (strategy_id, listing_id) *
-      FROM pnl.snapshot
+      SELECT DISTINCT ON (ps.strategy_id, ps.listing_id) ps.*
+      FROM pnl.snapshot ps
+      JOIN strategy.session ss ON ss.session_id = ps.session_id
       WHERE ${where}
-      ORDER BY strategy_id, listing_id, snapshot_time DESC;
+      ORDER BY ps.strategy_id, ps.listing_id, ps.snapshot_time DESC;
     `;
     const result = await client.query(query);
     return createResponse(200, result.rows);

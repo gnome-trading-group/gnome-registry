@@ -30,12 +30,15 @@ class RiskMasterTest {
     }
 
     private static final String KILL_SWITCH_ENABLED =
-            "[{\"policy_id\": 1, \"policy_type\": \"KILL_SWITCH\", \"scope\": 0, \"parameters\": \"{}\", \"enabled\": true}]";
+            "[{\"policy_id\": 1, \"policy_type\": \"KILL_SWITCH\", \"scope\": 0, \"strategy_id\": null, \"listing_id\": null, \"parameters\": {}, \"enabled\": true}]";
+
+    private static final String KILL_SWITCH_DISABLED =
+            "[{\"policy_id\": 1, \"policy_type\": \"KILL_SWITCH\", \"scope\": 0, \"strategy_id\": null, \"listing_id\": null, \"parameters\": {}, \"enabled\": false}]";
 
     private static final String MIXED_POLICIES =
-            "[{\"policy_id\": 1, \"policy_type\": \"KILL_SWITCH\", \"scope\": 0, \"parameters\": \"{}\", \"enabled\": true},"
-                    + "{\"policy_id\": 2, \"policy_type\": \"MAX_POSITION\", \"scope\": 1, \"strategy_id\": 10, \"listing_id\": 0, \"parameters\": \"{}\", \"enabled\": true},"
-                    + "{\"policy_id\": 3, \"policy_type\": \"MAX_POSITION\", \"scope\": 1, \"strategy_id\": 20, \"listing_id\": 0, \"parameters\": \"{}\", \"enabled\": true}]";
+            "[{\"policy_id\": 1, \"policy_type\": \"KILL_SWITCH\", \"scope\": 0, \"strategy_id\": null, \"listing_id\": null, \"parameters\": {}, \"enabled\": true},"
+                    + "{\"policy_id\": 2, \"policy_type\": \"MAX_POSITION\", \"scope\": 1, \"strategy_id\": 10, \"listing_id\": 0, \"parameters\": {}, \"enabled\": true},"
+                    + "{\"policy_id\": 3, \"policy_type\": \"MAX_POSITION\", \"scope\": 1, \"strategy_id\": 20, \"listing_id\": 0, \"parameters\": {}, \"enabled\": true}]";
 
     @Test
     void testGetPolicyCountAfterRefresh() {
@@ -96,5 +99,20 @@ class RiskMasterTest {
         riskMaster.forEachPolicy(99, p -> ids99.add(p.policyId));
         assertEquals(1, ids99.size()); // only KILL_SWITCH (global)
         assertEquals(1, (int) ids99.get(0));
+    }
+
+    @Test
+    void testDisabledPolicyWithRawObjectParameters() {
+        when(registryConnection.get(new ViewString("/api/risk/policies")))
+                .thenReturn(ByteBuffer.wrap(KILL_SWITCH_DISABLED.getBytes()));
+        riskMaster.refresh();
+
+        assertEquals(1, riskMaster.getPolicyCount());
+        RiskPolicyRecord record = riskMaster.getRecord(0);
+        assertEquals(1, record.policyId);
+        assertTrue(record.policyType.equals("KILL_SWITCH"));
+        assertEquals(PolicyScope.GLOBAL, record.scope);
+        assertFalse(record.enabled);
+        assertTrue(record.parametersJson.equals("{}"));
     }
 }

@@ -84,5 +84,9 @@ CREATE TABLE IF NOT EXISTS risk.policy (
 CREATE INDEX IF NOT EXISTS idx_risk_policy_scope
     ON risk.policy (scope, strategy_id, listing_id) WHERE enabled = true;
 
+CREATE UNIQUE INDEX IF NOT EXISTS idx_risk_policy_unique
+    ON risk.policy (policy_type, scope, COALESCE(strategy_id, 0), COALESCE(listing_id, 0));
+
 INSERT INTO risk.policy (policy_type, scope, parameters, enabled)
-    VALUES ('KILL_SWITCH', 0, '{}', false) ON CONFLICT DO NOTHING;
+    VALUES ('KILL_SWITCH', 0, '{}', false)
+    ON CONFLICT (policy_type, scope, COALESCE(strategy_id, 0), COALESCE(listing_id, 0)) DO NOTHING;

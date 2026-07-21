@@ -83,7 +83,7 @@ public final class RiskMaster {
         record.strategyId = 0;
         record.listingId = 0;
         record.parametersJson.setLength(0);
-        record.enabled = true;
+        record.enabled = false;
     }
 
     @SuppressWarnings("checkstyle:NestedTryDepth")
@@ -102,7 +102,7 @@ public final class RiskMaster {
                     } else if (key.getName().equals("listing_id")) {
                         record.listingId = key.asInt();
                     } else if (key.getName().equals("parameters")) {
-                        record.parametersJson.copy(key.asString());
+                        record.parametersJson.copy(key.asRawJson());
                     } else if (key.getName().equals("enabled")) {
                         record.enabled = key.asBoolean();
                     }
