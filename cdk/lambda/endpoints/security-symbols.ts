@@ -21,13 +21,16 @@ export const handler = async (event: APIGatewayProxyEvent) => {
   const client = await pool.connect();
   try {
     const params = event.queryStringParameters;
-    const limit = params?.limit ? parseInt(params.limit, 10) : 100000;
+    const limit = params?.limit ? parseInt(params.limit, 10) : 5000;
     const offset = params?.offset ? parseInt(params.offset, 10) : 0;
 
-    const result = await client.query(
-      'SELECT security_id, symbol FROM sm.security LIMIT $1 OFFSET $2',
-      [limit, offset],
-    );
+    let query = 'SELECT security_id, symbol FROM sm.security';
+    if (params?.active !== undefined) {
+      query += ` WHERE active = ${params.active === 'true'}`;
+    }
+    query += ' LIMIT $1 OFFSET $2';
+
+    const result = await client.query(query, [limit, offset]);
     return createResponse(200, result.rows);
   } catch (error) {
     console.log(error);
