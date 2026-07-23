@@ -48,6 +48,10 @@ class EventHandler extends ResourceHandler {
     if (params?.tag) {
       query += ` AND '${params.tag.replace(/'/g, "''")}' = ANY(tags)`;
     }
+    if (params?.search) {
+      const escaped = params.search.replace(/'/g, "''");
+      query += ` AND (title ILIKE '%${escaped}%' OR description ILIKE '%${escaped}%')`;
+    }
     return query;
   }
 
