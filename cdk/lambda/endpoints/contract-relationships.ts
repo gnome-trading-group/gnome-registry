@@ -32,18 +32,26 @@ class ContractRelationshipHandler extends ResourceHandler {
   }
 
   generateSelectQuery(params: APIGatewayProxyEventQueryStringParameters | null): string {
-    let query = 'SELECT * FROM sm.contract_relationship WHERE 1=1';
+    const denormalize = params?.denormalize === 'true';
+    let query = denormalize
+      ? `SELECT cr.*, sa.symbol AS symbol_a, sb.symbol AS symbol_b
+         FROM sm.contract_relationship cr
+         JOIN sm.security sa ON cr.security_id_a = sa.security_id
+         JOIN sm.security sb ON cr.security_id_b = sb.security_id
+         WHERE 1=1`
+      : 'SELECT * FROM sm.contract_relationship WHERE 1=1';
+    const p = denormalize ? 'cr.' : '';
     if (params?.relationshipId) {
-      query += ` AND relationship_id = ${params.relationshipId}`;
+      query += ` AND ${p}relationship_id = ${params.relationshipId}`;
     }
     if (params?.securityId) {
-      query += ` AND (security_id_a = ${params.securityId} OR security_id_b = ${params.securityId})`;
+      query += ` AND (${p}security_id_a = ${params.securityId} OR ${p}security_id_b = ${params.securityId})`;
     }
     if (params?.method) {
-      query += ` AND method = '${params.method}'`;
+      query += ` AND ${p}method = '${params.method}'`;
     }
     if (params?.relationshipType) {
-      query += ` AND relationship_type = '${params.relationshipType}'`;
+      query += ` AND ${p}relationship_type = '${params.relationshipType}'`;
     }
     return query;
   }

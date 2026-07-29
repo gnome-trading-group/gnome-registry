@@ -22,17 +22,24 @@ class EventContractHandler extends ResourceHandler {
   }
 
   generateSelectQuery(params: APIGatewayProxyEventQueryStringParameters | null): string {
-    let query = 'SELECT * FROM sm.event_contract WHERE 1=1';
+    const denormalize = params?.denormalize === 'true';
+    let query = denormalize
+      ? `SELECT ec.*, s.symbol AS security_symbol
+         FROM sm.event_contract ec
+         JOIN sm.security s ON ec.security_id = s.security_id
+         WHERE 1=1`
+      : 'SELECT * FROM sm.event_contract WHERE 1=1';
+    const p = denormalize ? 'ec.' : '';
     if (params?.eventContractId) {
-      query += ` AND event_contract_id = ${params.eventContractId}`;
+      query += ` AND ${p}event_contract_id = ${params.eventContractId}`;
     }
     if (params?.eventId) {
-      query += ` AND event_id = ${params.eventId}`;
+      query += ` AND ${p}event_id = ${params.eventId}`;
     }
     if (params?.securityId) {
-      query += ` AND security_id = ${params.securityId}`;
+      query += ` AND ${p}security_id = ${params.securityId}`;
     }
-    query += ' ORDER BY event_contract_id';
+    query += ` ORDER BY ${p}event_contract_id`;
     return query;
   }
 
