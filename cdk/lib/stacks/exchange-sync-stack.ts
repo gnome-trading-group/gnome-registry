@@ -27,7 +27,7 @@ export class ExchangeSyncStack extends cdk.Stack {
       entry: join(__dirname, '..', '..', 'lambda', 'sync', 'exchange-sync.ts'),
       runtime: Runtime.NODEJS_20_X,
       timeout: cdk.Duration.seconds(120),
-      memorySize: 512,
+      memorySize: 1024,
       environment: {
         REGISTRY_API_URL: props.api.url,
         REGISTRY_API_KEY_ID: props.apiKey.keyId,

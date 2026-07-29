@@ -15,6 +15,9 @@ class ListingSpecHandler extends ResourceHandler {
     if (params?.listingId) {
       where += ` AND listing_id=${params.listingId}`;
     }
+    if (params?.exchangeId) {
+      where += ` AND listing_id IN (SELECT listing_id FROM sm.listing WHERE exchange_id=${params.exchangeId})`;
+    }
     if (params?.before) {
       where += ` AND recorded_at <= '${params.before}'`;
     }

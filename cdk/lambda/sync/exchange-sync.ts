@@ -133,13 +133,27 @@ async function postSlackNotification(
 export const handler = async () => {
   const apiKey = await resolveApiKey();
 
-  const [exchanges, currencies, securities, listings, existingSpecs] = await Promise.all([
+  const [exchanges, currencies] = await Promise.all([
     registryFetchAll<ExchangeResponse>('/exchanges', apiKey),
     registryFetchAll<CurrencyResponse>('/currencies', apiKey),
-    registryFetchAll<SecurityResponse>('/securities', apiKey),
-    registryFetchAll<ListingResponse>('/listings', apiKey),
-    registryFetchAll<ListingSpecResponse>('/listing-specs', apiKey),
   ]);
+
+  const securities = await registryFetchAll<SecurityResponse>('/securities?assetClass=0', apiKey);
+
+  const adapterExchangeIds = exchanges
+    .filter(e => getAdapter(e.exchange_name) != null)
+    .map(e => e.exchange_id);
+
+  const listings: ListingResponse[] = [];
+  const existingSpecs: ListingSpecResponse[] = [];
+  for (const id of adapterExchangeIds) {
+    const [l, s] = await Promise.all([
+      registryFetchAll<ListingResponse>(`/listings?exchangeId=${id}`, apiKey),
+      registryFetchAll<ListingSpecResponse>(`/listing-specs?exchangeId=${id}`, apiKey),
+    ]);
+    listings.push(...l);
+    existingSpecs.push(...s);
+  }
 
   const currencyBySymbol = new Map<string, CurrencyResponse>(currencies.map(c => [c.symbol, c]));
   const securityBySymbol = new Map<string, SecurityResponse>(securities.map(s => [s.symbol, s]));

@@ -78,6 +78,9 @@ class SecurityHandler extends ResourceHandler {
     if (params?.contractType) {
       query += ` AND s.contract_type=${params.contractType}`;
     }
+    if (params?.assetClass) {
+      query += ` AND s.asset_class=${params.assetClass}`;
+    }
     if (params?.search) {
       const escaped = params.search.replace(/'/g, "''");
       query += ` AND (s.symbol ILIKE '%${escaped}%' OR s.description ILIKE '%${escaped}%')`;
