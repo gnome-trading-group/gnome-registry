@@ -53,6 +53,14 @@ class ContractRelationshipHandler extends ResourceHandler {
     if (params?.relationshipType) {
       query += ` AND ${p}relationship_type = '${params.relationshipType}'`;
     }
+    if (params?.eventResolved === 'false') {
+      query += ` AND EXISTS (
+        SELECT 1 FROM sm.event_contract ec
+        JOIN sm.event e ON ec.event_id = e.event_id
+        WHERE ec.security_id IN (${p}security_id_a, ${p}security_id_b)
+        AND e.resolved = false
+      )`;
+    }
     return query;
   }
 
