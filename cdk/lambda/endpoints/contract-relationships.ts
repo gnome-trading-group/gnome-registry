@@ -33,13 +33,22 @@ class ContractRelationshipHandler extends ResourceHandler {
 
   generateSelectQuery(params: APIGatewayProxyEventQueryStringParameters | null): string {
     const denormalize = params?.denormalize === 'true';
-    let query = denormalize
+    const filterUnresolved = params?.eventResolved === 'false';
+    const cte = filterUnresolved
+      ? `WITH active_secs AS (
+           SELECT DISTINCT ec.security_id
+           FROM sm.event_contract ec
+           JOIN sm.event e ON ec.event_id = e.event_id
+           WHERE e.resolved = false
+         ) `
+      : '';
+    let query = cte + (denormalize
       ? `SELECT cr.*, sa.symbol AS symbol_a, sb.symbol AS symbol_b
          FROM sm.contract_relationship cr
          JOIN sm.security sa ON cr.security_id_a = sa.security_id
          JOIN sm.security sb ON cr.security_id_b = sb.security_id
          WHERE 1=1`
-      : 'SELECT * FROM sm.contract_relationship WHERE 1=1';
+      : 'SELECT * FROM sm.contract_relationship WHERE 1=1');
     const p = denormalize ? 'cr.' : '';
     if (params?.relationshipId) {
       query += ` AND ${p}relationship_id = ${params.relationshipId}`;
@@ -53,13 +62,9 @@ class ContractRelationshipHandler extends ResourceHandler {
     if (params?.relationshipType) {
       query += ` AND ${p}relationship_type = '${params.relationshipType}'`;
     }
-    if (params?.eventResolved === 'false') {
-      query += ` AND EXISTS (
-        SELECT 1 FROM sm.event_contract ec
-        JOIN sm.event e ON ec.event_id = e.event_id
-        WHERE ec.security_id IN (${p}security_id_a, ${p}security_id_b)
-        AND e.resolved = false
-      )`;
+    if (filterUnresolved) {
+      query += ` AND (${p}security_id_a IN (SELECT security_id FROM active_secs)
+                  OR ${p}security_id_b IN (SELECT security_id FROM active_secs))`;
     }
     return query;
   }
