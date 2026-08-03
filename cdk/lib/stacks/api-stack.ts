@@ -61,15 +61,9 @@ export class ApiStack extends cdk.Stack {
       },
     };
 
-    // Create API key early so its keyId can be referenced by the launcher Lambda
+    // Create API key early so its keyId can be referenced by the launcher Lambda's env var and IAM policy.
+    // UsagePlan.addApiStage must remain at the end (after all methods are registered) to avoid circular deps.
     this.apiKey = new apigw.ApiKey(this, 'ApiKey');
-    const usagePlan = new apigw.UsagePlan(this, 'UsagePlan', {
-      name: 'Global Usage Plan',
-    });
-    usagePlan.addApiKey(this.apiKey);
-    usagePlan.addApiStage({
-      stage: this.api.deploymentStage
-    });
 
     const crudResources = ['securities', 'exchanges', 'listings', 'listing-specs', 'strategies', 'currencies', 'events', 'event-contracts', 'contract-relationships', 'exchange-events', 'hedge-keywords'];
     for (const resourceName of crudResources) {
@@ -137,6 +131,14 @@ export class ApiStack extends cdk.Stack {
 
     const stopResource = strategySessionsResource.addResource('stop');
     stopResource.addMethod('POST', sessionsLauncherIntegration, { apiKeyRequired: true });
+
+    const usagePlan = new apigw.UsagePlan(this, 'UsagePlan', {
+      name: 'Global Usage Plan',
+    });
+    usagePlan.addApiKey(this.apiKey);
+    usagePlan.addApiStage({
+      stage: this.api.deploymentStage
+    });
 
     new cdk.CfnOutput(this, 'API URL', {
       value: this.api.url,
