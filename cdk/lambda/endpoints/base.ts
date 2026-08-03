@@ -49,8 +49,10 @@ export class ResourceHandler {
           return this.createResponse(400, { message: 'Invalid HTTP method' });
       }
     } catch (error) {
-      console.log(error);
-      return this.createResponse(500, { message: error });
+      const message = error instanceof Error ? error.message : String(error);
+      const stack = error instanceof Error ? error.stack : undefined;
+      console.error('Handler error:', message, stack);
+      return this.createResponse(500, { message, stack });
     } finally {
       if (client) {
         client.release();
@@ -136,7 +138,7 @@ export class ResourceHandler {
     const result = await this.client.query(query);
 
     if (result.rowCount != 1) {
-      return this.createResponse(404, { message: `Unable to new resource from body: ${body}` });
+      return this.createResponse(500, { message: `Insert returned ${result.rowCount} rows`, body, query });
     }
 
     const item = result.rows[0];
@@ -158,7 +160,7 @@ export class ResourceHandler {
         const query = this.generateInsertQuery(JSON.stringify(item));
         const result = await this.client.query(query);
         if (result.rowCount !== 1) {
-          throw new Error(`Insert failed for item: ${JSON.stringify(item)}`);
+          throw new Error(`Insert returned ${result.rowCount} rows for item: ${JSON.stringify(item)}. Query: ${query}`);
         }
         results.push(result.rows[0]);
       }

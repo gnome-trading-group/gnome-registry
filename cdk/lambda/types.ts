@@ -99,6 +99,7 @@ interface IExchangeEventBase {
   eventId: number;
   nativeEventId: string;
   rawTitle: string;
+  nativeUrl?: string;
 }
 export interface ICreateExchangeEvent extends IExchangeEventBase {}
 export interface IDeleteExchangeEvent {

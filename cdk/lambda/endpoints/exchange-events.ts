@@ -14,10 +14,11 @@ class ExchangeEventHandler extends ResourceHandler {
 
   generateInsertQuery(body: string): string {
     const ee = JSON.parse(body) as ICreateExchangeEvent;
+    const nativeUrl = ee.nativeUrl ? `'${ee.nativeUrl.replace(/'/g, "''")}'` : 'NULL';
     return `
-      INSERT INTO sm.exchange_event (exchange_id, event_id, native_event_id, raw_title)
-      VALUES (${ee.exchangeId}, ${ee.eventId}, '${ee.nativeEventId.replace(/'/g, "''")}', '${ee.rawTitle.replace(/'/g, "''")}')
-      ON CONFLICT (exchange_id, native_event_id) DO NOTHING
+      INSERT INTO sm.exchange_event (exchange_id, event_id, native_event_id, raw_title, native_url)
+      VALUES (${ee.exchangeId}, ${ee.eventId}, '${ee.nativeEventId.replace(/'/g, "''")}', '${ee.rawTitle.replace(/'/g, "''")}', ${nativeUrl})
+      ON CONFLICT (exchange_id, native_event_id) DO UPDATE SET native_url = COALESCE(EXCLUDED.native_url, sm.exchange_event.native_url)
       RETURNING *;
     `;
   }
@@ -45,6 +46,7 @@ class ExchangeEventHandler extends ResourceHandler {
     const updates: string[] = [];
     if (ee.eventId !== undefined) updates.push(`event_id = ${ee.eventId}`);
     if (ee.rawTitle !== undefined) updates.push(`raw_title = '${ee.rawTitle.replace(/'/g, "''")}'`);
+    if (ee.nativeUrl !== undefined) updates.push(`native_url = ${ee.nativeUrl ? `'${ee.nativeUrl.replace(/'/g, "''")}'` : 'NULL'}`);
     return `UPDATE sm.exchange_event SET ${updates.join(', ')} WHERE exchange_event_id = ${row['exchange_event_id']} RETURNING *`;
   }
 }
