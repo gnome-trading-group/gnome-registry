@@ -21,7 +21,7 @@ export class DatabaseInitLambda extends Construct {
       entry: join(__dirname, '..', '..', 'lambda', 'db-init', 'index.ts'),
       vpc: props.vpc,
       vpcSubnets: props.vpc.selectSubnets({
-        subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS,
+        subnetType: ec2.SubnetType.PRIVATE_ISOLATED,
       }),
       runtime: Runtime.NODEJS_22_X,
       timeout: cdk.Duration.seconds(30),
@@ -46,7 +46,7 @@ export class DatabaseInitLambda extends Construct {
       entry: join(__dirname, '..', '..', 'lambda', 'db-query', 'index.ts'),
       vpc: props.vpc,
       vpcSubnets: props.vpc.selectSubnets({
-        subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS,
+        subnetType: ec2.SubnetType.PRIVATE_ISOLATED,
       }),
       runtime: Runtime.NODEJS_22_X,
       timeout: cdk.Duration.seconds(30),

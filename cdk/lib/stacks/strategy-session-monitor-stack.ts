@@ -32,7 +32,7 @@ export class StrategySessionMonitorStack extends cdk.Stack {
       },
       vpc: props.vpc,
       vpcSubnets: props.vpc.selectSubnets({
-        subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS,
+        subnetType: ec2.SubnetType.PRIVATE_ISOLATED,
       }),
     });
 

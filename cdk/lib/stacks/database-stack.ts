@@ -45,11 +45,11 @@ export class DatabaseStack extends cdk.Stack {
 
     this.vpc = new ec2.Vpc(this, 'registry-database-vpc', {
       vpcName: 'registry-database-vpc',
-      natGateways: 1,
+      natGateways: 0,
       subnetConfiguration: [
         {
           name: 'rds',
-          subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS,
+          subnetType: ec2.SubnetType.PRIVATE_ISOLATED,
           cidrMask: 18,
         },
         {
@@ -84,7 +84,7 @@ export class DatabaseStack extends cdk.Stack {
 
     this.database = new rds.DatabaseInstance(this, 'registry-database', {
       vpc: this.vpc,
-      vpcSubnets: { subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS },
+      vpcSubnets: { subnetType: ec2.SubnetType.PRIVATE_ISOLATED },
       instanceType,
       engine,
       allocatedStorage: 20,
@@ -107,7 +107,7 @@ export class DatabaseStack extends cdk.Stack {
     const bastion = new ec2.BastionHostLinux(this, 'Bastion', {
       vpc: this.vpc,
       instanceType: ec2.InstanceType.of(ec2.InstanceClass.T4G, ec2.InstanceSize.NANO),
-      subnetSelection: { subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS },
+      subnetSelection: { subnetType: ec2.SubnetType.PRIVATE_ISOLATED },
       securityGroup: new ec2.SecurityGroup(this, 'BastionSg', {
         vpc: this.vpc,
         description: 'Bastion host - no inbound, SSM outbound only',
@@ -119,5 +119,22 @@ export class DatabaseStack extends cdk.Stack {
       value: bastion.instanceId,
       description: 'SSM bastion instance ID for local dev tunneling',
     });
+
+    // Uncomment to enable bastion SSM access (~$7/month per endpoint, $21/month total).
+    // Also uncomment if S3 session logging is needed: add com.amazonaws.{region}.s3 gateway endpoint.
+    // const ssmSg = new ec2.SecurityGroup(this, 'SsmEndpointSg', {
+    //   vpc: this.vpc,
+    //   description: 'SSM VPC endpoints',
+    //   allowAllOutbound: false,
+    // });
+    // ssmSg.addIngressRule(ec2.Peer.ipv4(this.vpc.vpcCidrBlock), ec2.Port.tcp(443));
+    // for (const service of ['ssm', 'ssmmessages', 'ec2messages']) {
+    //   new ec2.InterfaceVpcEndpoint(this, `${service}-endpoint`, {
+    //     vpc: this.vpc,
+    //     service: new ec2.InterfaceVpcEndpointService(`com.amazonaws.${this.region}.${service}`),
+    //     subnets: { subnetType: ec2.SubnetType.PRIVATE_ISOLATED },
+    //     securityGroups: [ssmSg],
+    //   });
+    // }
   }
 }

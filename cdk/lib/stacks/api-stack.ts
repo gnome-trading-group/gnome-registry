@@ -61,6 +61,16 @@ export class ApiStack extends cdk.Stack {
       },
     };
 
+    // Create API key early so its keyId can be referenced by the launcher Lambda
+    this.apiKey = new apigw.ApiKey(this, 'ApiKey');
+    const usagePlan = new apigw.UsagePlan(this, 'UsagePlan', {
+      name: 'Global Usage Plan',
+    });
+    usagePlan.addApiKey(this.apiKey);
+    usagePlan.addApiStage({
+      stage: this.api.deploymentStage
+    });
+
     const crudResources = ['securities', 'exchanges', 'listings', 'listing-specs', 'strategies', 'currencies', 'events', 'event-contracts', 'contract-relationships', 'exchange-events', 'hedge-keywords'];
     for (const resourceName of crudResources) {
       this.attachMethods(this.api.root.addResource(resourceName), `${resourceName}.ts`, ['GET', 'POST', 'DELETE', 'PATCH']);
@@ -75,44 +85,58 @@ export class ApiStack extends cdk.Stack {
     const riskResource = this.api.root.addResource('risk');
     this.attachMethods(riskResource.addResource('policies'), 'risk-policies.ts', ['GET', 'POST', 'DELETE', 'PATCH']);
 
-    // /strategy-sessions — separate Lambda with ECS/EC2 IAM permissions for RunTask/StopTask
-    const strategySessionsLambda = new lambda.NodejsFunction(this, 'strategy-sessions-lambda', {
+    // /strategy-sessions — split into two Lambdas:
+    // - In-VPC Lambda: GET/PATCH/POST (DB-only operations)
+    // - Outside-VPC launcher Lambda: POST /launch + POST /stop (ECS/EC2 orchestration, calls Registry API for DB)
+    const strategySessionsDbLambda = new lambda.NodejsFunction(this, 'strategy-sessions-lambda', {
       entry: join(__dirname, '..', '..', 'lambda', 'endpoints', 'strategy-sessions.ts'),
       ...this.nodeJsProps,
+      vpc: this.props.vpc,
+      vpcSubnets: this.props.vpc.selectSubnets({ subnetType: ec2.SubnetType.PRIVATE_ISOLATED }),
+    });
+    this.props.database.grantConnect(strategySessionsDbLambda);
+
+    const strategySessionsLauncherLambda = new lambda.NodejsFunction(this, 'strategy-session-launcher-lambda', {
+      entry: join(__dirname, '..', '..', 'lambda', 'endpoints', 'strategy-session-launcher.ts'),
+      ...this.nodeJsProps,
       bundling: {
-        ...this.nodeJsProps.bundling,
         externalModules: ['pg-native', '@aws-sdk/*'],
       },
-      vpc: this.props.vpc,
-      vpcSubnets: this.props.vpc.selectSubnets({ subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS }),
+      environment: {
+        REGISTRY_API_URL: this.api.url,
+        REGISTRY_API_KEY_ID: this.apiKey.keyId,
+      },
     });
-    this.props.database.grantConnect(strategySessionsLambda);
-    strategySessionsLambda.addToRolePolicy(new iam.PolicyStatement({
+    strategySessionsLauncherLambda.addToRolePolicy(new iam.PolicyStatement({
       actions: ['ecs:RunTask', 'ecs:StopTask'],
       resources: ['*'],
     }));
-    strategySessionsLambda.addToRolePolicy(new iam.PolicyStatement({
+    strategySessionsLauncherLambda.addToRolePolicy(new iam.PolicyStatement({
       actions: ['iam:PassRole'],
       resources: ['arn:aws:iam::*:role/gnome-orchestrator-*'],
     }));
-    strategySessionsLambda.addToRolePolicy(new iam.PolicyStatement({
+    strategySessionsLauncherLambda.addToRolePolicy(new iam.PolicyStatement({
       actions: ['ec2:DescribeSubnets', 'ec2:DescribeSecurityGroups'],
       resources: ['*'],
     }));
-    const strategySessionsResource = this.api.root.addResource('strategy-sessions');
-    const strategySessionsIntegration = new apigw.LambdaIntegration(strategySessionsLambda);
-    for (const method of ['GET', 'POST', 'DELETE', 'PATCH']) {
-      strategySessionsResource.addMethod(method, strategySessionsIntegration, { apiKeyRequired: true });
-    }
+    strategySessionsLauncherLambda.addToRolePolicy(new iam.PolicyStatement({
+      actions: ['apigateway:GET'],
+      resources: [`arn:aws:apigateway:${this.region}::/apikeys/${this.apiKey.keyId}`],
+    }));
 
-    this.apiKey = new apigw.ApiKey(this, 'ApiKey');
-    const usagePlan = new apigw.UsagePlan(this, 'UsagePlan', {
-      name: 'Global Usage Plan',
-    });
-    usagePlan.addApiKey(this.apiKey);
-    usagePlan.addApiStage({
-      stage: this.api.deploymentStage
-    });
+    const strategySessionsResource = this.api.root.addResource('strategy-sessions');
+    const sessionsDbIntegration = new apigw.LambdaIntegration(strategySessionsDbLambda);
+    const sessionsLauncherIntegration = new apigw.LambdaIntegration(strategySessionsLauncherLambda);
+
+    strategySessionsResource.addMethod('GET', sessionsDbIntegration, { apiKeyRequired: true });
+    strategySessionsResource.addMethod('PATCH', sessionsDbIntegration, { apiKeyRequired: true });
+    strategySessionsResource.addMethod('POST', sessionsDbIntegration, { apiKeyRequired: true });
+
+    const launchResource = strategySessionsResource.addResource('launch');
+    launchResource.addMethod('POST', sessionsLauncherIntegration, { apiKeyRequired: true });
+
+    const stopResource = strategySessionsResource.addResource('stop');
+    stopResource.addMethod('POST', sessionsLauncherIntegration, { apiKeyRequired: true });
 
     new cdk.CfnOutput(this, 'API URL', {
       value: this.api.url,
@@ -142,7 +166,7 @@ export class ApiStack extends cdk.Stack {
       ...this.nodeJsProps,
       vpc: this.props.vpc,
       vpcSubnets: this.props.vpc.selectSubnets({
-        subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS,
+        subnetType: ec2.SubnetType.PRIVATE_ISOLATED,
       }),
     });
     this.props.database.grantConnect(l);
