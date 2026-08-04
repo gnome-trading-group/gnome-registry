@@ -120,21 +120,19 @@ export class DatabaseStack extends cdk.Stack {
       description: 'SSM bastion instance ID for local dev tunneling',
     });
 
-    // Uncomment to enable bastion SSM access (~$7/month per endpoint, $21/month total).
-    // Also uncomment if S3 session logging is needed: add com.amazonaws.{region}.s3 gateway endpoint.
-    // const ssmSg = new ec2.SecurityGroup(this, 'SsmEndpointSg', {
-    //   vpc: this.vpc,
-    //   description: 'SSM VPC endpoints',
-    //   allowAllOutbound: false,
-    // });
-    // ssmSg.addIngressRule(ec2.Peer.ipv4(this.vpc.vpcCidrBlock), ec2.Port.tcp(443));
-    // for (const service of ['ssm', 'ssmmessages', 'ec2messages']) {
-    //   new ec2.InterfaceVpcEndpoint(this, `${service}-endpoint`, {
-    //     vpc: this.vpc,
-    //     service: new ec2.InterfaceVpcEndpointService(`com.amazonaws.${this.region}.${service}`),
-    //     subnets: { subnetType: ec2.SubnetType.PRIVATE_ISOLATED },
-    //     securityGroups: [ssmSg],
-    //   });
-    // }
+    const ssmSg = new ec2.SecurityGroup(this, 'SsmEndpointSg', {
+      vpc: this.vpc,
+      description: 'SSM VPC endpoints',
+      allowAllOutbound: false,
+    });
+    ssmSg.addIngressRule(ec2.Peer.ipv4(this.vpc.vpcCidrBlock), ec2.Port.tcp(443));
+    for (const service of ['ssm', 'ssmmessages', 'ec2messages']) {
+      new ec2.InterfaceVpcEndpoint(this, `${service}-endpoint`, {
+        vpc: this.vpc,
+        service: new ec2.InterfaceVpcEndpointService(`com.amazonaws.${this.region}.${service}`),
+        subnets: { subnetType: ec2.SubnetType.PRIVATE_ISOLATED },
+        securityGroups: [ssmSg],
+      });
+    }
   }
 }
