@@ -126,10 +126,15 @@ export class DatabaseStack extends cdk.Stack {
       allowAllOutbound: false,
     });
     ssmSg.addIngressRule(ec2.Peer.ipv4(this.vpc.vpcCidrBlock), ec2.Port.tcp(443));
-    for (const service of ['ssm', 'ssmmessages', 'ec2messages']) {
-      new ec2.InterfaceVpcEndpoint(this, `${service}-endpoint`, {
+    const ssmEndpointServices: Array<[string, ec2.InterfaceVpcEndpointAwsService]> = [
+      ['ssm', ec2.InterfaceVpcEndpointAwsService.SSM],
+      ['ssmmessages', ec2.InterfaceVpcEndpointAwsService.SSM_MESSAGES],
+      ['ec2messages', ec2.InterfaceVpcEndpointAwsService.EC2_MESSAGES],
+    ];
+    for (const [name, service] of ssmEndpointServices) {
+      new ec2.InterfaceVpcEndpoint(this, `${name}-endpoint`, {
         vpc: this.vpc,
-        service: new ec2.InterfaceVpcEndpointService(`com.amazonaws.${this.region}.${service}`),
+        service,
         subnets: { subnetType: ec2.SubnetType.PRIVATE_ISOLATED },
         securityGroups: [ssmSg],
       });
