@@ -16,6 +16,7 @@ interface Props extends cdk.StackProps {
 }
 
 export class ApiStack extends cdk.Stack {
+  public static readonly STAGE_NAME = 'api';
   public readonly api: apigw.RestApi;
   public readonly apiKey: apigw.ApiKey;
   private nodeJsProps: lambda.NodejsFunctionProps;
@@ -41,7 +42,7 @@ export class ApiStack extends cdk.Stack {
         ],
       },
       deployOptions: {
-        stageName: 'api',
+        stageName: ApiStack.STAGE_NAME,
       },
       apiKeySourceType: apigw.ApiKeySourceType.HEADER,
     });
@@ -97,7 +98,7 @@ export class ApiStack extends cdk.Stack {
         externalModules: ['pg-native', '@aws-sdk/*'],
       },
       environment: {
-        REGISTRY_API_URL: this.api.url,
+        REGISTRY_API_URL: `https://${this.api.restApiId}.execute-api.${this.region}.${this.urlSuffix}/${ApiStack.STAGE_NAME}/`,
         REGISTRY_API_KEY_ID: this.apiKey.keyId,
       },
     });
