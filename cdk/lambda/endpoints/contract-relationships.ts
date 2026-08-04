@@ -43,6 +43,9 @@ class ContractRelationshipHandler extends ResourceHandler {
     if (params?.securityId) {
       filters += ` AND (${p}security_id_a = ${params.securityId} OR ${p}security_id_b = ${params.securityId})`;
     }
+    if (params?.eventId) {
+      filters += ` AND (${p}security_id_a IN (SELECT security_id FROM sm.event_contract WHERE event_id = ${params.eventId}) OR ${p}security_id_b IN (SELECT security_id FROM sm.event_contract WHERE event_id = ${params.eventId}))`;
+    }
     if (params?.method) {
       filters += ` AND ${p}method = '${params.method}'`;
     }
