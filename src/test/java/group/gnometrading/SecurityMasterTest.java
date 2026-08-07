@@ -7,6 +7,7 @@ import group.gnometrading.schemas.SchemaType;
 import group.gnometrading.sm.AssetClass;
 import group.gnometrading.sm.ContractRelationship;
 import group.gnometrading.sm.ContractType;
+import group.gnometrading.sm.Event;
 import group.gnometrading.sm.Exchange;
 import group.gnometrading.sm.Listing;
 import group.gnometrading.sm.ListingSpec;
@@ -14,6 +15,7 @@ import group.gnometrading.sm.Security;
 import group.gnometrading.sm.SecurityType;
 import group.gnometrading.strings.ViewString;
 import java.nio.ByteBuffer;
+import java.time.Instant;
 import java.util.stream.Stream;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -280,6 +282,49 @@ class SecurityMasterTest {
                                 .getBytes()));
         assertSame(securityMaster.getListingSpec(42), securityMaster.getListingSpec(42));
         verify(registryConnection, times(1)).get(any());
+    }
+
+    @Test
+    void testGetEventParsesIsoTimestampsAndCaches() {
+        String jsonResponse =
+                """
+                [{"event_id": 595, "title": "LCK 2026 Winner", "description": "Winner of LCK 2026", \
+"category": "esports", "resolved": true, "resolved_at": "2026-08-01T12:34:56.789Z", \
+"expiry": "2026-12-31T00:00:00.000Z"}]""";
+        when(registryConnection.get(new ViewString("/api/events?eventId=595")))
+                .thenReturn(ByteBuffer.wrap(jsonResponse.getBytes()));
+
+        Event first = securityMaster.getEvent(595);
+        Event second = securityMaster.getEvent(595);
+
+        assertEquals(
+                new Event(
+                        595,
+                        "LCK 2026 Winner",
+                        "Winner of LCK 2026",
+                        "esports",
+                        true,
+                        Instant.parse("2026-08-01T12:34:56.789Z").toEpochMilli(),
+                        Instant.parse("2026-12-31T00:00:00.000Z").toEpochMilli()),
+                first);
+        assertSame(first, second);
+        verify(registryConnection, times(1)).get(any());
+    }
+
+    @Test
+    void testGetEventUsesZeroForNullResolvedAt() {
+        String jsonResponse =
+                """
+                [{"event_id": 595, "resolved": false, "resolved_at": null, \
+"expiry": "2026-12-31T00:00:00.000Z"}]""";
+        when(registryConnection.get(new ViewString("/api/events?eventId=595")))
+                .thenReturn(ByteBuffer.wrap(jsonResponse.getBytes()));
+
+        Event result = securityMaster.getEvent(595);
+
+        assertNotNull(result);
+        assertEquals(0L, result.resolvedAt());
+        assertEquals(Instant.parse("2026-12-31T00:00:00.000Z").toEpochMilli(), result.expiry());
     }
 
     @Test
