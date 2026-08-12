@@ -33,7 +33,7 @@ CREATE TABLE sm.event_contract (
 --   IMPLIES            directional: security_id_a being true means security_id_b must be true
 --                      (e.g., "BTC > 150k" implies "BTC > 140k" — arb if priced wrong)
 --   MUTUALLY_EXCLUSIVE both cannot be true simultaneously
---   CORRELATED         statistically related, not logically linked
+
 --   HEDGEABLE_WITH     useful hedge pair, possibly cross-asset-class
 CREATE TABLE sm.contract_relationship (
     relationship_id  serial    PRIMARY KEY,

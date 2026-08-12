@@ -102,42 +102,44 @@ export class DatabaseStack extends cdk.Stack {
       rootUserSecret: this.rootUserSecret,
     });
 
-    // SSM bastion for local dev tunneling to RDS/Redis
-    // No SSH keys or open ports — access is SSM-only via IAM
-    const bastion = new ec2.BastionHostLinux(this, 'Bastion', {
-      vpc: this.vpc,
-      instanceType: ec2.InstanceType.of(ec2.InstanceClass.T4G, ec2.InstanceSize.NANO),
-      subnetSelection: { subnetType: ec2.SubnetType.PRIVATE_ISOLATED },
-      securityGroup: new ec2.SecurityGroup(this, 'BastionSg', {
-        vpc: this.vpc,
-        description: 'Bastion host - no inbound, SSM outbound only',
-        allowAllOutbound: true,
-      }),
-    });
-
-    new cdk.CfnOutput(this, 'BastionInstanceId', {
-      value: bastion.instanceId,
-      description: 'SSM bastion instance ID for local dev tunneling',
-    });
-
-    const ssmSg = new ec2.SecurityGroup(this, 'SsmEndpointSg', {
-      vpc: this.vpc,
-      description: 'SSM VPC endpoints',
-      allowAllOutbound: false,
-    });
-    ssmSg.addIngressRule(ec2.Peer.ipv4(this.vpc.vpcCidrBlock), ec2.Port.tcp(443));
-    const ssmEndpointServices: Array<[string, ec2.InterfaceVpcEndpointAwsService]> = [
-      ['ssm', ec2.InterfaceVpcEndpointAwsService.SSM],
-      ['ssmmessages', ec2.InterfaceVpcEndpointAwsService.SSM_MESSAGES],
-      ['ec2messages', ec2.InterfaceVpcEndpointAwsService.EC2_MESSAGES],
-    ];
-    for (const [name, service] of ssmEndpointServices) {
-      new ec2.InterfaceVpcEndpoint(this, `${name}-endpoint`, {
-        vpc: this.vpc,
-        service,
-        subnets: { subnetType: ec2.SubnetType.PRIVATE_ISOLATED },
-        securityGroups: [ssmSg],
-      });
-    }
+    // SSM bastion + VPC endpoints commented out — not currently in use (~$44-66/month)
+    // Uncomment to restore local dev tunneling to RDS/Redis via SSM Session Manager.
+    // Requires moving bastion to PUBLIC subnet (or keeping PRIVATE_ISOLATED + VPC endpoints).
+    //
+    // const bastion = new ec2.BastionHostLinux(this, 'Bastion', {
+    //   vpc: this.vpc,
+    //   instanceType: ec2.InstanceType.of(ec2.InstanceClass.T4G, ec2.InstanceSize.NANO),
+    //   subnetSelection: { subnetType: ec2.SubnetType.PRIVATE_ISOLATED },
+    //   securityGroup: new ec2.SecurityGroup(this, 'BastionSg', {
+    //     vpc: this.vpc,
+    //     description: 'Bastion host - no inbound, SSM outbound only',
+    //     allowAllOutbound: true,
+    //   }),
+    // });
+    //
+    // new cdk.CfnOutput(this, 'BastionInstanceId', {
+    //   value: bastion.instanceId,
+    //   description: 'SSM bastion instance ID for local dev tunneling',
+    // });
+    //
+    // const ssmSg = new ec2.SecurityGroup(this, 'SsmEndpointSg', {
+    //   vpc: this.vpc,
+    //   description: 'SSM VPC endpoints',
+    //   allowAllOutbound: false,
+    // });
+    // ssmSg.addIngressRule(ec2.Peer.ipv4(this.vpc.vpcCidrBlock), ec2.Port.tcp(443));
+    // const ssmEndpointServices: Array<[string, ec2.InterfaceVpcEndpointAwsService]> = [
+    //   ['ssm', ec2.InterfaceVpcEndpointAwsService.SSM],
+    //   ['ssmmessages', ec2.InterfaceVpcEndpointAwsService.SSM_MESSAGES],
+    //   ['ec2messages', ec2.InterfaceVpcEndpointAwsService.EC2_MESSAGES],
+    // ];
+    // for (const [name, service] of ssmEndpointServices) {
+    //   new ec2.InterfaceVpcEndpoint(this, `${name}-endpoint`, {
+    //     vpc: this.vpc,
+    //     service,
+    //     subnets: { subnetType: ec2.SubnetType.PRIVATE_ISOLATED },
+    //     securityGroups: [ssmSg],
+    //   });
+    // }
   }
 }
