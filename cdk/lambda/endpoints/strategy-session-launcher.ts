@@ -125,10 +125,20 @@ async function handleLaunch(body: string | null) {
   const region = s.region ?? await resolveRegion(listingIds);
   const { subnetIds, securityGroupId } = await discoverNetworkConfig(region);
 
-  const envOverrides = Object.entries(s.config).map(([key, value]) => ({
-    name: toEnvVarName(key),
-    value: String(value),
-  }));
+  const argsEntries: Record<string, string> = {};
+  const otherEntries: [string, string][] = [];
+  for (const [key, value] of Object.entries(s.config)) {
+    if (key.startsWith('strategy.args.')) {
+      argsEntries[key.substring('strategy.args.'.length)] = String(value);
+    } else {
+      otherEntries.push([key, String(value)]);
+    }
+  }
+
+  const envOverrides = otherEntries.map(([key, value]) => ({ name: toEnvVarName(key), value }));
+  if (Object.keys(argsEntries).length > 0) {
+    envOverrides.push({ name: 'STRATEGY_ARGS_JSON', value: JSON.stringify(argsEntries) });
+  }
   envOverrides.push({ name: 'STRATEGY_ID', value: String(s.strategyId) });
   envOverrides.push({ name: 'MODE', value: s.mode });
   envOverrides.push({ name: 'SESSION_ID', value: s.sessionId });
