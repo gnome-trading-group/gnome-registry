@@ -2,6 +2,7 @@ import { APIGatewayProxyEvent } from 'aws-lambda';
 import { ECSClient, RunTaskCommand, StopTaskCommand } from '@aws-sdk/client-ecs';
 import { EC2Client, DescribeSubnetsCommand, DescribeSecurityGroupsCommand } from '@aws-sdk/client-ec2';
 import { APIGatewayClient, GetApiKeyCommand } from '@aws-sdk/client-api-gateway';
+import { CloudWatchLogsClient, GetLogEventsCommand } from '@aws-sdk/client-cloudwatch-logs';
 
 const REGISTRY_API_URL = (process.env.REGISTRY_API_URL ?? '').replace(/\/$/, '');
 const REGISTRY_API_KEY_ID = process.env.REGISTRY_API_KEY_ID ?? '';
@@ -213,6 +214,42 @@ async function handleStop(body: string | null) {
   return createResponse(200, updated);
 }
 
+async function handleLogs(queryParams: Record<string, string> | null) {
+  const sessionId = queryParams?.sessionId;
+  if (!sessionId) return createResponse(400, { message: 'sessionId is required' });
+
+  const sessions = await registryFetch('/strategy-sessions', 'GET', undefined, { sessionId });
+  if (!sessions?.length) return createResponse(404, { message: `Session not found: ${sessionId}` });
+
+  const taskArn: string | undefined = sessions[0].task_arn;
+  if (!taskArn) return createResponse(200, { logs: [] });
+
+  const region = taskArn.split(':')[3];
+  const taskId = taskArn.split('/').pop();
+  const logGroupName = `/gnome/orchestrator/${region}`;
+  const logStreamName = `orchestrator/orchestrator/${taskId}`;
+
+  const logsClient = new CloudWatchLogsClient({ region });
+  let logEvents: { timestamp: number; message: string }[] = [];
+  try {
+    const response = await logsClient.send(new GetLogEventsCommand({
+      logGroupName,
+      logStreamName,
+      startTime: Date.now() - 10 * 60 * 1000,
+      endTime: Date.now(),
+      limit: 500,
+    }));
+    logEvents = (response.events ?? []).map(e => ({ timestamp: e.timestamp ?? 0, message: e.message ?? '' }));
+  } catch (err: any) {
+    if (err.name !== 'ResourceNotFoundException') throw err;
+  }
+
+  const encodeLogPath = (s: string) => s.replace(/\//g, '$252F');
+  const consoleUrl = `https://${region}.console.aws.amazon.com/cloudwatch/home?region=${region}#logsV2:log-groups/log-group/${encodeLogPath(logGroupName)}/log-events/${encodeLogPath(logStreamName)}`;
+
+  return createResponse(200, { logs: [{ taskArn, logs: logEvents, consoleUrl }] });
+}
+
 export const handler = async (event: APIGatewayProxyEvent) => {
   try {
     const path = event.resource ?? event.path;
@@ -221,6 +258,9 @@ export const handler = async (event: APIGatewayProxyEvent) => {
     }
     if (path.endsWith('/stop') && event.httpMethod === 'POST') {
       return await handleStop(event.body);
+    }
+    if (path.endsWith('/logs') && event.httpMethod === 'GET') {
+      return await handleLogs(event.queryStringParameters as Record<string, string> | null);
     }
     return createResponse(400, { message: `Unknown route: ${event.httpMethod} ${path}` });
   } catch (error) {

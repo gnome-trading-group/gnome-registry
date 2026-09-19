@@ -118,6 +118,10 @@ export class ApiStack extends cdk.Stack {
       actions: ['apigateway:GET'],
       resources: [`arn:aws:apigateway:${this.region}::/apikeys/${this.apiKey.keyId}`],
     }));
+    strategySessionsLauncherLambda.addToRolePolicy(new iam.PolicyStatement({
+      actions: ['logs:GetLogEvents'],
+      resources: ['arn:aws:logs:*:*:log-group:/gnome/orchestrator/*'],
+    }));
 
     const strategySessionsResource = this.api.root.addResource('strategy-sessions');
     const sessionsDbIntegration = new apigw.LambdaIntegration(strategySessionsDbLambda);
@@ -132,6 +136,9 @@ export class ApiStack extends cdk.Stack {
 
     const stopResource = strategySessionsResource.addResource('stop');
     stopResource.addMethod('POST', sessionsLauncherIntegration, { apiKeyRequired: true });
+
+    const logsResource = strategySessionsResource.addResource('logs');
+    logsResource.addMethod('GET', sessionsLauncherIntegration, { apiKeyRequired: true });
 
     const usagePlan = new apigw.UsagePlan(this, 'UsagePlan', {
       name: 'Global Usage Plan',
