@@ -21,17 +21,47 @@ export const handler = async (event: APIGatewayProxyEvent) => {
   const client = await pool.connect();
   try {
     const params = event.queryStringParameters;
-    let where = 'ss.mode = \'LIVE\'';
-    if (params?.strategyId) where += ` AND ps.strategy_id=${params.strategyId}`;
-    if (params?.listingId) where += ` AND ps.listing_id=${params.listingId}`;
+    const mode = params?.mode?.toUpperCase();
+    const sessionId = params?.sessionId;
 
-    const query = `
-      SELECT DISTINCT ON (ps.strategy_id, ps.listing_id) ps.*
-      FROM pnl.snapshot ps
-      JOIN strategy.session ss ON ss.session_id = ps.session_id
-      WHERE ${where}
-      ORDER BY ps.strategy_id, ps.listing_id, ps.snapshot_time DESC;
-    `;
+    let query: string;
+
+    if (sessionId) {
+      let where = `ps.session_id = '${sessionId}'`;
+      if (params?.strategyId) where += ` AND ps.strategy_id=${params.strategyId}`;
+      if (params?.listingId) where += ` AND ps.listing_id=${params.listingId}`;
+      query = `
+        SELECT DISTINCT ON (ps.strategy_id, ps.listing_id) ps.*, ss.mode
+        FROM pnl.snapshot ps
+        JOIN strategy.session ss ON ss.session_id = ps.session_id
+        WHERE ${where}
+        ORDER BY ps.strategy_id, ps.listing_id, ps.snapshot_time DESC;
+      `;
+    } else if (mode === 'ALL') {
+      let where = '1=1';
+      if (params?.strategyId) where += ` AND ps.strategy_id=${params.strategyId}`;
+      if (params?.listingId) where += ` AND ps.listing_id=${params.listingId}`;
+      query = `
+        SELECT DISTINCT ON (ps.strategy_id, ps.listing_id, ss.mode) ps.*, ss.mode
+        FROM pnl.snapshot ps
+        JOIN strategy.session ss ON ss.session_id = ps.session_id
+        WHERE ${where}
+        ORDER BY ps.strategy_id, ps.listing_id, ss.mode, ps.snapshot_time DESC;
+      `;
+    } else {
+      const modeFilter = mode ?? 'LIVE';
+      let where = `ss.mode = '${modeFilter}'`;
+      if (params?.strategyId) where += ` AND ps.strategy_id=${params.strategyId}`;
+      if (params?.listingId) where += ` AND ps.listing_id=${params.listingId}`;
+      query = `
+        SELECT DISTINCT ON (ps.strategy_id, ps.listing_id) ps.*, ss.mode
+        FROM pnl.snapshot ps
+        JOIN strategy.session ss ON ss.session_id = ps.session_id
+        WHERE ${where}
+        ORDER BY ps.strategy_id, ps.listing_id, ps.snapshot_time DESC;
+      `;
+    }
+
     const result = await client.query(query);
     return createResponse(200, result.rows);
   } catch (error) {
