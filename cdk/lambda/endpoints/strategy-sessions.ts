@@ -6,7 +6,7 @@ interface ISession {
   strategyId: number;
   status: string;
   mode: string;
-  config: Record<string, string>;
+  config: Record<string, unknown>;
   researchCommit?: string;
   taskArn?: string;
   taskDefinitionArn?: string;

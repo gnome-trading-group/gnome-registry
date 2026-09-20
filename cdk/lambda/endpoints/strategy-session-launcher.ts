@@ -87,7 +87,7 @@ interface ICreateSession {
   sessionId: string;
   strategyId: number;
   mode: string;
-  config: Record<string, string>;
+  config: Record<string, unknown>;
   researchCommit?: string;
   region?: string;
 }
@@ -126,11 +126,11 @@ async function handleLaunch(body: string | null) {
   const region = s.region ?? await resolveRegion(listingIds);
   const { subnetIds, securityGroupId } = await discoverNetworkConfig(region);
 
-  const argsEntries: Record<string, string> = {};
+  const argsEntries: Record<string, unknown> = {};
   const otherEntries: [string, string][] = [];
   for (const [key, value] of Object.entries(s.config)) {
     if (key.startsWith('strategy.args.')) {
-      argsEntries[key.substring('strategy.args.'.length)] = String(value);
+      argsEntries[key.substring('strategy.args.'.length)] = value;
     } else {
       otherEntries.push([key, String(value)]);
     }
