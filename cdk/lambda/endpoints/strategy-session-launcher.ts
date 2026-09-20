@@ -115,12 +115,12 @@ async function handleLaunch(body: string | null) {
     return createResponse(400, { message: 'Missing required fields: sessionId, strategyId, mode, config' });
   }
 
-  const listingIds = String(s.config['listings'] ?? '')
-    .split(',')
-    .map(id => parseInt(id.trim(), 10))
-    .filter(id => !isNaN(id));
+  const rawListings = s.config['listings'];
+  const listingIds: number[] = Array.isArray(rawListings)
+    ? rawListings.map(Number).filter(id => !isNaN(id))
+    : [];
   if (listingIds.length === 0) {
-    return createResponse(400, { message: 'config.listings must be a non-empty comma-separated list of listing IDs' });
+    return createResponse(400, { message: 'config.listings must be a non-empty array of listing IDs' });
   }
 
   const region = s.region ?? await resolveRegion(listingIds);
@@ -132,7 +132,7 @@ async function handleLaunch(body: string | null) {
     if (key.startsWith('strategy.args.')) {
       argsEntries[key.substring('strategy.args.'.length)] = value;
     } else {
-      otherEntries.push([key, String(value)]);
+      otherEntries.push([key, Array.isArray(value) ? JSON.stringify(value) : String(value)]);
     }
   }
 

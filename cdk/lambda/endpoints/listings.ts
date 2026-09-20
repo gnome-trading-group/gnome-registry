@@ -59,7 +59,7 @@ class ListingHandler extends ResourceHandler {
     }
     if (params?.search && denormalize) {
       const escaped = params.search.replace(/'/g, "''");
-      query += ` AND (s.symbol ILIKE '%${escaped}%' OR e.exchange_name ILIKE '%${escaped}%' OR l.exchange_security_symbol ILIKE '%${escaped}%')`;
+      query += ` AND (s.symbol ILIKE '%${escaped}%' OR e.exchange_name ILIKE '%${escaped}%' OR l.exchange_security_symbol ILIKE '%${escaped}%' OR l.listing_id::text = '${escaped}')`;
     }
     if (params?.active !== undefined) {
       query += denormalize ? ` AND l.active=${params.active === 'true'}` : ` AND active=${params.active === 'true'}`;
