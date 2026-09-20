@@ -90,6 +90,8 @@ interface ICreateSession {
   config: Record<string, unknown>;
   researchCommit?: string;
   region?: string;
+  cpu?: number;
+  memory?: number;
 }
 
 const CORS_HEADERS = {
@@ -157,6 +159,8 @@ async function handleLaunch(body: string | null) {
       },
     },
     overrides: {
+      ...(s.cpu ? { cpu: String(s.cpu) } : {}),
+      ...(s.memory ? { memory: String(s.memory) } : {}),
       containerOverrides: [{
         name: 'orchestrator',
         environment: envOverrides,
