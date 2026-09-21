@@ -239,7 +239,7 @@ async function handleLogs(queryParams: Record<string, string> | null) {
     const response = await logsClient.send(new GetLogEventsCommand({
       logGroupName,
       logStreamName,
-      startTime: Date.now() - 10 * 60 * 1000,
+      startTime: Date.now() - 60 * 60 * 1000,
       endTime: Date.now(),
       limit: 500,
     }));

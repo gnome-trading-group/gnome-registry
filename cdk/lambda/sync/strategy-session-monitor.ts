@@ -8,17 +8,16 @@ interface EcsTaskStateChangeEvent {
   };
 }
 
-function resolveSessionStatus(ecsStatus: string, stoppedReason?: string): string | null {
+function resolveSessionStatus(ecsStatus: string): string | null {
   if (ecsStatus === 'RUNNING') return 'RUNNING';
-  if (ecsStatus !== 'STOPPED') return null;
-  if (!stoppedReason || stoppedReason.toLowerCase().includes('user')) return 'STOPPED';
-  return 'FAILED';
+  if (ecsStatus === 'STOPPED') return 'FAILED';
+  return null;
 }
 
 export const handler = async (event: EcsTaskStateChangeEvent) => {
   const { taskArn, lastStatus, stoppedReason } = event.detail;
 
-  const newStatus = resolveSessionStatus(lastStatus, stoppedReason);
+  const newStatus = resolveSessionStatus(lastStatus);
   if (!newStatus) {
     console.log(`Ignoring ECS state "${lastStatus}" for task ${taskArn}`);
     return;
@@ -38,7 +37,7 @@ export const handler = async (event: EcsTaskStateChangeEvent) => {
     const result = await client.query(`
       UPDATE strategy.session
       SET ${updates.join(', ')}
-      WHERE task_arn = '${taskArn}'
+      WHERE task_arn = '${taskArn}' AND status NOT IN ('STOPPED', 'FAILED')
       RETURNING session_id, status
     `);
 
