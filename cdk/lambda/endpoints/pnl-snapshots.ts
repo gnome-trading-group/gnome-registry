@@ -25,6 +25,9 @@ export const handler = async (event: APIGatewayProxyEvent) => {
       let query = 'SELECT * FROM pnl.snapshot WHERE 1=1';
       if (params?.strategyId) query += ` AND strategy_id=${params.strategyId}`;
       if (params?.listingId) query += ` AND listing_id=${params.listingId}`;
+      if (params?.sessionId) query += ` AND session_id='${params.sessionId}'`;
+      if (params?.startTime) query += ` AND snapshot_time >= '${params.startTime}'`;
+      if (params?.endTime) query += ` AND snapshot_time <= '${params.endTime}'`;
       query += ' ORDER BY snapshot_time DESC';
       if (params?.limit) query += ` LIMIT ${params.limit}`;
       const result = await client.query(query);
