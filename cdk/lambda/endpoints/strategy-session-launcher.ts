@@ -151,6 +151,7 @@ async function handleLaunch(body: string | null) {
     cluster: CLUSTER_NAME,
     taskDefinition: TASK_DEFINITION_FAMILY,
     launchType: 'FARGATE',
+    enableExecuteCommand: true,
     networkConfiguration: {
       awsvpcConfiguration: {
         subnets: subnetIds,
