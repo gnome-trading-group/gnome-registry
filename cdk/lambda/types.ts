@@ -66,7 +66,9 @@ interface IEventBase {
   category?: string;
   expiry?: string | null;
   tags?: string[] | null;
-  embedding?: number[] | null;
+  exchangeId: number;
+  nativeEventId: string;
+  nativeUrl?: string | null;
 }
 export interface ICreateEvent extends IEventBase {}
 export interface IDeleteEvent {
