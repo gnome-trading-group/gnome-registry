@@ -28,6 +28,7 @@ export interface IDeleteSecurity {
 }
 
 interface IExchangeBase {
+  exchangeCode: string;
   exchangeName: string;
   region: string;
   schemaType: string;

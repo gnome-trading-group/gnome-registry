@@ -141,7 +141,7 @@ export const handler = async () => {
   const securities = await registryFetchAll<SecurityResponse>('/securities?assetClass=0', apiKey);
 
   const adapterExchangeIds = exchanges
-    .filter(e => getAdapter(e.exchange_name) != null)
+    .filter(e => getAdapter(e.exchange_code) != null)
     .map(e => e.exchange_id);
 
   const listings: ListingResponse[] = [];
@@ -165,7 +165,7 @@ export const handler = async () => {
 
   const byExchange: Array<{ exchangeId: number; data: ExchangeSecurityData[] }> = [];
   for (const exchange of exchanges) {
-    const adapter = getAdapter(exchange.exchange_name);
+    const adapter = getAdapter(exchange.exchange_code);
     if (!adapter) {
       console.log(`No adapter for exchange "${exchange.exchange_name}" — skipping`);
       continue;

@@ -7,6 +7,7 @@ import group.gnometrading.schemas.SchemaType;
 @JsonIgnoreProperties(ignoreUnknown = true)
 public record Exchange(
         int exchangeId,
+        String exchangeCode,
         String exchangeName,
         String region,
         @JsonDeserialize(using = SchemaTypeDeserializer.class) SchemaType schemaType) {}

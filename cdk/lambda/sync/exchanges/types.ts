@@ -53,6 +53,7 @@ export interface ExchangeAdapter {
 // Registry API response types
 export interface ExchangeResponse {
   exchange_id: number;
+  exchange_code: string;
   exchange_name: string;
 }
 

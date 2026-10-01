@@ -14,8 +14,8 @@ class ExchangeHandler extends ResourceHandler {
   generateInsertQuery(body: string): string {
     const exchange = JSON.parse(body) as ICreateExchange;
     return (`
-      INSERT INTO sm.exchange (exchange_name, region, schema_type)
-      VALUES ('${exchange.exchangeName}', '${exchange.region}', '${exchange.schemaType}')
+      INSERT INTO sm.exchange (exchange_code, exchange_name, region, schema_type)
+      VALUES ('${exchange.exchangeCode}', '${exchange.exchangeName}', '${exchange.region}', '${exchange.schemaType}')
       RETURNING *;
     `);
   }
@@ -24,6 +24,9 @@ class ExchangeHandler extends ResourceHandler {
     let query = "SELECT * FROM sm.exchange WHERE 1=1";
     if (params?.exchangeId) {
       query += ` AND exchange_id=${params.exchangeId}`;
+    }
+    if (params?.exchangeCode) {
+      query += ` AND exchange_code='${params.exchangeCode}'`;
     }
     if (params?.exchangeName) {
       query += ` AND exchange_name='${params.exchangeName}'`;
@@ -41,6 +44,9 @@ class ExchangeHandler extends ResourceHandler {
     const exchange = JSON.parse(body) as ICreateExchange;
     let query = "UPDATE sm.exchange SET ";
     const updates: string[] = [];
+    if (exchange.exchangeCode) {
+      updates.push(`exchange_code='${exchange.exchangeCode}'`);
+    }
     if (exchange.exchangeName) {
       updates.push(`exchange_name='${exchange.exchangeName}'`);
     }

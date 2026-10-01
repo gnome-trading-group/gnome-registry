@@ -3,10 +3,10 @@ import { HyperliquidAdapter } from './hyperliquid';
 import { LighterAdapter } from './lighter';
 
 const adapters: Record<string, ExchangeAdapter> = {
-  hyperliquid: new HyperliquidAdapter(),
-  lighter: new LighterAdapter(),
+  HYPERLIQUID: new HyperliquidAdapter(),
+  LIGHTER: new LighterAdapter(),
 };
 
-export function getAdapter(exchangeName: string): ExchangeAdapter | undefined {
-  return adapters[exchangeName.toLowerCase()];
+export function getAdapter(exchangeCode: string): ExchangeAdapter | undefined {
+  return adapters[exchangeCode];
 }
