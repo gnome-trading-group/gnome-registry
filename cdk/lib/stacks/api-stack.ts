@@ -66,7 +66,7 @@ export class ApiStack extends cdk.Stack {
     // UsagePlan.addApiStage must remain at the end (after all methods are registered) to avoid circular deps.
     this.apiKey = new apigw.ApiKey(this, 'ApiKey');
 
-    const crudResources = ['securities', 'exchanges', 'listings', 'listing-specs', 'strategies', 'currencies', 'events', 'event-contracts', 'contract-relationships', 'exchange-events', 'hedge-keywords'];
+    const crudResources = ['securities', 'exchanges', 'listings', 'listing-specs', 'strategies', 'currencies', 'events', 'event-contracts', 'contract-relationships', 'hedge-keywords'];
     for (const resourceName of crudResources) {
       this.attachMethods(this.api.root.addResource(resourceName), `${resourceName}.ts`, ['GET', 'POST', 'DELETE', 'PATCH']);
     }

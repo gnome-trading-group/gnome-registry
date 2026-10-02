@@ -97,18 +97,6 @@ export interface IDeleteContractRelationship {
   relationshipId: number;
 }
 
-interface IExchangeEventBase {
-  exchangeId: number;
-  eventId: number;
-  nativeEventId: string;
-  rawTitle: string;
-  nativeUrl?: string;
-}
-export interface ICreateExchangeEvent extends IExchangeEventBase {}
-export interface IDeleteExchangeEvent {
-  exchangeEventId: number;
-}
-
 interface IHedgeKeywordBase {
   securityId: number;
   keyword: string;
