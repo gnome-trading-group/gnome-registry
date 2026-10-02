@@ -42,6 +42,7 @@ export interface ExchangeSecurityData {
   exchangeSecuritySymbol: string;
   tickSize: number;
   lotSize: number;
+  // Price units (1e9 = $1), like every money value; not price scale × size scale.
   minNotional: number;
   contractMultiplier: number;
 }

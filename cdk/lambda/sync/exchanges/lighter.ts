@@ -37,7 +37,7 @@ export class LighterAdapter implements ExchangeAdapter {
         const lotSize = market.size_decimals > 6
           ? (console.warn(`Lighter: market ${market.market_id} size_decimals=${market.size_decimals} exceeds SIZE_SCALING_FACTOR (1e6) — storing lotSize=0`), 0)
           : Math.pow(10, 6 - market.size_decimals);
-        const minNotional = parseFloat(market.min_quote_amount) * 1e15;
+        const minNotional = Math.round(parseFloat(market.min_quote_amount) * 1e9);
         const suffix = isSpot ? 'SPOT' : 'PERP';
 
         // Spot symbols are full pairs like "ETH/USDC"; perp symbols are just the base like "ETH"

@@ -224,6 +224,72 @@ class SecurityMasterTest {
     }
 
     @Test
+    void testListingFetchedByIdIsFoundByExchangeAndSecurityWithoutAnotherRequest() {
+        stubListing(789, 456, 123);
+
+        Listing byId = securityMaster.getListing(789);
+        Listing byExchangeAndSecurity = securityMaster.getListing(456, 123);
+
+        assertSame(byId, byExchangeAndSecurity);
+        verify(registryConnection, times(3)).get(any()); // listing + exchange + security, once each
+    }
+
+    @Test
+    void testRepeatedLookupByExchangeAndSecurityRequestsOnce() {
+        stubListingByExchangeAndSecurity(789, 456, 123);
+
+        Listing first = securityMaster.getListing(456, 123);
+        Listing second = securityMaster.getListing(456, 123);
+
+        assertSame(first, second);
+        verify(registryConnection, times(3)).get(any());
+    }
+
+    @Test
+    void testSameSecurityOnTwoExchangesResolvesToEachListing() {
+        stubListing(1, 10, 123);
+        stubListing(2, 20, 123);
+        securityMaster.getListing(1);
+        securityMaster.getListing(2);
+
+        assertEquals(1, securityMaster.getListing(10, 123).listingId());
+        assertEquals(2, securityMaster.getListing(20, 123).listingId());
+    }
+
+    private void stubListing(int listingId, int exchangeId, int securityId) {
+        when(registryConnection.get(new ViewString("/api/listings?listingId=" + listingId)))
+                .thenReturn(ByteBuffer.wrap(
+                        listingJson(listingId, exchangeId, securityId).getBytes()));
+        stubExchangeAndSecurity(exchangeId, securityId);
+    }
+
+    private void stubListingByExchangeAndSecurity(int listingId, int exchangeId, int securityId) {
+        when(registryConnection.get(
+                        new ViewString("/api/listings?exchangeId=" + exchangeId + "&securityId=" + securityId)))
+                .thenReturn(ByteBuffer.wrap(
+                        listingJson(listingId, exchangeId, securityId).getBytes()));
+        stubExchangeAndSecurity(exchangeId, securityId);
+    }
+
+    private void stubExchangeAndSecurity(int exchangeId, int securityId) {
+        lenient()
+                .when(registryConnection.get(new ViewString("/api/exchanges?exchangeId=" + exchangeId)))
+                .thenReturn(ByteBuffer.wrap(("[{\"exchange_id\": " + exchangeId
+                                + ", \"exchange_code\": \"VENUE\", \"exchange_name\": \"Venue\", \"region\": \"us-east-1\","
+                                + " \"schema_type\": \"mbp-1\"}]")
+                        .getBytes()));
+        lenient()
+                .when(registryConnection.get(new ViewString("/api/securities?securityId=" + securityId)))
+                .thenReturn(ByteBuffer.wrap(
+                        ("[{\"security_id\": " + securityId + ", \"type\": 0, \"symbol\": \"BTC\"}]").getBytes()));
+    }
+
+    private static String listingJson(int listingId, int exchangeId, int securityId) {
+        return "[{\"listing_id\": " + listingId + ", \"exchange_id\": " + exchangeId + ", \"security_id\": "
+                + securityId + ", \"exchange_security_id\": \"SecId\", \"exchange_security_symbol\": \"SYM\"}]";
+    }
+
+    @Test
     void testGetListingByIdCaching() {
         String listingResponse =
                 """

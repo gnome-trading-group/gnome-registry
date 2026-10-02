@@ -90,7 +90,7 @@ function perpFromAsset(
     exchangeSecuritySymbol,
     tickSize,
     lotSize,
-    minNotional: PERPS_MIN_NOTIONAL * 1e15,
+    minNotional: PERPS_MIN_NOTIONAL * 1e9,
     contractMultiplier: CONTRACT_MULTIPLIER,
   };
 }

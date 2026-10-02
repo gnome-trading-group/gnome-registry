@@ -6,6 +6,8 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.PropertyNamingStrategies;
 import group.gnometrading.collections.IntHashMap;
 import group.gnometrading.collections.IntMap;
+import group.gnometrading.collections.LongHashMap;
+import group.gnometrading.collections.LongMap;
 import group.gnometrading.sm.AssetClass;
 import group.gnometrading.sm.ContractRelationship;
 import group.gnometrading.sm.ContractType;
@@ -76,6 +78,7 @@ public final class SecurityMaster {
     private final IntMap<Security> securityCache;
     private final IntMap<Exchange> exchangeCache;
     private final IntMap<Listing> listingCache;
+    private final LongMap<Listing> listingByExchangeSecurity;
     private final IntMap<ListingSpec> listingSpecCache;
     private final IntMap<Event> eventCache;
     private final IntMap<EventContract> eventContractBySecurityCache;
@@ -96,6 +99,7 @@ public final class SecurityMaster {
         this.securityCache = new IntHashMap<>();
         this.exchangeCache = new IntHashMap<>();
         this.listingCache = new IntHashMap<>();
+        this.listingByExchangeSecurity = new LongHashMap<>();
         this.listingSpecCache = new IntHashMap<>();
         this.eventCache = new IntHashMap<>();
         this.eventContractBySecurityCache = new IntHashMap<>();
@@ -148,12 +152,9 @@ public final class SecurityMaster {
     }
 
     public Listing getListing(final int exchangeId, final int securityId) {
-        for (int listingId : this.listingCache.keys()) {
-            final Listing listing = this.listingCache.get(listingId);
-            if (listing.exchange().exchangeId() == exchangeId
-                    && listing.security().securityId() == securityId) {
-                return listing;
-            }
+        final Listing cached = this.listingByExchangeSecurity.get(exchangeSecurityKey(exchangeId, securityId));
+        if (cached != null) {
+            return cached;
         }
 
         final int originalLength = addParameters(this.listingPath, "exchangeId", exchangeId, "securityId", securityId);
@@ -162,7 +163,7 @@ public final class SecurityMaster {
 
         final Listing listing = parseListing(response);
         if (listing != null) {
-            this.listingCache.put(listing.listingId(), listing);
+            cacheListing(listing);
         }
         return listing;
     }
@@ -176,8 +177,25 @@ public final class SecurityMaster {
         final ByteBuffer response = this.registryConnection.get(this.listingPath);
         this.listingPath.setLength(originalLength);
 
-        this.listingCache.put(listingId, parseListing(response));
-        return this.listingCache.get(listingId);
+        final Listing listing = parseListing(response);
+        if (listing == null) {
+            this.listingCache.put(listingId, null);
+        } else {
+            cacheListing(listing);
+        }
+        return listing;
+    }
+
+    private void cacheListing(final Listing listing) {
+        this.listingCache.put(listing.listingId(), listing);
+        this.listingByExchangeSecurity.put(
+                exchangeSecurityKey(
+                        listing.exchange().exchangeId(), listing.security().securityId()),
+                listing);
+    }
+
+    private static long exchangeSecurityKey(final int exchangeId, final int securityId) {
+        return ((long) exchangeId << Integer.SIZE) | Integer.toUnsignedLong(securityId);
     }
 
     public ListingSpec getListingSpec(final int listingId) {
