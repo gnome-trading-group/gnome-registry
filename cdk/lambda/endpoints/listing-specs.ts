@@ -7,6 +7,7 @@ interface IListingSpec {
   lotSize: number;
   minNotional?: number;
   contractMultiplier?: number;
+  minSize?: number;
 }
 
 class ListingSpecHandler extends ResourceHandler {
@@ -42,9 +43,10 @@ class ListingSpecHandler extends ResourceHandler {
     const spec = JSON.parse(body) as IListingSpec;
     const minNotional = spec.minNotional ?? 0;
     const contractMultiplier = spec.contractMultiplier ?? 1000000000;
+    const minSize = spec.minSize ?? 0;
     return `
-      INSERT INTO sm.listing_spec (listing_id, tick_size, lot_size, min_notional, contract_multiplier)
-      VALUES (${spec.listingId}, ${spec.tickSize}, ${spec.lotSize}, ${minNotional}, ${contractMultiplier})
+      INSERT INTO sm.listing_spec (listing_id, tick_size, lot_size, min_notional, contract_multiplier, min_size)
+      VALUES (${spec.listingId}, ${spec.tickSize}, ${spec.lotSize}, ${minNotional}, ${contractMultiplier}, ${minSize})
       RETURNING *;
     `;
   }

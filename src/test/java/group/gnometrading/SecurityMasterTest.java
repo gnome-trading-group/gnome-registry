@@ -329,13 +329,13 @@ class SecurityMasterTest {
                 Arguments.of(
                         42,
                         """
-                        [{"listing_id": 42, "tick_size": 100, "lot_size": 1000, "min_notional": 50000, "contract_multiplier": 1000000000}]""",
-                        new ListingSpec(42, 100L, 1000L, 50000L, 1_000_000_000L)),
+                        [{"listing_id": 42, "tick_size": 100, "lot_size": 1000, "min_notional": 50000, "contract_multiplier": 1000000000, "min_size": 5000000}]""",
+                        new ListingSpec(42, 100L, 1000L, 50000L, 1_000_000_000L, 5_000_000L)),
                 Arguments.of(
                         99,
                         """
                         [{"listing_id": 99, "tick_size": 10, "lot_size": 100}]""",
-                        new ListingSpec(99, 10L, 100L, 0L, 0L)));
+                        new ListingSpec(99, 10L, 100L, 0L, 0L, 0L)));
     }
 
     @Test
