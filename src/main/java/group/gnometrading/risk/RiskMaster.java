@@ -2,6 +2,7 @@ package group.gnometrading.risk;
 
 import group.gnometrading.RegistryConnection;
 import group.gnometrading.codecs.json.JsonDecoder;
+import group.gnometrading.codecs.json.JsonEncoder;
 import group.gnometrading.strings.ExpandingMutableString;
 import java.nio.ByteBuffer;
 import java.util.function.Consumer;
@@ -12,12 +13,18 @@ import java.util.function.Consumer;
  */
 public final class RiskMaster {
 
-    private static final String RISK_POLICIES_ENDPOINT = "/api/risk/policies";
+    private static final String RISK_POLICIES_ENDPOINT = "/api/risk/policies?enabled=true";
+    private static final String RISK_HALTS_ENDPOINT = "/api/risk/halts";
+    // {"strategyId":<int>,"reason":"..."}; reasons are short fixed strings.
+    private static final int HALT_BODY_CAPACITY = 1024;
     static final int MAX_POLICIES = 64;
 
     private final JsonDecoder jsonDecoder;
+    private final JsonEncoder jsonEncoder;
+    private final ByteBuffer haltBody;
     private final RegistryConnection registryConnection;
     private final ExpandingMutableString riskPoliciesPath;
+    private final ExpandingMutableString riskHaltsPath;
 
     private final RiskPolicyRecord[] records;
 
@@ -27,7 +34,10 @@ public final class RiskMaster {
     public RiskMaster(final RegistryConnection registryConnection) {
         this.registryConnection = registryConnection;
         this.jsonDecoder = new JsonDecoder();
+        this.jsonEncoder = new JsonEncoder();
+        this.haltBody = ByteBuffer.allocate(HALT_BODY_CAPACITY);
         this.riskPoliciesPath = new ExpandingMutableString(RISK_POLICIES_ENDPOINT);
+        this.riskHaltsPath = new ExpandingMutableString(RISK_HALTS_ENDPOINT);
 
         this.records = new RiskPolicyRecord[MAX_POLICIES];
         for (int i = 0; i < MAX_POLICIES; i++) {
@@ -53,6 +63,24 @@ public final class RiskMaster {
         }
     }
 
+    /**
+     * Asks the registry to enable this strategy's kill switch. The registry endpoint can only ever enable, so this
+     * is safe to retry. Allocates; it is an emergency path, not part of the trading hot path.
+     *
+     * @throws RuntimeException if the registry does not accept the request
+     */
+    public void requestHalt(final int strategyId, final String reason) {
+        this.haltBody.clear();
+        this.jsonEncoder.wrap(this.haltBody);
+        this.jsonEncoder
+                .writeObjectStart()
+                .writeObjectEntry("strategyId", strategyId)
+                .writeComma()
+                .writeObjectEntry("reason", reason == null ? "" : reason)
+                .writeObjectEnd();
+        this.registryConnection.post(this.riskHaltsPath, this.haltBody.array(), this.haltBody.position());
+    }
+
     @SuppressWarnings("checkstyle:NestedTryDepth")
     public void refresh() {
         final ByteBuffer response = this.registryConnection.get(this.riskPoliciesPath);
@@ -61,7 +89,12 @@ public final class RiskMaster {
 
         try (var node = this.jsonDecoder.wrap(response)) {
             try (var array = node.asArray()) {
-                while (array.hasNextItem() && count < MAX_POLICIES) {
+                while (array.hasNextItem()) {
+                    // A truncated policy set could silently drop a kill switch, so the caller must see a failure.
+                    if (count == MAX_POLICIES) {
+                        throw new IllegalStateException(
+                                "Risk policy response exceeds MAX_POLICIES (" + MAX_POLICIES + ")");
+                    }
                     final RiskPolicyRecord record = this.records[count];
                     resetRecord(record);
                     try (var item = array.nextItem()) {

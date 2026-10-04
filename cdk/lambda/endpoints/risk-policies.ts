@@ -8,21 +8,29 @@ interface ICreateRiskPolicy {
   listingId?: number;
   parameters: Record<string, unknown>;
   enabled?: boolean;
+  reason?: string;
 }
 
 interface IUpdateRiskPolicy {
   parameters?: Record<string, unknown>;
   enabled?: boolean;
+  reason?: string;
 }
 
 class RiskPolicyHandler extends ResourceHandler {
+  auditWrites(): boolean {
+    return true;
+  }
+
   generateSelectQuery(params: APIGatewayProxyEventQueryStringParameters | null): string {
     let query = 'SELECT * FROM risk.policy WHERE 1=1';
     if (params?.policyId) query += ` AND policy_id=${params.policyId}`;
     if (params?.scope != null) query += ` AND scope=${params.scope}`;
     if (params?.strategyId) query += ` AND strategy_id=${params.strategyId}`;
     if (params?.listingId) query += ` AND listing_id=${params.listingId}`;
-    if (params?.enabled != null) query += ` AND enabled=${params.enabled}`;
+    if (params?.enabled === 'true' || params?.enabled === 'false') query += ` AND enabled=${params.enabled}`;
+    // The OMS reads policies into a fixed-size array, so a stable order keeps refreshes deterministic.
+    query += ' ORDER BY policy_id';
     return query;
   }
 
@@ -39,7 +47,7 @@ class RiskPolicyHandler extends ResourceHandler {
   }
 
   generateDeleteQuery(body: string): string {
-    const p = JSON.parse(body) as { policyId: number };
+    const p = JSON.parse(body) as { policyId: number; reason?: string };
     return `
       DELETE FROM risk.policy
       WHERE policy_id = ${p.policyId}

@@ -12,6 +12,12 @@ const TASK_DEFINITION_FAMILY = 'gnome-orchestrator-trading';
 const ORCHESTRATOR_TAG_KEY = 'gnome:purpose';
 const ORCHESTRATOR_TAG_VALUE = 'orchestrator-ecs';
 
+const DEFAULT_STOP_GRACE_MS = 5000;
+// Stays well under API Gateway's 29s integration timeout once the lookups, halt and StopTask are added.
+const MAX_STOP_GRACE_MS = 20000;
+const STOP_KILL_REASON = 'session stop';
+const UNKNOWN_ACTOR = 'unknown';
+
 let cachedApiKey: string | undefined;
 
 async function getRegistryApiKey(): Promise<string> {
@@ -190,10 +196,20 @@ async function handleLaunch(body: string | null) {
   return createResponse(200, session);
 }
 
-async function handleStop(body: string | null) {
+export function clampStopGraceMs(stopGraceMs: unknown): number {
+  if (typeof stopGraceMs !== 'number' || !Number.isFinite(stopGraceMs)) return DEFAULT_STOP_GRACE_MS;
+  return Math.min(MAX_STOP_GRACE_MS, Math.max(0, Math.floor(stopGraceMs)));
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+async function handleStop(event: APIGatewayProxyEvent) {
+  const body = event.body;
   if (!body) return createResponse(400, { message: 'Missing body' });
 
-  const { sessionId } = JSON.parse(body) as { sessionId: string };
+  const { sessionId, stopGraceMs } = JSON.parse(body) as { sessionId: string; stopGraceMs?: number };
 
   const sessions = await registryFetch('/strategy-sessions', 'GET', undefined, { sessionId });
   if (!sessions?.length) {
@@ -201,7 +217,28 @@ async function handleStop(body: string | null) {
   }
 
   const taskArn: string = sessions[0].task_arn;
+
+  // Kill first so the OMS stops trading and cancels resting orders while the container is still alive to do it;
+  // a bare StopTask would leave whatever was resting on the venue. This lambda runs outside the VPC with no DB
+  // access, so the kill goes through the registry's halt endpoint, attributed to the operator.
+  let killed = false;
+  try {
+    await registryFetch('/risk/halts', 'POST', {
+      strategyId: sessions[0].strategy_id,
+      reason: STOP_KILL_REASON,
+      actor: event.requestContext?.authorizer?.claims?.email ?? UNKNOWN_ACTOR,
+    });
+    killed = true;
+  } catch (error) {
+    // A stop must never get stuck behind the kill, so the task is stopped regardless.
+    const message = error instanceof Error ? error.message : String(error);
+    console.error(`Kill switch upsert failed for session ${sessionId}, stopping task anyway:`, message);
+  }
+
   if (taskArn) {
+    if (killed) {
+      await sleep(clampStopGraceMs(stopGraceMs));
+    }
     const region = taskArn.split(':')[3];
     const ecs = new ECSClient({ region });
     await ecs.send(new StopTaskCommand({
@@ -262,7 +299,7 @@ export const handler = async (event: APIGatewayProxyEvent) => {
       return await handleLaunch(event.body);
     }
     if (path.endsWith('/stop') && event.httpMethod === 'POST') {
-      return await handleStop(event.body);
+      return await handleStop(event);
     }
     if (path.endsWith('/logs') && event.httpMethod === 'GET') {
       return await handleLogs(event.queryStringParameters as Record<string, string> | null);

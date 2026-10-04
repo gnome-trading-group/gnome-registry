@@ -6,6 +6,8 @@ import * as lambda from 'aws-cdk-lib/aws-lambda-nodejs';
 import * as ec2 from 'aws-cdk-lib/aws-ec2';
 import * as secrets from 'aws-cdk-lib/aws-secretsmanager';
 import * as iam from 'aws-cdk-lib/aws-iam';
+import * as cognito from 'aws-cdk-lib/aws-cognito';
+import * as ssm from 'aws-cdk-lib/aws-ssm';
 import { join } from 'path';
 import { Runtime } from 'aws-cdk-lib/aws-lambda';
 
@@ -19,8 +21,10 @@ export class ApiStack extends cdk.Stack {
   public static readonly STAGE_NAME = 'api';
   public readonly api: apigw.RestApi;
   public readonly apiKey: apigw.ApiKey;
+  public static readonly USER_POOL_ARN_PARAMETER = '/gnome/cognito/user-pool-arn';
   private nodeJsProps: lambda.NodejsFunctionProps;
   private props: Props;
+  private cognitoAuthorizer: apigw.CognitoUserPoolsAuthorizer;
 
   constructor(scope: Construct, id: string, props: Props) {
     super(scope, id, props);
@@ -45,6 +49,25 @@ export class ApiStack extends cdk.Stack {
         stageName: ApiStack.STAGE_NAME,
       },
       apiKeySourceType: apigw.ApiKeySourceType.HEADER,
+    });
+
+    // Without these, a request the Cognito authorizer rejects (401/403) comes back with no CORS headers and the
+    // browser reports an opaque CORS failure instead of the auth error.
+    this.api.addGatewayResponse('Default4xxCors', {
+      type: apigw.ResponseType.DEFAULT_4XX,
+      responseHeaders: { 'Access-Control-Allow-Origin': "'*'" },
+    });
+    this.api.addGatewayResponse('Default5xxCors', {
+      type: apigw.ResponseType.DEFAULT_5XX,
+      responseHeaders: { 'Access-Control-Allow-Origin': "'*'" },
+    });
+
+    // Operator actions that change what may trade are attributed to a person, so they take a Cognito ID token
+    // instead of the shared API key. The pool is owned by another stack and published through SSM.
+    const userPool = cognito.UserPool.fromUserPoolArn(this, 'OperatorUserPool',
+      ssm.StringParameter.valueForStringParameter(this, ApiStack.USER_POOL_ARN_PARAMETER));
+    this.cognitoAuthorizer = new apigw.CognitoUserPoolsAuthorizer(this, 'OperatorAuthorizer', {
+      cognitoUserPools: [userPool],
     });
 
     this.nodeJsProps = {
@@ -76,9 +99,13 @@ export class ApiStack extends cdk.Stack {
     this.attachMethods(pnlResource.addResource('snapshots'), 'pnl-snapshots.ts', ['GET', 'POST']);
     this.attachMethods(pnlResource.addResource('latest'), 'pnl-latest.ts', ['GET']);
 
-    // /risk/policies (full CRUD)
+    // /risk/policies (GET with API key, writes with Cognito), /risk/policies/history (GET), /risk/halts (POST)
     const riskResource = this.api.root.addResource('risk');
-    this.attachMethods(riskResource.addResource('policies'), 'risk-policies.ts', ['GET', 'POST', 'DELETE', 'PATCH']);
+    const riskPoliciesResource = riskResource.addResource('policies');
+    this.attachMethods(riskPoliciesResource, 'risk-policies.ts', ['GET'], ['POST', 'DELETE', 'PATCH']);
+    this.attachMethods(riskPoliciesResource.addResource('history'), 'risk-policy-history.ts', ['GET']);
+    // API key only: the OMS halts its own strategy automatically, and the handler can only ever enable a kill.
+    this.attachMethods(riskResource.addResource('halts'), 'risk-halts.ts', ['POST']);
 
     // /strategy-sessions — split into two Lambdas:
     // - In-VPC Lambda: GET/PATCH/POST (DB-only operations)
@@ -135,7 +162,7 @@ export class ApiStack extends cdk.Stack {
     launchResource.addMethod('POST', sessionsLauncherIntegration, { apiKeyRequired: true });
 
     const stopResource = strategySessionsResource.addResource('stop');
-    stopResource.addMethod('POST', sessionsLauncherIntegration, { apiKeyRequired: true });
+    stopResource.addMethod('POST', sessionsLauncherIntegration, this.cognitoMethodOptions());
 
     const logsResource = strategySessionsResource.addResource('logs');
     logsResource.addMethod('GET', sessionsLauncherIntegration, { apiKeyRequired: true });
@@ -162,11 +189,22 @@ export class ApiStack extends cdk.Stack {
     });
   }
 
-  private attachMethods(resource: apigw.Resource, fileName: string, methods: string[]) {
+  private attachMethods(resource: apigw.Resource, fileName: string, methods: string[], cognitoMethods: string[] = []) {
     const integration = this.createIntegration(fileName);
     for (const method of methods) {
       resource.addMethod(method, integration, { apiKeyRequired: true });
     }
+    for (const method of cognitoMethods) {
+      resource.addMethod(method, integration, this.cognitoMethodOptions());
+    }
+  }
+
+  private cognitoMethodOptions(): apigw.MethodOptions {
+    return {
+      apiKeyRequired: false,
+      authorizer: this.cognitoAuthorizer,
+      authorizationType: apigw.AuthorizationType.COGNITO,
+    };
   }
 
   private createIntegration(fileName: string) {

@@ -1,6 +1,6 @@
 import { APIGatewayProxyEvent, APIGatewayProxyEventQueryStringParameters } from "aws-lambda/trigger/api-gateway-proxy";
 import { connectDatabase } from "../connections";
-import { Pool } from 'pg';
+import { Pool, PoolClient } from 'pg';
 
 const DEFAULT_PAGE_SIZE = 5000;
 
@@ -11,9 +11,62 @@ const CORS_HEADERS = {
   'Access-Control-Allow-Methods': 'GET,POST,PUT,DELETE,OPTIONS'
 }
 
+export const UNKNOWN_ACTOR = 'unknown';
+
+export function getActor(event: APIGatewayProxyEvent): string {
+  return event.requestContext?.authorizer?.claims?.email ?? UNKNOWN_ACTOR;
+}
+
+export interface IAudit {
+  actor: string;
+  reason?: string | null;
+}
+
+// Runs fn inside BEGIN/COMMIT on one client. When audit is given, the gnome.actor/gnome.reason settings are
+// scoped to this transaction (is_local=true) so the risk.policy history trigger attributes every change made
+// inside it, and a pooled connection never leaks them into the next request.
+export async function withTransaction<T>(client: PoolClient, fn: (client: PoolClient) => Promise<T>, audit?: IAudit): Promise<T> {
+  await client.query('BEGIN');
+  try {
+    if (audit) {
+      await client.query(
+        "SELECT set_config('gnome.actor', $1, true), set_config('gnome.reason', $2, true)",
+        [audit.actor, audit.reason ?? ''],
+      );
+    }
+    const result = await fn(client);
+    await client.query('COMMIT');
+    return result;
+  } catch (error) {
+    await client.query('ROLLBACK');
+    throw error;
+  }
+}
+
+// Bulk (array) bodies carry no single reason, so only an object body's reason is recorded.
+function parseReason(body: string | null): string | null {
+  if (!body) return null;
+  try {
+    const parsed = JSON.parse(body);
+    return !Array.isArray(parsed) && typeof parsed?.reason === 'string' ? parsed.reason : null;
+  } catch {
+    return null;
+  }
+}
+
 export class ResourceHandler {
   pool: Pool;
   client: any; // This will be a PoolClient from pg
+  audit: IAudit | null = null;
+
+  // Resources whose table has a history trigger opt in so their writes carry who made them and why.
+  auditWrites(): boolean {
+    return false;
+  }
+
+  private async runWrite<T>(fn: () => Promise<T>): Promise<T> {
+    return this.audit ? withTransaction(this.client, fn, this.audit) : fn();
+  }
 
   protected createResponse(statusCode: number, body: any) {
     return {
@@ -29,6 +82,9 @@ export class ResourceHandler {
     try {
       client = await this.pool.connect();
       this.client = client;
+      if (event.httpMethod !== 'GET' && this.auditWrites()) {
+        this.audit = { actor: getActor(event), reason: parseReason(event.body) };
+      }
 
       switch (event.httpMethod) {
         case 'GET':
@@ -81,8 +137,7 @@ export class ResourceHandler {
       return this.createResponse(400, { message: 'Expected non-empty array' });
     }
     const results: any[] = [];
-    try {
-      await this.client.query('BEGIN');
+    await withTransaction(this.client, async () => {
       for (const item of items) {
         const row = { [this.getPrimaryKey()]: item[this.getCamelPrimaryKey()] };
         const query = this.generateModifyQuery(row, JSON.stringify(item));
@@ -92,11 +147,7 @@ export class ResourceHandler {
         }
         results.push(result.rows[0]);
       }
-      await this.client.query('COMMIT');
-    } catch (error) {
-      await this.client.query('ROLLBACK');
-      throw error;
-    }
+    }, this.audit ?? undefined);
     return this.createResponse(200, results);
   }
 
@@ -105,24 +156,26 @@ export class ResourceHandler {
       return this.createResponse(400, { message: 'Missing body' });
     }
 
-    var query = this.generateSelectQuery(params);
+    return this.runWrite(async () => {
+      var query = this.generateSelectQuery(params);
 
-    var result = await this.client.query(query);
-    if (result.rowCount != 1) {
-      return this.createResponse(404, { message: 'Query params did not return one row only' });
-    }
+      var result = await this.client.query(query);
+      if (result.rowCount != 1) {
+        return this.createResponse(404, { message: 'Query params did not return one row only' });
+      }
 
-    var item = result.rows[0];
-    query = this.generateModifyQuery(item, body);
+      var item = result.rows[0];
+      query = this.generateModifyQuery(item, body);
 
-    result = await this.client.query(query);
+      result = await this.client.query(query);
 
-    if (result.rowCount != 1) {
-      return this.createResponse(404, { message: `Unable to modify resource from body: ${body}` });
-    }
+      if (result.rowCount != 1) {
+        return this.createResponse(404, { message: `Unable to modify resource from body: ${body}` });
+      }
 
-    item = result.rows[0];
-    return this.createResponse(200, item);
+      item = result.rows[0];
+      return this.createResponse(200, item);
+    });
   }
 
   generateInsertQuery(body: string): string {
@@ -134,15 +187,17 @@ export class ResourceHandler {
       return this.createResponse(400, { message: 'Missing body' });
     }
 
-    const query = this.generateInsertQuery(body);
-    const result = await this.client.query(query);
+    return this.runWrite(async () => {
+      const query = this.generateInsertQuery(body);
+      const result = await this.client.query(query);
 
-    if (result.rowCount != 1) {
-      return this.createResponse(500, { message: `Insert returned ${result.rowCount} rows`, body, query });
-    }
+      if (result.rowCount != 1) {
+        return this.createResponse(500, { message: `Insert returned ${result.rowCount} rows`, body, query });
+      }
 
-    const item = result.rows[0];
-    return this.createResponse(200, item);
+      const item = result.rows[0];
+      return this.createResponse(200, item);
+    });
   }
 
   async createMany(body: string | null) {
@@ -154,8 +209,7 @@ export class ResourceHandler {
       return this.createResponse(400, { message: 'Expected non-empty array' });
     }
     const results: any[] = [];
-    try {
-      await this.client.query('BEGIN');
+    await withTransaction(this.client, async () => {
       for (const item of items) {
         const query = this.generateInsertQuery(JSON.stringify(item));
         const result = await this.client.query(query);
@@ -164,11 +218,7 @@ export class ResourceHandler {
         }
         results.push(result.rows[0]);
       }
-      await this.client.query('COMMIT');
-    } catch (error) {
-      await this.client.query('ROLLBACK');
-      throw error;
-    }
+    }, this.audit ?? undefined);
     return this.createResponse(200, results);
   }
 
@@ -181,15 +231,17 @@ export class ResourceHandler {
       return this.createResponse(400, { message: 'Missing body' });
     }
 
-    const query = this.generateDeleteQuery(body);
-    const result = await this.client.query(query);
+    return this.runWrite(async () => {
+      const query = this.generateDeleteQuery(body);
+      const result = await this.client.query(query);
 
-    if (result.rowCount != 1) {
-      return this.createResponse(404, { message: `Unable to delete resource from body: ${body}` });
-    }
+      if (result.rowCount != 1) {
+        return this.createResponse(404, { message: `Unable to delete resource from body: ${body}` });
+      }
 
-    const item = result.rows[0];
-    return this.createResponse(200, item);
+      const item = result.rows[0];
+      return this.createResponse(200, item);
+    });
   }
 
   allowedSortColumns(): string[] {
