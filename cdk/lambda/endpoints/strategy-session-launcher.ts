@@ -388,8 +388,9 @@ async function handleStop(event: APIGatewayProxyEvent) {
   // no DB access, so the kill goes through the registry's halt endpoint, attributed to the operator.
   let killed = false;
   try {
+    // Only this session: a stop must not halt other running sessions of the same strategy.
     await registryFetch('/risk/halts', 'POST', {
-      strategyId: session.strategy_id,
+      sessionId,
       reason: STOP_KILL_REASON,
       actor: event.requestContext?.authorizer?.claims?.email ?? UNKNOWN_ACTOR,
     });

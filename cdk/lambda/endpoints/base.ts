@@ -13,6 +13,9 @@ const CORS_HEADERS = {
 
 export const UNKNOWN_ACTOR = 'unknown';
 
+/** A request the handler can't act on; reported to the caller as a 400 rather than a server error. */
+export class ValidationError extends Error {}
+
 export function getActor(event: APIGatewayProxyEvent): string {
   return event.requestContext?.authorizer?.claims?.email ?? UNKNOWN_ACTOR;
 }
@@ -105,6 +108,9 @@ export class ResourceHandler {
           return this.createResponse(400, { message: 'Invalid HTTP method' });
       }
     } catch (error) {
+      if (error instanceof ValidationError) {
+        return this.createResponse(400, { message: error.message });
+      }
       const message = error instanceof Error ? error.message : String(error);
       const stack = error instanceof Error ? error.stack : undefined;
       console.error('Handler error:', message, stack);

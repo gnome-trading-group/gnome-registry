@@ -277,7 +277,7 @@ describe('POST /strategy-sessions/launch', () => {
 });
 
 describe('POST /strategy-sessions/stop', () => {
-  it('kills the strategy, waits, marks it STOPPED, then terminates the instance', async () => {
+  it('kills the session, waits, marks it STOPPED, then terminates the instance', async () => {
     const response = await launcher.handler(apiEvent('/strategy-sessions/stop', { sessionId: 's1' }, 'alice@example.com'));
 
     expect(response.statusCode).toBe(200);
@@ -288,7 +288,7 @@ describe('POST /strategy-sessions/stop', () => {
       'PATCH /strategy-sessions',
       'TerminateInstances',
     ]);
-    expect(haltBodies).toEqual([{ strategyId: 7, reason: 'session stop', actor: 'alice@example.com' }]);
+    expect(haltBodies).toEqual([{ sessionId: 's1', reason: 'session stop', actor: 'alice@example.com' }]);
     expect(patchBodies[0]).toMatchObject({ status: 'STOPPED', expectedStatus: ['SUBMITTED', 'STARTING', 'RUNNING'] });
     const terminate = ec2Calls.find(c => c.kind === 'TerminateInstances')!;
     expect(terminate.input).toEqual({ InstanceIds: ['i-123'] });
@@ -300,7 +300,7 @@ describe('POST /strategy-sessions/stop', () => {
     const response = await launcher.handler(apiEvent('/cognito/strategy-sessions/stop', { sessionId: 's1' }, 'alice@example.com'));
 
     expect(response.statusCode).toBe(200);
-    expect(haltBodies).toEqual([{ strategyId: 7, reason: 'session stop', actor: 'alice@example.com' }]);
+    expect(haltBodies).toEqual([{ sessionId: 's1', reason: 'session stop', actor: 'alice@example.com' }]);
   });
 
   it('attributes the kill to unknown without Cognito claims', async () => {

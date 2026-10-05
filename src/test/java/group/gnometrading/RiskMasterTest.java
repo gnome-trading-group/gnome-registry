@@ -3,14 +3,11 @@ package group.gnometrading;
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.Mockito.*;
 
-import group.gnometrading.risk.PolicyScope;
 import group.gnometrading.risk.RiskMaster;
 import group.gnometrading.risk.RiskPolicyRecord;
 import group.gnometrading.strings.ViewString;
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
-import java.util.ArrayList;
-import java.util.List;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -28,21 +25,21 @@ class RiskMasterTest {
 
     @BeforeEach
     void setUp() {
-        riskMaster = new RiskMaster(registryConnection);
+        riskMaster = new RiskMaster(registryConnection, 7, "abc");
     }
 
-    private static final String POLICIES_PATH = "/api/risk/policies?enabled=true";
+    private static final String POLICIES_PATH = "/api/risk/policies?enabled=true&forStrategy=7&forSession=abc";
 
     private static final String KILL_SWITCH_ENABLED =
-            "[{\"policy_id\": 1, \"policy_type\": \"KILL_SWITCH\", \"scope\": 0, \"strategy_id\": null, \"listing_id\": null, \"parameters\": {}, \"enabled\": true}]";
+            "[{\"policy_id\": 1, \"policy_type\": \"KILL_SWITCH\", \"strategy_id\": null, \"listing_id\": null, \"parameters\": {}, \"enabled\": true}]";
 
     private static final String KILL_SWITCH_DISABLED =
-            "[{\"policy_id\": 1, \"policy_type\": \"KILL_SWITCH\", \"scope\": 0, \"strategy_id\": null, \"listing_id\": null, \"parameters\": {}, \"enabled\": false}]";
+            "[{\"policy_id\": 1, \"policy_type\": \"KILL_SWITCH\", \"strategy_id\": null, \"listing_id\": null, \"parameters\": {}, \"enabled\": false}]";
 
     private static final String MIXED_POLICIES =
-            "[{\"policy_id\": 1, \"policy_type\": \"KILL_SWITCH\", \"scope\": 0, \"strategy_id\": null, \"listing_id\": null, \"parameters\": {}, \"enabled\": true},"
-                    + "{\"policy_id\": 2, \"policy_type\": \"MAX_POSITION\", \"scope\": 1, \"strategy_id\": 10, \"listing_id\": 0, \"parameters\": {}, \"enabled\": true},"
-                    + "{\"policy_id\": 3, \"policy_type\": \"MAX_POSITION\", \"scope\": 1, \"strategy_id\": 20, \"listing_id\": 0, \"parameters\": {}, \"enabled\": true}]";
+            "[{\"policy_id\": 1, \"policy_type\": \"KILL_SWITCH\", \"strategy_id\": null, \"listing_id\": null, \"parameters\": {}, \"enabled\": true},"
+                    + "{\"policy_id\": 2, \"policy_type\": \"MAX_POSITION\", \"session_id\": null, \"strategy_id\": 10, \"listing_id\": null, \"parameters\": {}, \"enabled\": true},"
+                    + "{\"policy_id\": 3, \"policy_type\": \"MAX_POSITION\", \"session_id\": \"abc\", \"strategy_id\": 20, \"listing_id\": 500, \"parameters\": {}, \"enabled\": true}]";
 
     @Test
     void testGetPolicyCountAfterRefresh() {
@@ -68,7 +65,9 @@ class RiskMasterTest {
         RiskPolicyRecord record = riskMaster.getRecord(0);
         assertEquals(1, record.policyId);
         assertTrue(record.policyType.equals("KILL_SWITCH"));
-        assertEquals(PolicyScope.GLOBAL, record.scope);
+        assertEquals(0, record.strategyId);
+        assertEquals(0, record.listingId);
+        assertEquals(0, record.sessionId.length());
         assertTrue(record.enabled);
     }
 
@@ -86,23 +85,40 @@ class RiskMasterTest {
     }
 
     @Test
-    void testForEachPolicyForStrategy() {
+    void testRecordsCarryExactlyTheirTargetIds() {
         when(registryConnection.get(new ViewString(POLICIES_PATH)))
                 .thenReturn(ByteBuffer.wrap(MIXED_POLICIES.getBytes()));
         riskMaster.refresh();
 
-        List<Integer> ids10 = new ArrayList<>();
-        riskMaster.forEachPolicy(10, p -> ids10.add(p.policyId));
-        assertEquals(2, ids10.size()); // KILL_SWITCH (global) + MAX_POSITION for strategy 10
+        RiskPolicyRecord strategyOnly = riskMaster.getRecord(1);
+        assertEquals(10, strategyOnly.strategyId);
+        assertEquals(0, strategyOnly.listingId);
+        assertEquals(0, strategyOnly.sessionId.length());
 
-        List<Integer> ids20 = new ArrayList<>();
-        riskMaster.forEachPolicy(20, p -> ids20.add(p.policyId));
-        assertEquals(2, ids20.size()); // KILL_SWITCH (global) + MAX_POSITION for strategy 20
+        RiskPolicyRecord sessionOnListing = riskMaster.getRecord(2);
+        assertTrue(sessionOnListing.sessionId.equals("abc"));
+        assertEquals(20, sessionOnListing.strategyId);
+        assertEquals(500, sessionOnListing.listingId);
+    }
 
-        List<Integer> ids99 = new ArrayList<>();
-        riskMaster.forEachPolicy(99, p -> ids99.add(p.policyId));
-        assertEquals(1, ids99.size()); // only KILL_SWITCH (global)
-        assertEquals(1, (int) ids99.get(0));
+    @Test
+    void testASessionIdFromAPreviousRefreshDoesNotLinger() {
+        when(registryConnection.get(new ViewString(POLICIES_PATH)))
+                .thenReturn(ByteBuffer.wrap(MIXED_POLICIES.getBytes()))
+                .thenReturn(ByteBuffer.wrap(MIXED_POLICIES
+                        .replace("\"session_id\": \"abc\"", "\"session_id\": null")
+                        .getBytes()));
+        riskMaster.refresh();
+        riskMaster.refresh();
+        assertEquals(0, riskMaster.getRecord(2).sessionId.length());
+    }
+
+    @Test
+    void testWithoutASessionOnlySessionlessPoliciesAreFetched() {
+        RiskMaster sessionless = new RiskMaster(registryConnection, 7, null);
+        when(registryConnection.get(any())).thenReturn(ByteBuffer.wrap("[]".getBytes()));
+        sessionless.refresh();
+        verify(registryConnection).get(new ViewString("/api/risk/policies?enabled=true&forStrategy=7&forSession=none"));
     }
 
     @Test
@@ -115,7 +131,9 @@ class RiskMasterTest {
         RiskPolicyRecord record = riskMaster.getRecord(0);
         assertEquals(1, record.policyId);
         assertTrue(record.policyType.equals("KILL_SWITCH"));
-        assertEquals(PolicyScope.GLOBAL, record.scope);
+        assertEquals(0, record.strategyId);
+        assertEquals(0, record.listingId);
+        assertEquals(0, record.sessionId.length());
         assertFalse(record.enabled);
         assertTrue(record.parametersJson.equals("{}"));
     }
@@ -128,7 +146,7 @@ class RiskMasterTest {
             }
             json.append("{\"policy_id\": ")
                     .append(i + 1)
-                    .append(", \"policy_type\": \"KILL_SWITCH\", \"scope\": 0, \"parameters\": {}, \"enabled\": true}");
+                    .append(", \"policy_type\": \"KILL_SWITCH\", \"parameters\": {}, \"enabled\": true}");
         }
         return json.append(']').toString();
     }
@@ -137,7 +155,7 @@ class RiskMasterTest {
     void testRefreshPollsOnlyEnabledPolicies() {
         when(registryConnection.get(any())).thenReturn(ByteBuffer.wrap("[]".getBytes()));
         riskMaster.refresh();
-        verify(registryConnection).get(new ViewString("/api/risk/policies?enabled=true"));
+        verify(registryConnection).get(new ViewString(POLICIES_PATH));
     }
 
     @Test
