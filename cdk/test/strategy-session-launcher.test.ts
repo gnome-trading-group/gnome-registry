@@ -245,6 +245,14 @@ describe('POST /strategy-sessions/launch', () => {
     expect(sessionEnv().LATENCY_PROFILE).toBe('standard');
   });
 
+  it('runs c7i.large on the standard AMI', async () => {
+    await launcher.handler(apiEvent('/strategy-sessions/launch',
+      launchBody({ instanceType: 'c7i.large' }, { 'latency.profile': 'standard' })));
+
+    expect(runInstancesInput().ImageId).toBe('ami-std');
+    expect(runInstancesInput().InstanceType).toBe('c7i.large');
+  });
+
   it('places the instance in the requested availability zone', async () => {
     await launcher.handler(apiEvent('/strategy-sessions/launch', launchBody({ availabilityZone: 'us-east-1b' })));
     expect(runInstancesInput().SubnetId).toBe('subnet-b');
@@ -253,6 +261,7 @@ describe('POST /strategy-sessions/launch', () => {
   it.each([
     [{ instanceType: 'm5.large' }, {}, 'Unsupported instanceType'],
     [{ instanceType: 'c7i.xlarge' }, {}, 'too small to isolate'],
+    [{ instanceType: 'c7i.large' }, {}, 'too small to isolate'],
     [{}, { 'latency.profile': 'turbo' }, 'Unknown latency.profile'],
     [{ availabilityZone: 'us-east-1z' }, {}, 'No orchestrator subnet'],
   ])('rejects %p %p before creating anything', async (overrides, config, message) => {

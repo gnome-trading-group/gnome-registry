@@ -29,9 +29,10 @@ const MAX_USER_DATA_BYTES = 16 * 1024;
 const STANDARD = 'standard';
 const LOW_LATENCY = 'low_latency';
 
-// vCPUs per supported size. Each low-latency size has an AMI whose isolcpus range matches it; c7i.xlarge has too
-// few cores to isolate any, so it only runs the standard profile.
+// vCPUs per supported size. Each low-latency size has an AMI whose isolcpus range matches it; c7i.large and
+// c7i.xlarge have too few cores to isolate any, so they only run the standard profile.
 export const INSTANCE_VCPUS: Record<string, number> = {
+  'c7i.large': 2,
   'c7i.xlarge': 4,
   'c7i.4xlarge': 16,
   'c7i.8xlarge': 32,
