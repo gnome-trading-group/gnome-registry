@@ -1,19 +1,51 @@
 import { APIGatewayProxyEvent } from 'aws-lambda';
-import { ECSClient, RunTaskCommand, StopTaskCommand } from '@aws-sdk/client-ecs';
-import { EC2Client, DescribeSubnetsCommand, DescribeSecurityGroupsCommand } from '@aws-sdk/client-ec2';
+import {
+  EC2Client,
+  DescribeSubnetsCommand,
+  DescribeSecurityGroupsCommand,
+  RunInstancesCommand,
+  TerminateInstancesCommand,
+} from '@aws-sdk/client-ec2';
+import { SSMClient, GetParameterCommand } from '@aws-sdk/client-ssm';
 import { APIGatewayClient, GetApiKeyCommand } from '@aws-sdk/client-api-gateway';
 import { CloudWatchLogsClient, GetLogEventsCommand } from '@aws-sdk/client-cloudwatch-logs';
 
 const REGISTRY_API_URL = (process.env.REGISTRY_API_URL ?? '').replace(/\/$/, '');
 const REGISTRY_API_KEY_ID = process.env.REGISTRY_API_KEY_ID ?? '';
+const STAGE = process.env.STAGE ?? '';
 
-const CLUSTER_NAME = 'gnome-orchestrator';
-const TASK_DEFINITION_FAMILY = 'gnome-orchestrator-trading';
-const ORCHESTRATOR_TAG_KEY = 'gnome:purpose';
-const ORCHESTRATOR_TAG_VALUE = 'orchestrator-ecs';
+// Subnets and the security group keep their original tag; only the compute moved from Fargate to EC2.
+const NETWORK_TAG_KEY = 'gnome:purpose';
+const NETWORK_TAG_VALUE = 'orchestrator-ecs';
+const INSTANCE_PURPOSE = 'orchestrator-ec2';
+const LAUNCH_TEMPLATE_NAME = 'gnome-orchestrator';
+const AMI_PARAMETER_PREFIX = '/gnome/orchestrator/ami';
+const LATEST_ORCHESTRATOR_PARAMETER = '/gnome/orchestrator/latest-version';
+const VERSION_PARAMETER_REGION = 'us-east-1';
+const PYPI_GNOMEPY_URL = 'https://pypi.org/pypi/gnomepy/json';
+// EC2's limit on raw (pre-base64) user data.
+const MAX_USER_DATA_BYTES = 16 * 1024;
+
+const STANDARD = 'standard';
+const LOW_LATENCY = 'low_latency';
+
+// vCPUs per supported size. Each low-latency size has an AMI whose isolcpus range matches it; c7i.xlarge has too
+// few cores to isolate any, so it only runs the standard profile.
+export const INSTANCE_VCPUS: Record<string, number> = {
+  'c7i.xlarge': 4,
+  'c7i.4xlarge': 16,
+  'c7i.8xlarge': 32,
+  'c7i.12xlarge': 48,
+};
+const DEFAULT_INSTANCE_TYPE: Record<string, string> = {
+  [STANDARD]: 'c7i.xlarge',
+  [LOW_LATENCY]: 'c7i.4xlarge',
+};
+
+export const ACTIVE_STATUSES = ['SUBMITTED', 'STARTING', 'RUNNING'];
 
 const DEFAULT_STOP_GRACE_MS = 5000;
-// Stays well under API Gateway's 29s integration timeout once the lookups, halt and StopTask are added.
+// Stays well under API Gateway's 29s integration timeout once the lookups, halt and termination are added.
 const MAX_STOP_GRACE_MS = 20000;
 const STOP_KILL_REASON = 'session stop';
 const UNKNOWN_ACTOR = 'unknown';
@@ -29,7 +61,12 @@ async function getRegistryApiKey(): Promise<string> {
   return cachedApiKey;
 }
 
-async function registryFetch(path: string, method: string = 'GET', body?: object, params?: Record<string, string>): Promise<any> {
+async function registryRequest(
+  path: string,
+  method: string,
+  body?: object,
+  params?: Record<string, string>,
+): Promise<{ status: number; body: any }> {
   const apiKey = await getRegistryApiKey();
   let url = `${REGISTRY_API_URL}${path}`;
   if (params && Object.keys(params).length > 0) {
@@ -43,11 +80,22 @@ async function registryFetch(path: string, method: string = 'GET', body?: object
     },
     ...(body != null ? { body: JSON.stringify(body) } : {}),
   });
-  if (!res.ok) {
-    const text = await res.text();
-    throw new Error(`Registry ${method} ${path} failed (${res.status}): ${text}`);
+  const text = await res.text();
+  let parsed: any = text;
+  try {
+    parsed = text ? JSON.parse(text) : null;
+  } catch {
+    // Non-JSON error bodies are passed through as text.
   }
-  return res.json();
+  return { status: res.status, body: parsed };
+}
+
+async function registryFetch(path: string, method: string = 'GET', body?: object, params?: Record<string, string>): Promise<any> {
+  const res = await registryRequest(path, method, body, params);
+  if (res.status < 200 || res.status >= 300) {
+    throw new Error(`Registry ${method} ${path} failed (${res.status}): ${JSON.stringify(res.body)}`);
+  }
+  return res.body;
 }
 
 function toEnvVarName(key: string): string {
@@ -72,21 +120,52 @@ async function resolveRegion(listingIds: number[]): Promise<string> {
   return [...regions][0];
 }
 
-async function discoverNetworkConfig(region: string): Promise<{ subnetIds: string[]; securityGroupId: string }> {
+interface NetworkConfig {
+  subnets: { subnetId: string; availabilityZone: string }[];
+  securityGroupId: string;
+}
+
+async function discoverNetworkConfig(region: string): Promise<NetworkConfig> {
   const ec2 = new EC2Client({ region });
   const [subnetsRes, sgsRes] = await Promise.all([
     ec2.send(new DescribeSubnetsCommand({
-      Filters: [{ Name: `tag:${ORCHESTRATOR_TAG_KEY}`, Values: [ORCHESTRATOR_TAG_VALUE] }],
+      Filters: [{ Name: `tag:${NETWORK_TAG_KEY}`, Values: [NETWORK_TAG_VALUE] }],
     })),
     ec2.send(new DescribeSecurityGroupsCommand({
-      Filters: [{ Name: `tag:${ORCHESTRATOR_TAG_KEY}`, Values: [ORCHESTRATOR_TAG_VALUE] }],
+      Filters: [{ Name: `tag:${NETWORK_TAG_KEY}`, Values: [NETWORK_TAG_VALUE] }],
     })),
   ]);
-  const subnetIds = (subnetsRes.Subnets ?? []).map(s => s.SubnetId!);
-  if (subnetIds.length === 0) throw new Error(`No orchestrator subnets found in ${region}`);
+  const subnets = (subnetsRes.Subnets ?? []).map(s => ({ subnetId: s.SubnetId!, availabilityZone: s.AvailabilityZone! }));
+  if (subnets.length === 0) throw new Error(`No orchestrator subnets found in ${region}`);
   const sg = sgsRes.SecurityGroups?.[0];
   if (!sg?.GroupId) throw new Error(`No orchestrator security group found in ${region}`);
-  return { subnetIds, securityGroupId: sg.GroupId };
+  return { subnets, securityGroupId: sg.GroupId };
+}
+
+async function getParameter(region: string, name: string): Promise<string> {
+  const ssm = new SSMClient({ region });
+  const res = await ssm.send(new GetParameterCommand({ Name: name }));
+  const value = res.Parameter?.Value;
+  if (!value) throw new Error(`SSM parameter ${name} is empty in ${region}`);
+  return value;
+}
+
+export function amiParameterName(profile: string, instanceType: string): string {
+  if (profile === STANDARD) return `${AMI_PARAMETER_PREFIX}/standard`;
+  return `${AMI_PARAMETER_PREFIX}/${INSTANCE_VCPUS[instanceType]}core`;
+}
+
+async function resolveLatestOrchestratorVersion(): Promise<string> {
+  return getParameter(VERSION_PARAMETER_REGION, LATEST_ORCHESTRATOR_PARAMETER);
+}
+
+// Kept behind one function so moving gnomepy's "latest" into SSM later is a one-line change.
+async function resolveLatestGnomepyVersion(): Promise<string> {
+  const res = await fetch(PYPI_GNOMEPY_URL);
+  if (!res.ok) throw new Error(`PyPI lookup for gnomepy failed (${res.status})`);
+  const json = (await res.json()) as { info?: { version?: string } };
+  if (!json.info?.version) throw new Error('PyPI response for gnomepy has no version');
+  return json.info.version;
 }
 
 interface ICreateSession {
@@ -96,8 +175,10 @@ interface ICreateSession {
   config: Record<string, unknown>;
   researchCommit?: string;
   region?: string;
-  cpu?: number;
-  memory?: number;
+  availabilityZone?: string;
+  instanceType?: string;
+  orchestratorVersion?: string;
+  gnomepyVersion?: string;
 }
 
 const CORS_HEADERS = {
@@ -113,6 +194,58 @@ function createResponse(statusCode: number, body: any) {
     body: typeof body === 'string' ? body : JSON.stringify(body),
     headers: CORS_HEADERS,
   };
+}
+
+export function buildSessionEnvironment(
+  s: ICreateSession,
+  versions: { orchestratorVersion: string; gnomepyVersion: string },
+): Record<string, string> {
+  const env: Record<string, string> = {};
+  const args: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(s.config)) {
+    if (key.startsWith('strategy.args.')) {
+      args[key.substring('strategy.args.'.length)] = value;
+    } else {
+      env[toEnvVarName(key)] = Array.isArray(value) ? JSON.stringify(value) : String(value);
+    }
+  }
+  if (Object.keys(args).length > 0) env.STRATEGY_ARGS_JSON = JSON.stringify(args);
+  env.STRATEGY_ID = String(s.strategyId);
+  env.MODE = s.mode;
+  env.SESSION_ID = s.sessionId;
+  env.STAGE = STAGE;
+  env.REGISTRY_API_KEY_ID = REGISTRY_API_KEY_ID;
+  env.ORCHESTRATOR_VERSION = versions.orchestratorVersion;
+  env.GNOMEPY_VERSION = versions.gnomepyVersion;
+  if (s.researchCommit) env.RESEARCH_COMMIT = s.researchCommit;
+  return env;
+}
+
+// Base64 so arbitrary JSON (strategy args, simulation profiles) survives the shell untouched. Any failure here
+// shuts the instance down, which terminates it via the launch template's shutdown behaviour.
+export function buildUserData(env: Record<string, string>): string {
+  const payload = Buffer.from(JSON.stringify(env)).toString('base64');
+  return [
+    '#!/bin/bash',
+    "trap 'shutdown -h now' ERR",
+    'set -euo pipefail',
+    'install -d -m 0755 /etc/gnome',
+    `echo '${payload}' | base64 -d > /etc/gnome/session.json`,
+    'systemctl start gnome-strategy.service',
+    '',
+  ].join('\n');
+}
+
+function launchErrorResponse(error: any) {
+  const name = error?.name ?? error?.Code ?? '';
+  const message = error instanceof Error ? error.message : String(error);
+  if (name === 'VcpuLimitExceeded') {
+    return createResponse(409, { message: `EC2 vCPU quota exceeded for this instance type: ${message}` });
+  }
+  if (name === 'InsufficientInstanceCapacity') {
+    return createResponse(503, { message: `No EC2 capacity for this instance type in the chosen AZ: ${message}` });
+  }
+  return createResponse(500, { message: `RunInstances failed: ${message}` });
 }
 
 async function handleLaunch(body: string | null) {
@@ -131,67 +264,100 @@ async function handleLaunch(body: string | null) {
     return createResponse(400, { message: 'config.listings must be a non-empty array of listing IDs' });
   }
 
+  const profile = String(s.config['latency.profile'] ?? LOW_LATENCY).toLowerCase();
+  if (profile !== STANDARD && profile !== LOW_LATENCY) {
+    return createResponse(400, { message: `Unknown latency.profile: ${profile}` });
+  }
+  const instanceType = s.instanceType ?? DEFAULT_INSTANCE_TYPE[profile];
+  if (!(instanceType in INSTANCE_VCPUS)) {
+    return createResponse(400, {
+      message: `Unsupported instanceType ${instanceType}; expected one of ${Object.keys(INSTANCE_VCPUS).join(', ')}`,
+    });
+  }
+  if (profile === LOW_LATENCY && INSTANCE_VCPUS[instanceType] <= 4) {
+    return createResponse(400, { message: `${instanceType} is too small to isolate cores; use latency.profile=standard` });
+  }
+
   const region = s.region ?? await resolveRegion(listingIds);
-  const { subnetIds, securityGroupId } = await discoverNetworkConfig(region);
-
-  const argsEntries: Record<string, unknown> = {};
-  const otherEntries: [string, string][] = [];
-  for (const [key, value] of Object.entries(s.config)) {
-    if (key.startsWith('strategy.args.')) {
-      argsEntries[key.substring('strategy.args.'.length)] = value;
-    } else {
-      otherEntries.push([key, Array.isArray(value) ? JSON.stringify(value) : String(value)]);
-    }
+  const network = await discoverNetworkConfig(region);
+  const subnet = s.availabilityZone
+    ? network.subnets.find(n => n.availabilityZone === s.availabilityZone)
+    : network.subnets[0];
+  if (!subnet) {
+    return createResponse(400, {
+      message: `No orchestrator subnet in ${s.availabilityZone}; available: ${network.subnets.map(n => n.availabilityZone).join(', ')}`,
+    });
   }
 
-  const envOverrides = otherEntries.map(([key, value]) => ({ name: toEnvVarName(key), value }));
-  if (Object.keys(argsEntries).length > 0) {
-    envOverrides.push({ name: 'STRATEGY_ARGS_JSON', value: JSON.stringify(argsEntries) });
-  }
-  envOverrides.push({ name: 'STRATEGY_ID', value: String(s.strategyId) });
-  envOverrides.push({ name: 'MODE', value: s.mode });
-  envOverrides.push({ name: 'SESSION_ID', value: s.sessionId });
+  const isPython = String(s.config['strategy.type'] ?? '') === 'python';
+  const orchestratorVersion = s.orchestratorVersion || await resolveLatestOrchestratorVersion();
+  // Java sessions need gnomepy too: the instance reads the JVM flags from it, so both strategy types launch the
+  // JVM identically.
+  const gnomepyVersion = s.gnomepyVersion || await resolveLatestGnomepyVersion();
+  const imageId = await getParameter(region, amiParameterName(profile, instanceType));
 
-  const ecs = new ECSClient({ region });
-  const runResult = await ecs.send(new RunTaskCommand({
-    cluster: CLUSTER_NAME,
-    taskDefinition: TASK_DEFINITION_FAMILY,
-    launchType: 'FARGATE',
-    enableExecuteCommand: true,
-    networkConfiguration: {
-      awsvpcConfiguration: {
-        subnets: subnetIds,
-        securityGroups: [securityGroupId],
-        assignPublicIp: 'ENABLED',
-      },
-    },
-    overrides: {
-      ...(s.cpu ? { cpu: String(s.cpu) } : {}),
-      ...(s.memory ? { memory: String(s.memory) } : {}),
-      containerOverrides: [{
-        name: 'orchestrator',
-        environment: envOverrides,
-      }],
-    },
-    count: 1,
-  }));
-
-  const task = runResult.tasks?.[0];
-  if (!task?.taskArn) {
-    const reason = runResult.failures?.[0]?.reason ?? 'unknown';
-    return createResponse(500, { message: `ECS RunTask failed: ${reason}` });
+  const userData = buildUserData(buildSessionEnvironment(s, { orchestratorVersion, gnomepyVersion }));
+  if (Buffer.byteLength(userData) > MAX_USER_DATA_BYTES) {
+    return createResponse(400, { message: `Session config too large for EC2 user data (${Buffer.byteLength(userData)} bytes)` });
   }
 
-  const session = await registryFetch('/strategy-sessions', 'POST', {
+  // The row exists before the instance does, so an instance can never be running without a session to stop it.
+  await registryFetch('/strategy-sessions', 'POST', {
     sessionId: s.sessionId,
     strategyId: s.strategyId,
     status: 'SUBMITTED',
     mode: s.mode,
     config: s.config,
     researchCommit: s.researchCommit,
-    taskArn: task.taskArn,
-    taskDefinitionArn: runResult.tasks?.[0]?.taskDefinitionArn ?? null,
+    instanceType,
+    launchRegion: region,
+    orchestratorVersion,
+    gnomepyVersion,
   });
+
+  const tags = [
+    { Key: 'gnome:purpose', Value: INSTANCE_PURPOSE },
+    { Key: 'gnome:session-id', Value: s.sessionId },
+    { Key: 'gnome:strategy-id', Value: String(s.strategyId) },
+    { Key: 'gnome:strategy-type', Value: isPython ? 'python' : 'java' },
+    { Key: 'Name', Value: `orchestrator-${s.sessionId.substring(0, 8)}` },
+  ];
+
+  let instanceId: string;
+  let availabilityZone: string | undefined;
+  try {
+    const result = await new EC2Client({ region }).send(new RunInstancesCommand({
+      LaunchTemplate: { LaunchTemplateName: LAUNCH_TEMPLATE_NAME, Version: '$Latest' },
+      ImageId: imageId,
+      InstanceType: instanceType as any,
+      SubnetId: subnet.subnetId,
+      MinCount: 1,
+      MaxCount: 1,
+      UserData: Buffer.from(userData).toString('base64'),
+      TagSpecifications: [
+        { ResourceType: 'instance', Tags: tags },
+        { ResourceType: 'volume', Tags: tags },
+      ],
+    }));
+    const instance = result.Instances?.[0];
+    if (!instance?.InstanceId) throw new Error('RunInstances returned no instance');
+    instanceId = instance.InstanceId;
+    availabilityZone = instance.Placement?.AvailabilityZone ?? subnet.availabilityZone;
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    await registryRequest('/strategy-sessions', 'PATCH', {
+      status: 'FAILED',
+      failureReason: `Launch failed: ${message}`,
+      stoppedAt: new Date().toISOString(),
+      expectedStatus: ['SUBMITTED'],
+    }, { sessionId: s.sessionId });
+    return launchErrorResponse(error);
+  }
+
+  const session = await registryFetch('/strategy-sessions', 'PATCH', {
+    instanceId,
+    availabilityZone,
+  }, { sessionId: s.sessionId });
 
   return createResponse(200, session);
 }
@@ -215,45 +381,47 @@ async function handleStop(event: APIGatewayProxyEvent) {
   if (!sessions?.length) {
     return createResponse(404, { message: `Session not found: ${sessionId}` });
   }
+  const session = sessions[0];
 
-  const taskArn: string = sessions[0].task_arn;
-
-  // Kill first so the OMS stops trading and cancels resting orders while the container is still alive to do it;
-  // a bare StopTask would leave whatever was resting on the venue. This lambda runs outside the VPC with no DB
-  // access, so the kill goes through the registry's halt endpoint, attributed to the operator.
+  // Kill first so the OMS stops trading and cancels resting orders while the instance is still alive to do it;
+  // terminating outright would leave whatever was resting on the venue. This lambda runs outside the VPC with
+  // no DB access, so the kill goes through the registry's halt endpoint, attributed to the operator.
   let killed = false;
   try {
     await registryFetch('/risk/halts', 'POST', {
-      strategyId: sessions[0].strategy_id,
+      strategyId: session.strategy_id,
       reason: STOP_KILL_REASON,
       actor: event.requestContext?.authorizer?.claims?.email ?? UNKNOWN_ACTOR,
     });
     killed = true;
   } catch (error) {
-    // A stop must never get stuck behind the kill, so the task is stopped regardless.
+    // A stop must never get stuck behind the kill, so the instance is terminated regardless.
     const message = error instanceof Error ? error.message : String(error);
-    console.error(`Kill switch upsert failed for session ${sessionId}, stopping task anyway:`, message);
+    console.error(`Kill switch upsert failed for session ${sessionId}, terminating anyway:`, message);
   }
 
-  if (taskArn) {
-    if (killed) {
-      await sleep(clampStopGraceMs(stopGraceMs));
-    }
-    const region = taskArn.split(':')[3];
-    const ecs = new ECSClient({ region });
-    await ecs.send(new StopTaskCommand({
-      cluster: CLUSTER_NAME,
-      task: taskArn,
-      reason: 'Stopped via registry API',
+  if (killed && session.instance_id) {
+    await sleep(clampStopGraceMs(stopGraceMs));
+  }
+
+  // STOPPED is written before terminating, so the termination event that follows finds the session already
+  // terminal and leaves it alone instead of marking it FAILED.
+  const stopped = await registryRequest('/strategy-sessions', 'PATCH', {
+    status: 'STOPPED',
+    stoppedAt: new Date().toISOString(),
+    expectedStatus: ACTIVE_STATUSES,
+  }, { sessionId });
+  if (stopped.status !== 200 && stopped.status !== 409) {
+    throw new Error(`Registry PATCH /strategy-sessions failed (${stopped.status}): ${JSON.stringify(stopped.body)}`);
+  }
+
+  if (session.instance_id && session.launch_region) {
+    await new EC2Client({ region: session.launch_region }).send(new TerminateInstancesCommand({
+      InstanceIds: [session.instance_id],
     }));
   }
 
-  const updated = await registryFetch('/strategy-sessions', 'PATCH', {
-    status: 'STOPPED',
-    stoppedAt: new Date().toISOString(),
-  }, { sessionId });
-
-  return createResponse(200, updated);
+  return createResponse(stopped.status, stopped.body);
 }
 
 async function handleLogs(queryParams: Record<string, string> | null) {
@@ -263,13 +431,12 @@ async function handleLogs(queryParams: Record<string, string> | null) {
   const sessions = await registryFetch('/strategy-sessions', 'GET', undefined, { sessionId });
   if (!sessions?.length) return createResponse(404, { message: `Session not found: ${sessionId}` });
 
-  const taskArn: string | undefined = sessions[0].task_arn;
-  if (!taskArn) return createResponse(200, { logs: [] });
+  const instanceId: string | undefined = sessions[0].instance_id;
+  const region: string | undefined = sessions[0].launch_region;
+  if (!instanceId || !region) return createResponse(200, { logs: [] });
 
-  const region = taskArn.split(':')[3];
-  const taskId = taskArn.split('/').pop();
   const logGroupName = `/gnome/orchestrator/${region}`;
-  const logStreamName = `orchestrator/orchestrator/${taskId}`;
+  const logStreamName = `ec2/${instanceId}`;
 
   const logsClient = new CloudWatchLogsClient({ region });
   let logEvents: { timestamp: number; message: string }[] = [];
@@ -289,7 +456,7 @@ async function handleLogs(queryParams: Record<string, string> | null) {
   const encodeLogPath = (s: string) => s.replace(/\//g, '$252F');
   const consoleUrl = `https://${region}.console.aws.amazon.com/cloudwatch/home?region=${region}#logsV2:log-groups/log-group/${encodeLogPath(logGroupName)}/log-events/${encodeLogPath(logStreamName)}`;
 
-  return createResponse(200, { logs: [{ taskArn, logs: logEvents, consoleUrl }] });
+  return createResponse(200, { logs: [{ instanceId, logs: logEvents, consoleUrl }] });
 }
 
 export const handler = async (event: APIGatewayProxyEvent) => {

@@ -10,11 +10,13 @@ import * as cognito from 'aws-cdk-lib/aws-cognito';
 import * as ssm from 'aws-cdk-lib/aws-ssm';
 import { join } from 'path';
 import { Runtime } from 'aws-cdk-lib/aws-lambda';
+import { Stage } from '@gnome-trading-group/gnome-shared-cdk';
 
 interface Props extends cdk.StackProps {
   database: rds.DatabaseInstance;
   vpc: ec2.Vpc;
   rootUserSecret: secrets.Secret;
+  stage: Stage;
 }
 
 export class ApiStack extends cdk.Stack {
@@ -22,6 +24,10 @@ export class ApiStack extends cdk.Stack {
   public readonly api: apigw.RestApi;
   public readonly apiKey: apigw.ApiKey;
   public static readonly USER_POOL_ARN_PARAMETER = '/gnome/cognito/user-pool-arn';
+  // People (controller UI, gnomepy CLI login) call routes under this prefix with a Cognito ID token; services call
+  // the same handlers at the root with the API key. A method takes one authorizer, so the two can't share a route,
+  // and keeping the key out of the browser bundle is the point.
+  public static readonly COGNITO_PREFIX = 'cognito';
   private nodeJsProps: lambda.NodejsFunctionProps;
   private props: Props;
   private cognitoAuthorizer: apigw.CognitoUserPoolsAuthorizer;
@@ -62,8 +68,7 @@ export class ApiStack extends cdk.Stack {
       responseHeaders: { 'Access-Control-Allow-Origin': "'*'" },
     });
 
-    // Operator actions that change what may trade are attributed to a person, so they take a Cognito ID token
-    // instead of the shared API key. The pool is owned by another stack and published through SSM.
+    // The pool is owned by another stack and published through SSM.
     const userPool = cognito.UserPool.fromUserPoolArn(this, 'OperatorUserPool',
       ssm.StringParameter.valueForStringParameter(this, ApiStack.USER_POOL_ARN_PARAMETER));
     this.cognitoAuthorizer = new apigw.CognitoUserPoolsAuthorizer(this, 'OperatorAuthorizer', {
@@ -89,23 +94,31 @@ export class ApiStack extends cdk.Stack {
     // UsagePlan.addApiStage must remain at the end (after all methods are registered) to avoid circular deps.
     this.apiKey = new apigw.ApiKey(this, 'ApiKey');
 
-    const crudResources = ['securities', 'exchanges', 'listings', 'listing-specs', 'strategies', 'currencies', 'events', 'event-contracts', 'contract-relationships', 'hedge-keywords'];
-    for (const resourceName of crudResources) {
-      this.attachMethods(this.api.root.addResource(resourceName), `${resourceName}.ts`, ['GET', 'POST', 'DELETE', 'PATCH']);
+    const ALL = ['GET', 'POST', 'DELETE', 'PATCH'];
+    const crudResources: [string, string[]][] = [
+      ['securities', ALL],
+      ['exchanges', ALL],
+      ['listings', ALL],
+      ['listing-specs', ALL],
+      ['strategies', ALL],
+      ['currencies', ['GET']],
+      ['events', ['GET']],
+      ['event-contracts', ['GET']],
+      ['contract-relationships', ['GET', 'POST', 'DELETE']],
+      ['hedge-keywords', ['GET', 'POST', 'DELETE']],
+    ];
+    for (const [resourceName, cognitoMethods] of crudResources) {
+      this.attachMethods(resourceName, `${resourceName}.ts`, ALL, cognitoMethods);
     }
 
-    // /pnl/snapshots (GET + POST) and /pnl/latest (GET only)
-    const pnlResource = this.api.root.addResource('pnl');
-    this.attachMethods(pnlResource.addResource('snapshots'), 'pnl-snapshots.ts', ['GET', 'POST']);
-    this.attachMethods(pnlResource.addResource('latest'), 'pnl-latest.ts', ['GET']);
+    this.attachMethods('pnl/snapshots', 'pnl-snapshots.ts', ['GET', 'POST'], ['GET']);
+    this.attachMethods('pnl/latest', 'pnl-latest.ts', ['GET'], ['GET']);
 
-    // /risk/policies (GET with API key, writes with Cognito), /risk/policies/history (GET), /risk/halts (POST)
-    const riskResource = this.api.root.addResource('risk');
-    const riskPoliciesResource = riskResource.addResource('policies');
-    this.attachMethods(riskPoliciesResource, 'risk-policies.ts', ['GET'], ['POST', 'DELETE', 'PATCH']);
-    this.attachMethods(riskPoliciesResource.addResource('history'), 'risk-policy-history.ts', ['GET']);
+    // Policy writes are Cognito-only so the audit log attributes every change to a person.
+    this.attachMethods('risk/policies', 'risk-policies.ts', ['GET'], ['GET', 'POST', 'DELETE', 'PATCH']);
+    this.attachMethods('risk/policies/history', 'risk-policy-history.ts', ['GET'], ['GET']);
     // API key only: the OMS halts its own strategy automatically, and the handler can only ever enable a kill.
-    this.attachMethods(riskResource.addResource('halts'), 'risk-halts.ts', ['POST']);
+    this.attachMethods('risk/halts', 'risk-halts.ts', ['POST']);
 
     // /strategy-sessions — split into two Lambdas:
     // - In-VPC Lambda: GET/PATCH/POST (DB-only operations)
@@ -127,15 +140,30 @@ export class ApiStack extends cdk.Stack {
       environment: {
         REGISTRY_API_URL: `https://${this.api.restApiId}.execute-api.${this.region}.${this.urlSuffix}/${ApiStack.STAGE_NAME}/`,
         REGISTRY_API_KEY_ID: this.apiKey.keyId,
+        STAGE: this.props.stage,
       },
     });
     strategySessionsLauncherLambda.addToRolePolicy(new iam.PolicyStatement({
-      actions: ['ecs:RunTask', 'ecs:StopTask'],
+      actions: [
+        'ec2:RunInstances',
+        'ec2:TerminateInstances',
+        'ec2:DescribeInstances',
+        'ec2:DescribeImages',
+        'ec2:CreateTags',
+      ],
       resources: ['*'],
     }));
     strategySessionsLauncherLambda.addToRolePolicy(new iam.PolicyStatement({
       actions: ['iam:PassRole'],
       resources: ['arn:aws:iam::*:role/gnome-orchestrator-*'],
+      conditions: { StringEquals: { 'iam:PassedToService': 'ec2.amazonaws.com' } },
+    }));
+    strategySessionsLauncherLambda.addToRolePolicy(new iam.PolicyStatement({
+      actions: ['ssm:GetParameter'],
+      resources: [
+        'arn:aws:ssm:*:*:parameter/gnome/orchestrator/ami/*',
+        'arn:aws:ssm:*:*:parameter/gnome/orchestrator/latest-version',
+      ],
     }));
     strategySessionsLauncherLambda.addToRolePolicy(new iam.PolicyStatement({
       actions: ['ec2:DescribeSubnets', 'ec2:DescribeSecurityGroups'],
@@ -150,22 +178,14 @@ export class ApiStack extends cdk.Stack {
       resources: ['arn:aws:logs:*:*:log-group:/gnome/orchestrator/*'],
     }));
 
-    const strategySessionsResource = this.api.root.addResource('strategy-sessions');
     const sessionsDbIntegration = new apigw.LambdaIntegration(strategySessionsDbLambda);
     const sessionsLauncherIntegration = new apigw.LambdaIntegration(strategySessionsLauncherLambda);
 
-    strategySessionsResource.addMethod('GET', sessionsDbIntegration, { apiKeyRequired: true });
-    strategySessionsResource.addMethod('PATCH', sessionsDbIntegration, { apiKeyRequired: true });
-    strategySessionsResource.addMethod('POST', sessionsDbIntegration, { apiKeyRequired: true });
-
-    const launchResource = strategySessionsResource.addResource('launch');
-    launchResource.addMethod('POST', sessionsLauncherIntegration, { apiKeyRequired: true });
-
-    const stopResource = strategySessionsResource.addResource('stop');
-    stopResource.addMethod('POST', sessionsLauncherIntegration, this.cognitoMethodOptions());
-
-    const logsResource = strategySessionsResource.addResource('logs');
-    logsResource.addMethod('GET', sessionsLauncherIntegration, { apiKeyRequired: true });
+    this.attachIntegration('strategy-sessions', sessionsDbIntegration, ['GET', 'PATCH', 'POST'], ['GET']);
+    this.attachIntegration('strategy-sessions/launch', sessionsLauncherIntegration, ['POST'], ['POST']);
+    // Cognito-only so the kill-switch audit entry written on stop names the operator.
+    this.attachIntegration('strategy-sessions/stop', sessionsLauncherIntegration, [], ['POST']);
+    this.attachIntegration('strategy-sessions/logs', sessionsLauncherIntegration, ['GET'], ['GET']);
 
     const usagePlan = new apigw.UsagePlan(this, 'UsagePlan', {
       name: 'Global Usage Plan',
@@ -189,13 +209,16 @@ export class ApiStack extends cdk.Stack {
     });
   }
 
-  private attachMethods(resource: apigw.Resource, fileName: string, methods: string[], cognitoMethods: string[] = []) {
-    const integration = this.createIntegration(fileName);
-    for (const method of methods) {
-      resource.addMethod(method, integration, { apiKeyRequired: true });
+  private attachMethods(path: string, fileName: string, apiKeyMethods: string[], cognitoMethods: string[] = []) {
+    this.attachIntegration(path, this.createIntegration(fileName), apiKeyMethods, cognitoMethods);
+  }
+
+  private attachIntegration(path: string, integration: apigw.Integration, apiKeyMethods: string[], cognitoMethods: string[]) {
+    for (const method of apiKeyMethods) {
+      this.api.root.resourceForPath(path).addMethod(method, integration, { apiKeyRequired: true });
     }
     for (const method of cognitoMethods) {
-      resource.addMethod(method, integration, this.cognitoMethodOptions());
+      this.api.root.resourceForPath(`${ApiStack.COGNITO_PREFIX}/${path}`).addMethod(method, integration, this.cognitoMethodOptions());
     }
   }
 

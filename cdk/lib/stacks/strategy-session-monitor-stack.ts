@@ -38,12 +38,14 @@ export class StrategySessionMonitorStack extends cdk.Stack {
 
     props.database.grantConnect(monitorLambda);
 
-    const rule = new events.Rule(this, 'EcsTaskStateChangeRule', {
+    // Matches every instance in the account (Batch and classifier fleets too); those find no session and
+    // are no-ops. Other regions forward their events to this bus from gnome-orchestrator's Ec2Stack.
+    const rule = new events.Rule(this, 'Ec2InstanceStateChangeRule', {
       eventPattern: {
-        source: ['aws.ecs'],
-        detailType: ['ECS Task State Change'],
+        source: ['aws.ec2'],
+        detailType: ['EC2 Instance State-change Notification'],
         detail: {
-          lastStatus: ['RUNNING', 'STOPPED'],
+          state: ['running', 'shutting-down', 'terminated'],
         },
       },
     });

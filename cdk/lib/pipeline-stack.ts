@@ -23,6 +23,7 @@ class AppStage extends cdk.Stage {
       database: databaseStack.database,
       vpc: databaseStack.vpc,
       rootUserSecret: databaseStack.rootUserSecret,
+      stage: config.account.stage,
     });
 
     const exchangeSyncStack = new ExchangeSyncStack(this, "ExchangeSyncStack", {
