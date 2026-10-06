@@ -28,6 +28,7 @@ const LISTINGS_IN_BATCH = `
     UNION ALL SELECT jsonb_array_elements(COALESCE($1::jsonb->'orderAcks', '[]'))
     UNION ALL SELECT jsonb_array_elements(COALESCE($1::jsonb->'orderCloses', '[]'))
     UNION ALL SELECT jsonb_array_elements(COALESCE($1::jsonb->'marks', '[]'))
+    UNION ALL SELECT jsonb_array_elements(COALESCE($1::jsonb->'orderRecoveries', '[]'))
   ) events`;
 
 // Fills, then the position each listing's newest inserted fill leaves. A replayed fill inserts nothing and so moves
@@ -119,6 +120,18 @@ const UPSERT_ORDER_CLOSES = `
     status = CASE WHEN ledger.order.status = 'OPEN' THEN 'CLOSED' ELSE ledger.order.status END,
     filled_qty = EXCLUDED.filled_qty, closed_at = EXCLUDED.closed_at`;
 
+// A starting session settles an order an ended session of its strategy left: cancelled on the venue if it was still
+// resting, and any fills the ledger missed booked as RECOVERY fills. Only an ended session's orders can be settled,
+// so a running session's orders are never touched.
+const MARK_ORDERS_RECOVERED = `
+  UPDATE ledger.order o SET status = 'RECOVERED', closed_at = COALESCE(o.closed_at, NOW())
+  FROM jsonb_to_recordset(COALESCE($1::jsonb->'orderRecoveries', '[]')) AS r(
+    "originSessionId" text, "clientOidCounter" bigint, "listingId" int)
+  JOIN strategy.session origin ON origin.session_id = r."originSessionId"
+  WHERE o.session_id = r."originSessionId" AND o.client_oid_counter = r."clientOidCounter"
+    AND o.listing_id = r."listingId" AND o.strategy_id = $2 AND o.mode = $3
+    AND origin.status <> ALL($4::text[])`;
+
 const INSERT_MARKS = `
   INSERT INTO ledger.mark (listing_id, ts, bid, ask, last_trade)
   SELECT m."listingId", to_timestamp(m."tsMs"::numeric / 1e3), m.bid, m.ask, m."lastTrade"
@@ -155,6 +168,7 @@ export async function writeBatch(client: PoolClient, sessionId: string, body: st
   await client.query(INSERT_ORDER_OPENS, args);
   await client.query(UPSERT_ORDER_ACKS, args);
   await client.query(UPSERT_ORDER_CLOSES, args);
+  await client.query(MARK_ORDERS_RECOVERED, [body, session.strategy_id, session.mode, WRITABLE_SESSION_STATUSES]);
   await client.query(INSERT_MARKS, [body]);
 }
 

@@ -63,6 +63,9 @@ export class StrategySessionHandler extends ResourceHandler {
     if (params?.instanceId) {
       query += ` AND instance_id='${params.instanceId}'`;
     }
+    if (params?.sessionSeq && /^[0-9]+$/.test(params.sessionSeq)) {
+      query += ` AND session_seq=${params.sessionSeq}`;
+    }
     return query;
   }
 

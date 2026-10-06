@@ -235,6 +235,7 @@ export function overrideKeys(config: Record<string, unknown>): string[] {
 export function buildSessionEnvironment(
   s: ICreateSession,
   versions: { orchestratorVersion: string; gnomepyVersion: string },
+  sessionSeq: number,
 ): Record<string, string> {
   const env: Record<string, string> = {};
   const args: Record<string, unknown> = {};
@@ -257,6 +258,8 @@ export function buildSessionEnvironment(
   env.STRATEGY_ID = String(s.strategyId);
   env.MODE = s.mode;
   env.SESSION_ID = s.sessionId;
+  // The session's short number, which venues with client-chosen order ids (Kalshi) carry in each order's id.
+  env.SESSION_SEQ = String(sessionSeq);
   env.STAGE = STAGE;
   env.REGISTRY_API_KEY_ID = REGISTRY_API_KEY_ID;
   env.ORCHESTRATOR_VERSION = versions.orchestratorVersion;
@@ -366,9 +369,11 @@ async function handleLaunch(body: string | null) {
   const gnomepyVersion = s.gnomepyVersion || await resolveLatestGnomepyVersion();
   const imageId = await getParameter(region, amiParameterName(profile, instanceType));
 
-  const userData = buildUserData(buildSessionEnvironment(s, { orchestratorVersion, gnomepyVersion }));
-  if (Buffer.byteLength(userData) > MAX_USER_DATA_BYTES) {
-    return createResponse(400, { message: `Session config too large for EC2 user data (${Buffer.byteLength(userData)} bytes)` });
+  // Checked before the session exists, with the longest sequence number it could be given.
+  const sizedUserData = buildUserData(
+    buildSessionEnvironment(s, { orchestratorVersion, gnomepyVersion }, Number.MAX_SAFE_INTEGER));
+  if (Buffer.byteLength(sizedUserData) > MAX_USER_DATA_BYTES) {
+    return createResponse(400, { message: `Session config too large for EC2 user data (${Buffer.byteLength(sizedUserData)} bytes)` });
   }
 
   // The row exists before the instance does, so an instance can never be running without a session to stop it.
@@ -392,6 +397,8 @@ async function handleLaunch(body: string | null) {
   if (created.status < 200 || created.status >= 300) {
     throw new Error(`Registry POST /strategy-sessions failed (${created.status}): ${JSON.stringify(created.body)}`);
   }
+  const userData = buildUserData(buildSessionEnvironment(
+    s, { orchestratorVersion, gnomepyVersion }, Number((created.body as { session_seq: number | string }).session_seq)));
 
   const tags = [
     { Key: 'gnome:purpose', Value: INSTANCE_PURPOSE },

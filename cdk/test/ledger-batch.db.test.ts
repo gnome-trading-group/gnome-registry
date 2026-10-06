@@ -3,6 +3,7 @@ import { withTransaction } from '../lambda/endpoints/base';
 import { writeBatch } from '../lambda/endpoints/ledger-batch';
 import { StrategySessionHandler } from '../lambda/endpoints/strategy-sessions';
 import { generateHaltUpsertQuery } from '../lambda/endpoints/risk-halts';
+import { buildOrdersQuery } from '../lambda/endpoints/ledger-orders';
 
 // Runs the ledger's SQL against a real Postgres with every migration applied. Set LEDGER_TEST_DB to its connection
 // string (a throwaway database: each test resets the tables it uses).
@@ -145,5 +146,32 @@ describeDb('ledger batch against Postgres', () => {
     expect(wide.rows[0].policy_id).not.toBe(onListing.rows[0].policy_id);
     const rows = await client.query(`SELECT strategy_id, listing_id FROM risk.policy WHERE policy_type = 'KILL_SWITCH' ORDER BY policy_id`);
     expect(rows.rows).toEqual([{ strategy_id: 1, listing_id: 500 }, { strategy_id: 1, listing_id: null }]);
+  });
+
+  it('a starting session settles an ended session\'s order, never a running one\'s, and sees what it already filled', async () => {
+    await session('old', [], 'STOPPED');
+    await client.query(`INSERT INTO ledger.order (session_id, client_oid_counter, strategy_id, listing_id, exchange_id,
+      mode, side, price, size) VALUES ('old', 3, 1, 500, 1, 'paper', 0, 400000000, 10000000)`);
+    await post('s1', { fills: [fill(3, 4_000_000, 4_000_000, 1, {
+      source: 'RECOVERY', originSessionId: 'old', fillQty: 4_000_000, fillPrice: 400_000_000, fee: 20_000_000,
+    })] });
+
+    const seen = (await client.query(buildOrdersQuery({ mode: 'paper', listingIds: '500' }))).rows[0];
+    expect([seen.ledger_filled_qty, seen.ledger_filled_notional, seen.ledger_fees])
+      .toEqual(['4000000', '1600000000', '20000000']);
+
+    await session('live-one', [501]);
+    await client.query(`INSERT INTO ledger.order (session_id, client_oid_counter, strategy_id, listing_id, exchange_id,
+      mode) VALUES ('live-one', 9, 1, 500, 1, 'paper')`);
+    await post('s1', { orderRecoveries: [
+      { originSessionId: 'old', clientOidCounter: 3, listingId: 500 },
+      { originSessionId: 'live-one', clientOidCounter: 9, listingId: 500 },
+    ] });
+
+    const statuses = await client.query('SELECT session_id, status FROM ledger.order ORDER BY session_id');
+    expect(statuses.rows).toEqual([
+      { session_id: 'live-one', status: 'OPEN' },
+      { session_id: 'old', status: 'RECOVERED' },
+    ]);
   });
 });
