@@ -145,7 +145,7 @@ beforeEach(() => {
       postBodies.push(JSON.parse(init.body));
       return postStatus === 409
         ? jsonResponse({ message: 'Session other of this strategy is already trading listing 1 in paper', conflictingSessionId: 'other' }, 409)
-        : jsonResponse({ session_id: 'session-0001', session_seq: 42, status: 'SUBMITTED' }, postStatus);
+        : jsonResponse({ session_id: 'session-0001', status: 'SUBMITTED' }, postStatus);
     }
     patchBodies.push(JSON.parse(init.body));
     return jsonResponse({ session_id: 's1', status: 'STOPPED' }, patchStatusQueue.shift() ?? patchStatus);
@@ -207,7 +207,6 @@ describe('POST /strategy-sessions/launch', () => {
       STRATEGY_CLASS: 'com.example.S',
       STRATEGY_ARGS_JSON: '{"edge":0.5}',
       STRATEGY_ID: '7',
-      SESSION_SEQ: '42',
       MODE: 'paper',
       SESSION_ID: 'session-0001',
       STAGE: 'dev',
@@ -467,7 +466,6 @@ describe('orchestrator overrides', () => {
     const env = launcher.buildSessionEnvironment(
       { ...launchBody({}, { 'journal.enabled': 'false', 'overrides.journal.enabled': 'true' }) } as any,
       { orchestratorVersion: '1.12.2', gnomepyVersion: '2.24.0' },
-      42,
     );
     expect(env.JOURNAL_ENABLED).toBe('true');
     expect(env.OVERRIDES_JOURNAL_ENABLED).toBeUndefined();
@@ -475,12 +473,10 @@ describe('orchestrator overrides', () => {
 
   it('never lets an override replace the session identity', () => {
     const env = launcher.buildSessionEnvironment(
-      { ...launchBody({}, { 'overrides.session.id': 'someone-else', 'overrides.session.seq': '7' }) } as any,
+      { ...launchBody({}, { 'overrides.session.id': 'someone-else' }) } as any,
       { orchestratorVersion: '1.12.2', gnomepyVersion: '2.24.0' },
-      42,
     );
     expect(env.SESSION_ID).toBe('session-0001');
-    expect(env.SESSION_SEQ).toBe('42');
   });
 
   it('rejects overrides that are not orchestrator properties', async () => {
