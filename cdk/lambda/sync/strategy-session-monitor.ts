@@ -1,4 +1,5 @@
 import { connectDatabase } from '../connections';
+import { withTransaction } from '../endpoints/base';
 
 interface Ec2StateChangeEvent {
   detail: {
@@ -20,6 +21,24 @@ export function resolveTransition(ec2State: string): Transition | null {
     return { status: 'FAILED', from: ['SUBMITTED', 'STARTING', 'RUNNING'] };
   }
   return null;
+}
+
+export const KILL_RELEASE_AUDIT = { actor: 'system', reason: 'instance terminated' };
+
+// A stop kills the session before shutting it down, and a crash may have been killed too; either way the kill must
+// hold until the OMS can no longer act on it. Only 'terminated' guarantees that ('shutting-down' can still be
+// running the OMS), and only ended sessions qualify, so a kill on a live session is never touched.
+export function generateKillReleaseQuery(instanceId: string): string {
+  return `
+    UPDATE risk.policy
+    SET enabled=false, date_modified=NOW()
+    WHERE policy_type='KILL_SWITCH' AND enabled
+      AND session_id IN (
+        SELECT session_id FROM strategy.session
+        WHERE instance_id='${instanceId}' AND status IN ('STOPPED', 'FAILED')
+      )
+    RETURNING policy_id, session_id
+  `;
 }
 
 export const handler = async (event: Ec2StateChangeEvent) => {
@@ -51,6 +70,13 @@ export const handler = async (event: Ec2StateChangeEvent) => {
     } else {
       const row = result.rows[0];
       console.log(`Session ${row.session_id} -> ${row.status} (instance ${instanceId} ${state})`);
+    }
+
+    if (state === 'terminated') {
+      const released = await withTransaction(client, (c) => c.query(generateKillReleaseQuery(instanceId)), KILL_RELEASE_AUDIT);
+      for (const row of released.rows) {
+        console.log(`Released kill switch ${row.policy_id} for ended session ${row.session_id} (instance ${instanceId} terminated)`);
+      }
     }
   } finally {
     client.release();
