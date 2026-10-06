@@ -105,7 +105,7 @@ const INSERT_ORDER_OPENS = `
 const UPSERT_ORDER_ACKS = `
   INSERT INTO ledger.order (session_id, client_oid_counter, strategy_id, listing_id, exchange_id, mode,
     exchange_order_id, acked_at)
-  SELECT $2, o."clientOidCounter", $3, o."listingId", o."exchangeId", NULLIF(o."exchangeOrderId", ''),
+  SELECT $2, o."clientOidCounter", $3, o."listingId", o."exchangeId", $4, NULLIF(o."exchangeOrderId", ''),
     ${eventTime('o."eventTimeNs"')}
   FROM jsonb_to_recordset(COALESCE($1::jsonb->'orderAcks', '[]')) AS o(${ORDER_COLUMNS})
   ON CONFLICT (session_id, client_oid_counter) DO UPDATE SET
