@@ -16,6 +16,11 @@ export const UNKNOWN_ACTOR = 'unknown';
 /** A request the handler can't act on; reported to the caller as a 400 rather than a server error. */
 export class ValidationError extends Error {}
 
+/** Comma-separated positive integer ids, e.g. "3,17,42"; anything else is dropped. */
+export function parseIdList(value: string | undefined): number[] {
+  return (value ?? '').split(',').map(Number).filter((n) => Number.isInteger(n) && n > 0);
+}
+
 export function getActor(event: APIGatewayProxyEvent): string {
   return event.requestContext?.authorizer?.claims?.email ?? UNKNOWN_ACTOR;
 }

@@ -1,5 +1,5 @@
 import { APIGatewayProxyEvent, APIGatewayProxyEventQueryStringParameters } from 'aws-lambda';
-import { ResourceHandler } from './base';
+import { parseIdList, ResourceHandler } from './base';
 import { ICreateSecurity, IDeleteSecurity } from '../types';
 
 function currencyColumns(alias: string): string {
@@ -9,7 +9,7 @@ function currencyColumns(alias: string): string {
     (SELECT symbol FROM sm.currency WHERE currency_id = ${alias}.settle_currency_id) AS settle_currency`;
 }
 
-class SecurityHandler extends ResourceHandler {
+export class SecurityHandler extends ResourceHandler {
   getPrimaryKey(): string { return 'security_id'; }
   getCamelPrimaryKey(): string { return 'securityId'; }
 
@@ -65,6 +65,10 @@ class SecurityHandler extends ResourceHandler {
 
     if (params?.securityId) {
       query += ` AND s.security_id=${params.securityId}`;
+    }
+    if (params?.securityIds !== undefined) {
+      const ids = parseIdList(params.securityIds);
+      query += ids.length > 0 ? ` AND s.security_id IN (${ids.join(',')})` : ' AND FALSE';
     }
     if (params?.symbol) {
       query += ` AND s.symbol='${params.symbol}'`;

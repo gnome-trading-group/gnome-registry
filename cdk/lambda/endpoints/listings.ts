@@ -1,8 +1,8 @@
 import { APIGatewayProxyEvent, APIGatewayProxyEventQueryStringParameters } from 'aws-lambda';
-import { ResourceHandler } from './base';
+import { parseIdList, ResourceHandler } from './base';
 import { ICreateListing, IDeleteListing } from '../types';
 
-class ListingHandler extends ResourceHandler {
+export class ListingHandler extends ResourceHandler {
   getPrimaryKey(): string { return 'listing_id'; }
   getCamelPrimaryKey(): string { return 'listingId'; }
 
@@ -40,6 +40,13 @@ class ListingHandler extends ResourceHandler {
 
     if (params?.listingId) {
       query += denormalize ? ` AND l.listing_id=${params.listingId}` : ` AND listing_id=${params.listingId}`;
+    }
+    if (params?.listingIds !== undefined) {
+      // Batch lookup for UIs labelling many listings at once; ids are parsed to integers, so nothing else reaches the SQL.
+      const ids = parseIdList(params.listingIds);
+      query += ids.length > 0
+        ? ` AND ${denormalize ? 'l.' : ''}listing_id IN (${ids.join(',')})`
+        : ' AND FALSE';
     }
     if (params?.securityId) {
       query += denormalize ? ` AND l.security_id=${params.securityId}` : ` AND security_id=${params.securityId}`;
