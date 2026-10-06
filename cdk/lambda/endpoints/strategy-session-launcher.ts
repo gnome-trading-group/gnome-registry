@@ -38,8 +38,9 @@ export const INSTANCE_VCPUS: Record<string, number> = {
   'c7i.8xlarge': 32,
   'c7i.12xlarge': 48,
 };
+// c7i.large measured at ~2-7% CPU and ~370 MB with five listings on the standard profile (2026-10).
 const DEFAULT_INSTANCE_TYPE: Record<string, string> = {
-  [STANDARD]: 'c7i.xlarge',
+  [STANDARD]: 'c7i.large',
   [LOW_LATENCY]: 'c7i.4xlarge',
 };
 
@@ -265,10 +266,14 @@ async function handleLaunch(body: string | null) {
     return createResponse(400, { message: 'config.listings must be a non-empty array of listing IDs' });
   }
 
-  const profile = String(s.config['latency.profile'] ?? LOW_LATENCY).toLowerCase();
+  // Paper fills come from a simulated exchange that models its own latency, so isolated cores buy it nothing.
+  const profile = String(s.config['latency.profile'] ?? (s.mode === 'live' ? LOW_LATENCY : STANDARD)).toLowerCase();
   if (profile !== STANDARD && profile !== LOW_LATENCY) {
     return createResponse(400, { message: `Unknown latency.profile: ${profile}` });
   }
+  // Written back so the instance, the stored session and a relaunch all see the profile actually chosen, rather
+  // than each applying its own default.
+  s.config['latency.profile'] = profile;
   const instanceType = s.instanceType ?? DEFAULT_INSTANCE_TYPE[profile];
   if (!(instanceType in INSTANCE_VCPUS)) {
     return createResponse(400, {

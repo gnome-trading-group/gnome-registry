@@ -88,7 +88,10 @@ function launchBody(overrides: Record<string, unknown> = {}, config: Record<stri
     mode: 'paper',
     region: 'us-east-1',
     instanceType: 'c7i.4xlarge',
-    config: { listings: [1], 'strategy.type': 'java', 'strategy.class': 'com.example.S', ...config },
+    config: {
+      listings: [1], 'strategy.type': 'java', 'strategy.class': 'com.example.S', 'latency.profile': 'low_latency',
+      ...config,
+    },
     ...overrides,
   };
 }
@@ -234,15 +237,29 @@ describe('POST /strategy-sessions/launch', () => {
     expect(sessionEnv().GNOMEPY_VERSION).toBe('2.18.1');
   });
 
-  it('runs the standard profile on the standard AMI and defaults to c7i.xlarge', async () => {
+  it('runs the standard profile on the standard AMI and defaults to c7i.large', async () => {
     const body = launchBody({}, { 'latency.profile': 'standard' });
     delete (body as any).instanceType;
 
     await launcher.handler(apiEvent('/strategy-sessions/launch', body));
 
     expect(runInstancesInput().ImageId).toBe('ami-std');
-    expect(runInstancesInput().InstanceType).toBe('c7i.xlarge');
+    expect(runInstancesInput().InstanceType).toBe('c7i.large');
     expect(sessionEnv().LATENCY_PROFILE).toBe('standard');
+  });
+
+  it.each([
+    ['paper', 'standard', 'ami-std'],
+    ['live', 'low_latency', 'ami-16'],
+  ])('defaults a %s session without a profile to %s and records it', async (mode, profile, ami) => {
+    const body = launchBody({ mode }) as any;
+    delete body.config['latency.profile'];
+
+    await launcher.handler(apiEvent('/strategy-sessions/launch', body));
+
+    expect(sessionEnv().LATENCY_PROFILE).toBe(profile);
+    expect(runInstancesInput().ImageId).toBe(ami);
+    expect(postBodies[0].config['latency.profile']).toBe(profile);
   });
 
   it('runs c7i.large on the standard AMI', async () => {
