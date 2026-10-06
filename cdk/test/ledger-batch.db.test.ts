@@ -174,4 +174,11 @@ describeDb('ledger batch against Postgres', () => {
       { session_id: 'old', status: 'RECOVERED' },
     ]);
   });
+
+  it('orders acknowledged without a venue id, as in paper, don\'t collide', async () => {
+    const acks = [1, 2].map(counter => ({ clientOidCounter: counter, listingId: 500, exchangeId: 1, exchangeOrderId: '' }));
+    await post('s1', { orderAcks: acks });
+    const rows = await client.query('SELECT exchange_order_id FROM ledger.order ORDER BY client_oid_counter');
+    expect(rows.rows).toEqual([{ exchange_order_id: null }, { exchange_order_id: null }]);
+  });
 });

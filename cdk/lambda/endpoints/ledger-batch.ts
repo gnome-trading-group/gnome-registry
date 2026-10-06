@@ -90,7 +90,8 @@ function eventTime(column: string): string {
 }
 
 // Opens insert once. Acks and closes create the row if their open hasn't arrived yet, so the order events can land
-// in any order across batches.
+// in any order across batches. A venue that gives no id (the paper gateway) acks with an empty one, which is stored
+// as null: it identifies nothing, and the venue-id index would otherwise treat every such order as the same one.
 const INSERT_ORDER_OPENS = `
   INSERT INTO ledger.order (session_id, client_oid_counter, strategy_id, listing_id, exchange_id, mode, side, price,
     size, opened_at)
@@ -104,7 +105,7 @@ const INSERT_ORDER_OPENS = `
 const UPSERT_ORDER_ACKS = `
   INSERT INTO ledger.order (session_id, client_oid_counter, strategy_id, listing_id, exchange_id, mode,
     exchange_order_id, acked_at)
-  SELECT $2, o."clientOidCounter", $3, o."listingId", o."exchangeId", $4, o."exchangeOrderId",
+  SELECT $2, o."clientOidCounter", $3, o."listingId", o."exchangeId", NULLIF(o."exchangeOrderId", ''),
     ${eventTime('o."eventTimeNs"')}
   FROM jsonb_to_recordset(COALESCE($1::jsonb->'orderAcks', '[]')) AS o(${ORDER_COLUMNS})
   ON CONFLICT (session_id, client_oid_counter) DO UPDATE SET
