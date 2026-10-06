@@ -1,16 +1,25 @@
-import { generateKillReleaseQuery, resolveTransition } from '../lambda/sync/strategy-session-monitor';
+import { generateKillReleaseQuery, resolveTransitions } from '../lambda/sync/strategy-session-monitor';
 
 describe('EC2 state to session status', () => {
   it('moves a submitted session to STARTING when its instance boots', () => {
-    expect(resolveTransition('running')).toEqual({ status: 'STARTING', from: ['SUBMITTED'] });
+    expect(resolveTransitions('running')).toEqual([{ status: 'STARTING', from: ['SUBMITTED'] }]);
   });
 
-  it.each(['shutting-down', 'terminated'])('fails any active session when its instance goes %s', (state) => {
-    expect(resolveTransition(state)).toEqual({ status: 'FAILED', from: ['SUBMITTED', 'STARTING', 'RUNNING'] });
+  it.each(['shutting-down', 'terminated'])('fails any running session when its instance goes %s', (state) => {
+    expect(resolveTransitions(state)).toContainEqual({ status: 'FAILED', from: ['SUBMITTED', 'STARTING', 'RUNNING'] });
+  });
+
+  it.each(['shutting-down', 'terminated'])('finishes a stop in progress as STOPPED when its instance goes %s', (state) => {
+    expect(resolveTransitions(state)).toContainEqual({ status: 'STOPPED', from: ['STOPPING'] });
+  });
+
+  it('never fails a session that is stopping', () => {
+    const failing = resolveTransitions('terminated').find((t) => t.status === 'FAILED')!;
+    expect(failing.from).not.toContain('STOPPING');
   });
 
   it.each(['pending', 'stopping', 'stopped'])('ignores %s', (state) => {
-    expect(resolveTransition(state)).toBeNull();
+    expect(resolveTransitions(state)).toEqual([]);
   });
 });
 

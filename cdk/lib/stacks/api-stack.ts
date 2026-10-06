@@ -163,6 +163,7 @@ export class ApiStack extends cdk.Stack {
       resources: [
         'arn:aws:ssm:*:*:parameter/gnome/orchestrator/ami/*',
         'arn:aws:ssm:*:*:parameter/gnome/orchestrator/latest-version',
+        'arn:aws:ssm:*:*:parameter/gnome/orchestrator/properties/*',
       ],
     }));
     strategySessionsLauncherLambda.addToRolePolicy(new iam.PolicyStatement({
@@ -183,9 +184,12 @@ export class ApiStack extends cdk.Stack {
 
     this.attachIntegration('strategy-sessions', sessionsDbIntegration, ['GET', 'PATCH', 'POST'], ['GET']);
     this.attachIntegration('strategy-sessions/launch', sessionsLauncherIntegration, ['POST'], ['POST']);
-    // Cognito-only so the kill-switch audit entry written on stop names the operator.
-    this.attachIntegration('strategy-sessions/stop', sessionsLauncherIntegration, [], ['POST']);
+    // People stop under /cognito, attributed from their token; services (the launcher's automated shutdowns) stop
+    // with the API key and name themselves in the body, so the kill-switch audit entry still says who stopped it.
+    this.attachIntegration('strategy-sessions/stop', sessionsLauncherIntegration, ['POST'], ['POST']);
     this.attachIntegration('strategy-sessions/logs', sessionsLauncherIntegration, ['GET'], ['GET']);
+    // For the controller's override picker; the launcher Lambda already reads the orchestrator's SSM parameters.
+    this.attachIntegration('orchestrator/properties', sessionsLauncherIntegration, [], ['GET']);
 
     const usagePlan = new apigw.UsagePlan(this, 'UsagePlan', {
       name: 'Global Usage Plan',

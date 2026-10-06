@@ -15,12 +15,16 @@ interface Transition {
 
 // The instance booting only means bootstrap has started; the orchestrator reports RUNNING itself once its
 // agents are live. Each transition is guarded so a delayed or retried event can never move a session backwards.
-export function resolveTransition(ec2State: string): Transition | null {
-  if (ec2State === 'running') return { status: 'STARTING', from: ['SUBMITTED'] };
+// An instance that goes away mid-stop finishes that stop (STOPPED) rather than failing: a stop was requested.
+export function resolveTransitions(ec2State: string): Transition[] {
+  if (ec2State === 'running') return [{ status: 'STARTING', from: ['SUBMITTED'] }];
   if (ec2State === 'shutting-down' || ec2State === 'terminated') {
-    return { status: 'FAILED', from: ['SUBMITTED', 'STARTING', 'RUNNING'] };
+    return [
+      { status: 'FAILED', from: ['SUBMITTED', 'STARTING', 'RUNNING'] },
+      { status: 'STOPPED', from: ['STOPPING'] },
+    ];
   }
-  return null;
+  return [];
 }
 
 export const KILL_RELEASE_AUDIT = { actor: 'system', reason: 'instance terminated' };
@@ -45,31 +49,37 @@ export const handler = async (event: Ec2StateChangeEvent) => {
   const instanceId = event.detail['instance-id'];
   const state = event.detail.state;
 
-  const transition = resolveTransition(state);
-  if (!transition) return;
+  const transitions = resolveTransitions(state);
+  if (transitions.length === 0) return;
 
   const pool = await connectDatabase();
   const client = await pool.connect();
   try {
-    const updates = [`status='${transition.status}'`, `date_modified=NOW()`];
-    if (transition.status === 'FAILED') {
-      updates.push(`stopped_at=NOW()`);
-      updates.push(`failure_reason='Instance ${state} without a stop request'`);
+    let moved = false;
+    for (const transition of transitions) {
+      const updates = [`status='${transition.status}'`, `date_modified=NOW()`];
+      if (transition.status === 'FAILED') {
+        updates.push(`stopped_at=NOW()`);
+        updates.push(`failure_reason='Instance ${state} without a stop request'`);
+      } else if (transition.status === 'STOPPED') {
+        updates.push(`stopped_at=NOW()`);
+      }
+
+      const result = await client.query(`
+        UPDATE strategy.session
+        SET ${updates.join(', ')}
+        WHERE instance_id = '${instanceId}' AND status IN (${transition.from.map(s => `'${s}'`).join(', ')})
+        RETURNING session_id, status
+      `);
+      for (const row of result.rows) {
+        moved = true;
+        console.log(`Session ${row.session_id} -> ${row.status} (instance ${instanceId} ${state})`);
+      }
     }
 
-    const result = await client.query(`
-      UPDATE strategy.session
-      SET ${updates.join(', ')}
-      WHERE instance_id = '${instanceId}' AND status IN (${transition.from.map(s => `'${s}'`).join(', ')})
-      RETURNING session_id, status
-    `);
-
-    if (result.rowCount === 0) {
+    if (!moved) {
       // Most EC2 events in the account belong to other fleets (Batch, classifier); this is the normal path.
       console.debug(`No session moved for ${instanceId} (${state})`);
-    } else {
-      const row = result.rows[0];
-      console.log(`Session ${row.session_id} -> ${row.status} (instance ${instanceId} ${state})`);
     }
 
     if (state === 'terminated') {

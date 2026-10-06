@@ -105,6 +105,7 @@ describe('ApiStack auth', () => {
     ['risk/halts', 'POST'],
     ['strategy-sessions/launch', 'POST'],
     ['pnl/snapshots', 'POST'],
+    ['strategy-sessions/stop', 'POST'],
   ])('%s %s stays on the API key for services', (path, httpMethod) => {
     method(template, resourceId(template, path), httpMethod);
   });
@@ -118,10 +119,6 @@ describe('ApiStack auth', () => {
       Properties: { HttpMethod: httpMethod, ResourceId: { Ref: resourceId(template, path) } },
     });
     expect(Object.keys(methods)).toHaveLength(0);
-  });
-
-  it('serves stop only under /cognito', () => {
-    expect(hasResource(template, 'strategy-sessions/stop')).toBe(false);
   });
 
   it.each([

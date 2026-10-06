@@ -21,6 +21,11 @@ const INSTANCE_PURPOSE = 'orchestrator-ec2';
 const LAUNCH_TEMPLATE_NAME = 'gnome-orchestrator';
 const AMI_PARAMETER_PREFIX = '/gnome/orchestrator/ami';
 const LATEST_ORCHESTRATOR_PARAMETER = '/gnome/orchestrator/latest-version';
+// Published by gnome-orchestrator per release as <prefix>/<version>, plus <prefix>/latest:
+// { version, properties: { key: defaultValue } }.
+const ORCHESTRATOR_PROPERTIES_PREFIX = '/gnome/orchestrator/properties';
+// Session config keys under this prefix override an orchestrator property of the same name for that session only.
+export const OVERRIDE_PREFIX = 'overrides.';
 const VERSION_PARAMETER_REGION = 'us-east-1';
 const PYPI_GNOMEPY_URL = 'https://pypi.org/pypi/gnomepy/json';
 // EC2's limit on raw (pre-base64) user data.
@@ -198,18 +203,55 @@ function createResponse(statusCode: number, body: any) {
   };
 }
 
+export interface OrchestratorProperties {
+  version: string;
+  properties: Record<string, string>;
+}
+
+// Releases from before per-version publishing have no list of their own, so they're checked against the latest one.
+async function loadOrchestratorProperties(version?: string): Promise<OrchestratorProperties> {
+  if (version) {
+    try {
+      return JSON.parse(await getParameter(VERSION_PARAMETER_REGION, `${ORCHESTRATOR_PROPERTIES_PREFIX}/${version}`));
+    } catch {
+      // Falls through to latest.
+    }
+  }
+  return JSON.parse(await getParameter(VERSION_PARAMETER_REGION, `${ORCHESTRATOR_PROPERTIES_PREFIX}/latest`));
+}
+
+// Read with no fallback at startup (the orchestrator needs the type, and the Java class; gnomepy's runner needs the
+// Python class), so a session without them boots an instance that dies before it trades.
+export function missingStrategyConfig(config: Record<string, unknown>): string | null {
+  if (!String(config['strategy.type'] ?? '').trim()) return 'config["strategy.type"] is required (java or python)';
+  if (!String(config['strategy.class'] ?? '').trim()) return 'config["strategy.class"] is required';
+  return null;
+}
+
+export function overrideKeys(config: Record<string, unknown>): string[] {
+  return Object.keys(config).filter((k) => k.startsWith(OVERRIDE_PREFIX)).map((k) => k.slice(OVERRIDE_PREFIX.length));
+}
+
 export function buildSessionEnvironment(
   s: ICreateSession,
   versions: { orchestratorVersion: string; gnomepyVersion: string },
 ): Record<string, string> {
   const env: Record<string, string> = {};
   const args: Record<string, unknown> = {};
+  const overrides: Record<string, unknown> = {};
   for (const [key, value] of Object.entries(s.config)) {
     if (key.startsWith('strategy.args.')) {
       args[key.substring('strategy.args.'.length)] = value;
+    } else if (key.startsWith(OVERRIDE_PREFIX)) {
+      overrides[key.substring(OVERRIDE_PREFIX.length)] = value;
     } else {
       env[toEnvVarName(key)] = Array.isArray(value) ? JSON.stringify(value) : String(value);
     }
+  }
+  // After the plain config so an explicit override wins, and before the launcher's own values below so an override
+  // can never change the session's identity or stage.
+  for (const [property, value] of Object.entries(overrides)) {
+    env[toEnvVarName(property)] = String(value);
   }
   if (Object.keys(args).length > 0) env.STRATEGY_ARGS_JSON = JSON.stringify(args);
   env.STRATEGY_ID = String(s.strategyId);
@@ -258,6 +300,9 @@ async function handleLaunch(body: string | null) {
     return createResponse(400, { message: 'Missing required fields: sessionId, strategyId, mode, config' });
   }
 
+  const missing = missingStrategyConfig(s.config);
+  if (missing) return createResponse(400, { message: missing });
+
   const rawListings = s.config['listings'];
   const listingIds: number[] = Array.isArray(rawListings)
     ? rawListings.map(Number).filter(id => !isNaN(id))
@@ -284,6 +329,26 @@ async function handleLaunch(body: string | null) {
     return createResponse(400, { message: `${instanceType} is too small to isolate cores; use latency.profile=standard` });
   }
 
+  const orchestratorVersion = s.orchestratorVersion || await resolveLatestOrchestratorVersion();
+
+  const overridden = overrideKeys(s.config);
+  if (overridden.length > 0) {
+    let known: OrchestratorProperties;
+    try {
+      known = await loadOrchestratorProperties(orchestratorVersion);
+    } catch {
+      return createResponse(400, {
+        message: 'Orchestrator overrides need the published property list, which is not available yet; launch without overrides or deploy gnome-orchestrator first',
+      });
+    }
+    const unknown = overridden.filter((k) => !(k in known.properties));
+    if (unknown.length > 0) {
+      return createResponse(400, {
+        message: `Unknown orchestrator properties (not in orchestrator ${known.version}): ${unknown.join(', ')}`,
+      });
+    }
+  }
+
   const region = s.region ?? await resolveRegion(listingIds);
   const network = await discoverNetworkConfig(region);
   const subnet = s.availabilityZone
@@ -296,7 +361,6 @@ async function handleLaunch(body: string | null) {
   }
 
   const isPython = String(s.config['strategy.type'] ?? '') === 'python';
-  const orchestratorVersion = s.orchestratorVersion || await resolveLatestOrchestratorVersion();
   // Java sessions need gnomepy too: the instance reads the JVM flags from it, so both strategy types launch the
   // JVM identically.
   const gnomepyVersion = s.gnomepyVersion || await resolveLatestGnomepyVersion();
@@ -381,13 +445,39 @@ async function handleStop(event: APIGatewayProxyEvent) {
   const body = event.body;
   if (!body) return createResponse(400, { message: 'Missing body' });
 
-  const { sessionId, stopGraceMs } = JSON.parse(body) as { sessionId: string; stopGraceMs?: number };
+  const { sessionId, stopGraceMs, actor: requestedActor } = JSON.parse(body) as {
+    sessionId: string;
+    stopGraceMs?: number;
+    actor?: unknown;
+  };
+  // A person's identity comes only from their Cognito token, never the body, so nobody can stop as someone else.
+  // Only API-key callers (services) have no token, and they say who they are in `actor`.
+  const claimsEmail: string | undefined = event.requestContext?.authorizer?.claims?.email;
+  const actor = claimsEmail
+    ?? (typeof requestedActor === 'string' && requestedActor.trim() ? requestedActor.trim() : UNKNOWN_ACTOR);
 
   const sessions = await registryFetch('/strategy-sessions', 'GET', undefined, { sessionId });
   if (!sessions?.length) {
     return createResponse(404, { message: `Session not found: ${sessionId}` });
   }
   const session = sessions[0];
+
+  // STOPPING goes on before the kill, so a stop's kill never sits on a session that still reads as live: anything
+  // watching kill switches (the controller's halt alerts) can tell a routine stop from a halt by status alone. A
+  // retry of a stop that died part-way finds the session already STOPPING and carries on.
+  const stopping = await registryRequest('/strategy-sessions', 'PATCH', {
+    status: 'STOPPING',
+    expectedStatus: [...ACTIVE_STATUSES, 'STOPPING'],
+  }, { sessionId });
+  if (stopping.status === 409) {
+    // Already STOPPED or FAILED. Its kill may have been released when the instance terminated, and a fresh one
+    // would then never be released, so only make sure the instance is gone.
+    await terminateInstance(session);
+    return createResponse(409, stopping.body);
+  }
+  if (stopping.status !== 200) {
+    throw new Error(`Registry PATCH /strategy-sessions failed (${stopping.status}): ${JSON.stringify(stopping.body)}`);
+  }
 
   // Kill first so the OMS stops trading and cancels resting orders while the instance is still alive to do it;
   // terminating outright would leave whatever was resting on the venue. This lambda runs outside the VPC with
@@ -398,7 +488,7 @@ async function handleStop(event: APIGatewayProxyEvent) {
     await registryFetch('/risk/halts', 'POST', {
       sessionId,
       reason: STOP_KILL_REASON,
-      actor: event.requestContext?.authorizer?.claims?.email ?? UNKNOWN_ACTOR,
+      actor,
     });
     killed = true;
   } catch (error) {
@@ -413,22 +503,27 @@ async function handleStop(event: APIGatewayProxyEvent) {
 
   // STOPPED is written before terminating, so the termination event that follows finds the session already
   // terminal and leaves it alone instead of marking it FAILED.
+  // A 409 here means the session monitor already moved it on (the instance died mid-stop), which is fine.
   const stopped = await registryRequest('/strategy-sessions', 'PATCH', {
     status: 'STOPPED',
     stoppedAt: new Date().toISOString(),
-    expectedStatus: ACTIVE_STATUSES,
+    expectedStatus: ['STOPPING'],
   }, { sessionId });
   if (stopped.status !== 200 && stopped.status !== 409) {
     throw new Error(`Registry PATCH /strategy-sessions failed (${stopped.status}): ${JSON.stringify(stopped.body)}`);
   }
 
+  await terminateInstance(session);
+
+  return createResponse(stopped.status, stopped.body);
+}
+
+async function terminateInstance(session: { instance_id?: string | null; launch_region?: string | null }) {
   if (session.instance_id && session.launch_region) {
     await new EC2Client({ region: session.launch_region }).send(new TerminateInstancesCommand({
       InstanceIds: [session.instance_id],
     }));
   }
-
-  return createResponse(stopped.status, stopped.body);
 }
 
 async function handleLogs(queryParams: Record<string, string> | null) {
@@ -474,6 +569,13 @@ export const handler = async (event: APIGatewayProxyEvent) => {
     }
     if (path.endsWith('/stop') && event.httpMethod === 'POST') {
       return await handleStop(event);
+    }
+    if (path.endsWith('/orchestrator/properties') && event.httpMethod === 'GET') {
+      try {
+        return createResponse(200, await loadOrchestratorProperties(event.queryStringParameters?.version || undefined));
+      } catch {
+        return createResponse(404, { message: 'No orchestrator property list has been published yet' });
+      }
     }
     if (path.endsWith('/logs') && event.httpMethod === 'GET') {
       return await handleLogs(event.queryStringParameters as Record<string, string> | null);

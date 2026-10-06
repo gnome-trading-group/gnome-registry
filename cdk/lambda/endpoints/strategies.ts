@@ -4,18 +4,18 @@ import { ResourceHandler } from './base';
 interface ICreateStrategy {
   name: string;
   description?: string;
-  status?: number;
+  archived?: boolean;
   parameters?: Record<string, unknown>;
 }
 
 interface IUpdateStrategy {
   name?: string;
   description?: string;
-  status?: number;
+  archived?: boolean;
   parameters?: Record<string, unknown>;
 }
 
-class StrategyHandler extends ResourceHandler {
+export class StrategyHandler extends ResourceHandler {
   generateSelectQuery(params: APIGatewayProxyEventQueryStringParameters | null): string {
     let query = 'SELECT * FROM strategy.strategy WHERE 1=1';
     if (params?.strategyId) {
@@ -24,8 +24,10 @@ class StrategyHandler extends ResourceHandler {
     if (params?.name) {
       query += ` AND name='${params.name}'`;
     }
-    if (params?.status != null) {
-      query += ` AND status=${params.status}`;
+    // Lower-cased because Python clients send booleans as "True"/"False".
+    const archived = params?.archived?.toLowerCase();
+    if (archived === 'true' || archived === 'false') {
+      query += ` AND archived=${archived}`;
     }
     return query;
   }
@@ -33,11 +35,11 @@ class StrategyHandler extends ResourceHandler {
   generateInsertQuery(body: string): string {
     const s = JSON.parse(body) as ICreateStrategy;
     const description = s.description != null ? `'${s.description}'` : 'null';
-    const status = s.status != null ? s.status : 0;
     const parameters = s.parameters != null ? `'${JSON.stringify(s.parameters)}'` : 'null';
+    const archived = s.archived === true;
     return `
-      INSERT INTO strategy.strategy (name, description, status, parameters)
-      VALUES ('${s.name}', ${description}, ${status}, ${parameters})
+      INSERT INTO strategy.strategy (name, description, archived, parameters)
+      VALUES ('${s.name}', ${description}, ${archived}, ${parameters})
       RETURNING *;
     `;
   }
@@ -56,7 +58,7 @@ class StrategyHandler extends ResourceHandler {
     const updates: string[] = [];
     if (s.name != null) updates.push(`name='${s.name}'`);
     if (s.description != null) updates.push(`description='${s.description}'`);
-    if (s.status != null) updates.push(`status=${s.status}`);
+    if (typeof s.archived === 'boolean') updates.push(`archived=${s.archived}`);
     if (s.parameters != null) updates.push(`parameters='${JSON.stringify(s.parameters)}'`);
     updates.push(`date_modified=NOW()`);
     return `

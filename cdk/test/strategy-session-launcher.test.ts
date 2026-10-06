@@ -62,6 +62,8 @@ const launcher = require('../lambda/endpoints/strategy-session-launcher');
 let haltFails = false;
 let haltBodies: any[] = [];
 let patchBodies: any[] = [];
+// Statuses for successive PATCHes; once exhausted, patchStatus applies.
+let patchStatusQueue: number[] = [];
 let postBodies: any[] = [];
 let sessionRow: any;
 let patchStatus = 200;
@@ -115,6 +117,7 @@ beforeEach(() => {
   postBodies = [];
   sleeps = [];
   patchStatus = 200;
+  patchStatusQueue = [];
   runInstancesError = null;
   sessionRow = { session_id: 's1', strategy_id: 7, instance_id: 'i-123', launch_region: 'eu-west-1' };
   Object.assign(ssmParams, {
@@ -141,7 +144,7 @@ beforeEach(() => {
       return jsonResponse({ session_id: 'session-0001', status: 'SUBMITTED' });
     }
     patchBodies.push(JSON.parse(init.body));
-    return jsonResponse({ session_id: 's1', status: 'STOPPED' }, patchStatus);
+    return jsonResponse({ session_id: 's1', status: 'STOPPED' }, patchStatusQueue.shift() ?? patchStatus);
   });
   jest.spyOn(global, 'setTimeout').mockImplementation(((fn: () => void, ms: number) => {
     sleeps.push(ms);
@@ -303,19 +306,21 @@ describe('POST /strategy-sessions/launch', () => {
 });
 
 describe('POST /strategy-sessions/stop', () => {
-  it('kills the session, waits, marks it STOPPED, then terminates the instance', async () => {
+  it('marks it STOPPING, kills the session, waits, marks it STOPPED, then terminates the instance', async () => {
     const response = await launcher.handler(apiEvent('/strategy-sessions/stop', { sessionId: 's1' }, 'alice@example.com'));
 
     expect(response.statusCode).toBe(200);
     expect(events).toEqual([
       'GET /strategy-sessions',
+      'PATCH /strategy-sessions',
       'POST /risk/halts',
       'sleep',
       'PATCH /strategy-sessions',
       'TerminateInstances',
     ]);
     expect(haltBodies).toEqual([{ sessionId: 's1', reason: 'session stop', actor: 'alice@example.com' }]);
-    expect(patchBodies[0]).toMatchObject({ status: 'STOPPED', expectedStatus: ['SUBMITTED', 'STARTING', 'RUNNING'] });
+    expect(patchBodies[0]).toEqual({ status: 'STOPPING', expectedStatus: ['SUBMITTED', 'STARTING', 'RUNNING', 'STOPPING'] });
+    expect(patchBodies[1]).toMatchObject({ status: 'STOPPED', expectedStatus: ['STOPPING'] });
     const terminate = ec2Calls.find(c => c.kind === 'TerminateInstances')!;
     expect(terminate.input).toEqual({ InstanceIds: ['i-123'] });
     expect(terminate.region).toBe('eu-west-1');
@@ -327,6 +332,16 @@ describe('POST /strategy-sessions/stop', () => {
 
     expect(response.statusCode).toBe(200);
     expect(haltBodies).toEqual([{ sessionId: 's1', reason: 'session stop', actor: 'alice@example.com' }]);
+  });
+
+  it('attributes a service stop (API key, no token) to the actor it names', async () => {
+    await launcher.handler(apiEvent('/strategy-sessions/stop', { sessionId: 's1', actor: 'launcher:cs2-prematch' }));
+    expect(haltBodies[0].actor).toBe('launcher:cs2-prematch');
+  });
+
+  it('ignores a body actor when the caller has a Cognito identity', async () => {
+    await launcher.handler(apiEvent('/cognito/strategy-sessions/stop', { sessionId: 's1', actor: 'someone-else' }, 'alice@example.com'));
+    expect(haltBodies[0].actor).toBe('alice@example.com');
   });
 
   it('attributes the kill to unknown without Cognito claims', async () => {
@@ -352,16 +367,40 @@ describe('POST /strategy-sessions/stop', () => {
     const response = await launcher.handler(apiEvent('/strategy-sessions/stop', { sessionId: 's1' }));
 
     expect(response.statusCode).toBe(200);
-    expect(events).toEqual(['GET /strategy-sessions', 'POST /risk/halts', 'PATCH /strategy-sessions', 'TerminateInstances']);
+    expect(events).toEqual([
+      'GET /strategy-sessions', 'PATCH /strategy-sessions', 'POST /risk/halts', 'PATCH /strategy-sessions', 'TerminateInstances',
+    ]);
   });
 
-  it('still terminates a session that had already ended', async () => {
+  it('terminates a session that had already ended without killing it again', async () => {
     patchStatus = 409;
 
     const response = await launcher.handler(apiEvent('/strategy-sessions/stop', { sessionId: 's1' }));
 
     expect(response.statusCode).toBe(409);
+    expect(events).toEqual(['GET /strategy-sessions', 'PATCH /strategy-sessions', 'TerminateInstances']);
+    expect(haltBodies).toEqual([]);
+  });
+
+  it('still terminates when the monitor finished the stop first', async () => {
+    patchStatusQueue = [200, 409];
+
+    const response = await launcher.handler(apiEvent('/strategy-sessions/stop', { sessionId: 's1' }));
+
+    expect(response.statusCode).toBe(409);
+    expect(events).toContain('POST /risk/halts');
     expect(events).toContain('TerminateInstances');
+  });
+
+  it('fails without killing when the session cannot be marked STOPPING', async () => {
+    patchStatus = 500;
+    jest.spyOn(console, 'error').mockImplementation(() => undefined);
+
+    const response = await launcher.handler(apiEvent('/strategy-sessions/stop', { sessionId: 's1' }));
+
+    expect(response.statusCode).toBe(500);
+    expect(haltBodies).toEqual([]);
+    expect(events).not.toContain('TerminateInstances');
   });
 
   it('skips the wait and termination when the instance never launched', async () => {
@@ -383,5 +422,107 @@ describe('POST /strategy-sessions/stop', () => {
     expect(response.statusCode).toBe(404);
     expect(events).toHaveLength(1);
     expect(ec2Calls).toHaveLength(0);
+  });
+});
+
+describe('launch config checks', () => {
+  it('rejects a session without strategy.type, before anything is launched', async () => {
+    const body = launchBody();
+    delete (body.config as Record<string, unknown>)['strategy.type'];
+    const response = await launcher.handler(apiEvent('/strategy-sessions/launch', body));
+    expect(response.statusCode).toBe(400);
+    expect(JSON.parse(response.body).message).toContain('strategy.type');
+    expect(ec2Calls).toHaveLength(0);
+  });
+
+  it('rejects a java session without strategy.class', async () => {
+    const body = launchBody();
+    delete (body.config as Record<string, unknown>)['strategy.class'];
+    const response = await launcher.handler(apiEvent('/strategy-sessions/launch', body));
+    expect(response.statusCode).toBe(400);
+    expect(JSON.parse(response.body).message).toContain('strategy.class');
+  });
+
+  it('requires strategy.class for python strategies too (gnomepy\'s runner reads it)', () => {
+    expect(launcher.missingStrategyConfig({ 'strategy.type': 'python' })).toContain('strategy.class');
+    expect(launcher.missingStrategyConfig({ 'strategy.type': 'python', 'strategy.class': 'mm:MarketMaker' })).toBeNull();
+  });
+});
+
+describe('orchestrator overrides', () => {
+  const props = (version: string, keys: string[]) =>
+    JSON.stringify({ version, properties: Object.fromEntries(keys.map((k) => [k, 'false'])) });
+
+  beforeEach(() => {
+    for (const key of Object.keys(ssmParams)) {
+      if (key.startsWith('/gnome/orchestrator/properties/')) delete ssmParams[key];
+    }
+  });
+
+  it('turns overrides into the property environment variables, after the plain config', () => {
+    const env = launcher.buildSessionEnvironment(
+      { ...launchBody({}, { 'journal.enabled': 'false', 'overrides.journal.enabled': 'true' }) } as any,
+      { orchestratorVersion: '1.12.2', gnomepyVersion: '2.24.0' },
+    );
+    expect(env.JOURNAL_ENABLED).toBe('true');
+    expect(env.OVERRIDES_JOURNAL_ENABLED).toBeUndefined();
+  });
+
+  it('never lets an override replace the session identity', () => {
+    const env = launcher.buildSessionEnvironment(
+      { ...launchBody({}, { 'overrides.session.id': 'someone-else' }) } as any,
+      { orchestratorVersion: '1.12.2', gnomepyVersion: '2.24.0' },
+    );
+    expect(env.SESSION_ID).toBe('session-0001');
+  });
+
+  it('rejects overrides that are not orchestrator properties', async () => {
+    ssmParams['/gnome/orchestrator/properties/1.12.2'] = props('1.12.2', ['journal.enabled']);
+    const response = await launcher.handler(apiEvent('/strategy-sessions/launch', launchBody({}, { 'overrides.jornal.enabled': 'true' })));
+    expect(response.statusCode).toBe(400);
+    expect(JSON.parse(response.body).message).toContain('jornal.enabled');
+    expect(ec2Calls).toHaveLength(0);
+  });
+
+  it('launches with known overrides', async () => {
+    ssmParams['/gnome/orchestrator/properties/1.12.2'] = props('1.12.2', ['journal.enabled']);
+    const response = await launcher.handler(apiEvent('/strategy-sessions/launch', launchBody({}, { 'overrides.journal.enabled': 'true' })));
+    expect(response.statusCode).toBe(200);
+  });
+
+  it("checks a pinned session against its own version's list, not latest", async () => {
+    ssmParams['/gnome/orchestrator/properties/1.10.0'] = props('1.10.0', ['journal.enabled']);
+    ssmParams['/gnome/orchestrator/properties/latest'] = props('1.12.2', ['journal.enabled', 'risk.stale.after.ms']);
+    const response = await launcher.handler(apiEvent('/strategy-sessions/launch',
+      launchBody({ orchestratorVersion: '1.10.0' }, { 'overrides.risk.stale.after.ms': '5000' })));
+    expect(response.statusCode).toBe(400);
+    expect(JSON.parse(response.body).message).toContain('not in orchestrator 1.10.0');
+  });
+
+  it('falls back to latest for versions published before per-version lists', async () => {
+    ssmParams['/gnome/orchestrator/properties/latest'] = props('1.12.2', ['journal.enabled']);
+    const response = await launcher.handler(apiEvent('/strategy-sessions/launch',
+      launchBody({ orchestratorVersion: '1.9.0' }, { 'overrides.journal.enabled': 'true' })));
+    expect(response.statusCode).toBe(200);
+  });
+
+  it('refuses overrides when no property list has been published', async () => {
+    const response = await launcher.handler(apiEvent('/strategy-sessions/launch', launchBody({}, { 'overrides.journal.enabled': 'true' })));
+    expect(response.statusCode).toBe(400);
+  });
+
+  it('serves the list for a requested version, or latest', async () => {
+    ssmParams['/gnome/orchestrator/properties/1.10.0'] = props('1.10.0', ['journal.enabled']);
+    ssmParams['/gnome/orchestrator/properties/latest'] = props('1.12.2', ['journal.enabled', 'risk.stale.after.ms']);
+    const get = async (version?: string) => {
+      const event = {
+        ...apiEvent('/cognito/orchestrator/properties', {}),
+        httpMethod: 'GET',
+        queryStringParameters: version ? { version } : null,
+      } as unknown as APIGatewayProxyEvent;
+      return JSON.parse((await launcher.handler(event)).body);
+    };
+    expect((await get('1.10.0')).version).toBe('1.10.0');
+    expect((await get()).version).toBe('1.12.2');
   });
 });
