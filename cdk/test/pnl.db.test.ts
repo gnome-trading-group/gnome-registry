@@ -82,4 +82,22 @@ describeDb('PnL derived from the ledger, against Postgres', () => {
       { time: '2026-10-06T11:02:00.000Z', net: '0', total: String(-51 * CENT) },
     ]);
   });
+
+  it('a window reaching back before the session started begins at its start', async () => {
+    await session('old', '2026-10-06T10:00:00Z');
+    await post('old', { fills: [{ source: 'VENUE', listingId: 500, clientOidCounter: 1, cumQtyAfter: 10 * UNIT,
+      side: 0, fillQty: 10 * UNIT, fillPrice: 40 * CENT, fee: 0, eventTimeNs: 1, netQuantityAfter: 10 * UNIT,
+      totalCostAfter: 400 * CENT, realizedPnlAfter: 0, feesAfter: 0, positionVersion: 1 }],
+      marks: [{ listingId: 500, tsMs: Date.parse('2026-10-06T10:30:00Z'), bid: 30 * CENT, ask: 32 * CENT, lastTrade: 0 }] },
+      '2026-10-06T10:01:00Z');
+    await client.query(`UPDATE strategy.session SET status = 'STOPPED' WHERE session_id = 'old'`);
+    await session('new', '2026-10-06T11:00:00Z');
+
+    const series = await sessionSeries(client, 'new', new Date('2026-10-06T09:00:00Z'), new Date('2026-10-06T11:05:00Z'));
+
+    const times = series.map(r => r.snapshot_time).sort();
+    expect(times[0]).toBe('2026-10-06T11:00:00.000Z');
+    // Opens holding the inherited 10, valued at the mark the old session left.
+    expect(series.find(r => r.snapshot_time === times[0])?.total_pnl).toBe(String(-90 * CENT));
+  });
 });

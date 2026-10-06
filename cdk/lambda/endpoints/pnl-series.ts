@@ -25,8 +25,9 @@ export async function sessionSeries(client: PoolClient, sessionId: string, start
     'SELECT strategy_id, mode, started_at, stopped_at FROM strategy.session WHERE session_id = $1',
     [sessionId])).rows[0];
   if (!session) return [];
-  const from: Date = start ?? session.started_at;
-  const to: Date = end ?? session.stopped_at ?? new Date();
+  // Clamped to the session's own life: before it started, an inherited position belonged to earlier sessions.
+  const from = latest(start, session.started_at);
+  const to = earliest(end, session.stopped_at ?? new Date());
   const step = stepMs(from, to);
 
   const listings: number[] = (await client.query(`
@@ -95,6 +96,14 @@ export async function sessionSeries(client: PoolClient, sessionId: string, start
     }
   }
   return rows.sort((a, b) => b.snapshot_time.localeCompare(a.snapshot_time));
+}
+
+function latest(a: Date | undefined, b: Date): Date {
+  return a && a > b ? a : b;
+}
+
+function earliest(a: Date | undefined, b: Date): Date {
+  return a && a < b ? a : b;
 }
 
 function parseTime(value: string | undefined, name: string): Date | undefined {
