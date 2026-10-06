@@ -111,8 +111,17 @@ export class ApiStack extends cdk.Stack {
       this.attachMethods(resourceName, `${resourceName}.ts`, ALL, cognitoMethods);
     }
 
-    this.attachMethods('pnl/snapshots', 'pnl-snapshots.ts', ['GET', 'POST'], ['GET']);
+    // PnL is derived from the ledger's fills and marks; nothing about it is stored.
     this.attachMethods('pnl/latest', 'pnl-latest.ts', ['GET'], ['GET']);
+    this.attachMethods('pnl/series', 'pnl-series.ts', ['GET'], ['GET']);
+
+    // The trading ledger. Running sessions write with the API key; an operator's position adjustments are Cognito
+    // only, so each one is attributed to a person.
+    this.attachMethods('ledger/batch', 'ledger-batch.ts', ['POST']);
+    this.attachMethods('ledger/positions', 'ledger-positions.ts', ['GET'], ['GET']);
+    this.attachMethods('ledger/fills', 'ledger-fills.ts', ['GET'], ['GET']);
+    this.attachMethods('ledger/orders', 'ledger-orders.ts', ['GET'], ['GET']);
+    this.attachMethods('ledger/adjustments', 'ledger-adjustments.ts', [], ['POST']);
 
     // Policy writes are Cognito-only so the audit log attributes every change to a person.
     this.attachMethods('risk/policies', 'risk-policies.ts', ['GET'], ['GET', 'POST', 'DELETE', 'PATCH']);
@@ -246,6 +255,8 @@ export class ApiStack extends cdk.Stack {
     });
     this.props.database.grantConnect(l);
 
-    return new apigw.LambdaIntegration(l);
+    // CloudFormation caps a stack at 500 resources, and each method otherwise adds a second Lambda permission that
+    // only lets the API Gateway console's "Test" button invoke it.
+    return new apigw.LambdaIntegration(l, { allowTestInvoke: false });
   }
 }

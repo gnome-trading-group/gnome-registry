@@ -67,6 +67,7 @@ let patchStatusQueue: number[] = [];
 let postBodies: any[] = [];
 let sessionRow: any;
 let patchStatus = 200;
+let postStatus = 200;
 let sleeps: number[] = [];
 
 function jsonResponse(body: unknown, status = 200) {
@@ -118,6 +119,7 @@ beforeEach(() => {
   sleeps = [];
   patchStatus = 200;
   patchStatusQueue = [];
+  postStatus = 200;
   runInstancesError = null;
   sessionRow = { session_id: 's1', strategy_id: 7, instance_id: 'i-123', launch_region: 'eu-west-1' };
   Object.assign(ssmParams, {
@@ -141,7 +143,9 @@ beforeEach(() => {
     if (method === 'GET') return jsonResponse([sessionRow]);
     if (method === 'POST') {
       postBodies.push(JSON.parse(init.body));
-      return jsonResponse({ session_id: 'session-0001', status: 'SUBMITTED' });
+      return postStatus === 409
+        ? jsonResponse({ message: 'Session other of this strategy is already trading listing 1 in paper', conflictingSessionId: 'other' }, 409)
+        : jsonResponse({ session_id: 'session-0001', status: 'SUBMITTED' }, postStatus);
     }
     patchBodies.push(JSON.parse(init.body));
     return jsonResponse({ session_id: 's1', status: 'STOPPED' }, patchStatusQueue.shift() ?? patchStatus);
@@ -293,6 +297,16 @@ describe('POST /strategy-sessions/launch', () => {
     expect(events).not.toContain('RunInstances');
   });
 
+  it('passes back a listing clash with another session of the strategy, launching nothing', async () => {
+    postStatus = 409;
+
+    const response = await launcher.handler(apiEvent('/strategy-sessions/launch', launchBody()));
+
+    expect(response.statusCode).toBe(409);
+    expect(JSON.parse(response.body).conflictingSessionId).toBe('other');
+    expect(events).not.toContain('RunInstances');
+  });
+
   it('marks the session FAILED and explains a quota rejection', async () => {
     runInstancesError = Object.assign(new Error('You have requested more vCPU capacity'), { name: 'VcpuLimitExceeded' });
 
@@ -306,7 +320,7 @@ describe('POST /strategy-sessions/launch', () => {
 });
 
 describe('POST /strategy-sessions/stop', () => {
-  it('marks it STOPPING, kills the session, waits, marks it STOPPED, then terminates the instance', async () => {
+  it('marks it STOPPING, kills the session, waits, then terminates it, leaving STOPPED to the monitor', async () => {
     const response = await launcher.handler(apiEvent('/strategy-sessions/stop', { sessionId: 's1' }, 'alice@example.com'));
 
     expect(response.statusCode).toBe(200);
@@ -315,12 +329,10 @@ describe('POST /strategy-sessions/stop', () => {
       'PATCH /strategy-sessions',
       'POST /risk/halts',
       'sleep',
-      'PATCH /strategy-sessions',
       'TerminateInstances',
     ]);
     expect(haltBodies).toEqual([{ sessionId: 's1', reason: 'session stop', actor: 'alice@example.com' }]);
-    expect(patchBodies[0]).toEqual({ status: 'STOPPING', expectedStatus: ['SUBMITTED', 'STARTING', 'RUNNING', 'STOPPING'] });
-    expect(patchBodies[1]).toMatchObject({ status: 'STOPPED', expectedStatus: ['STOPPING'] });
+    expect(patchBodies).toEqual([{ status: 'STOPPING', expectedStatus: ['SUBMITTED', 'STARTING', 'RUNNING', 'STOPPING'] }]);
     const terminate = ec2Calls.find(c => c.kind === 'TerminateInstances')!;
     expect(terminate.input).toEqual({ InstanceIds: ['i-123'] });
     expect(terminate.region).toBe('eu-west-1');
@@ -368,7 +380,7 @@ describe('POST /strategy-sessions/stop', () => {
 
     expect(response.statusCode).toBe(200);
     expect(events).toEqual([
-      'GET /strategy-sessions', 'PATCH /strategy-sessions', 'POST /risk/halts', 'PATCH /strategy-sessions', 'TerminateInstances',
+      'GET /strategy-sessions', 'PATCH /strategy-sessions', 'POST /risk/halts', 'TerminateInstances',
     ]);
   });
 
@@ -380,16 +392,6 @@ describe('POST /strategy-sessions/stop', () => {
     expect(response.statusCode).toBe(409);
     expect(events).toEqual(['GET /strategy-sessions', 'PATCH /strategy-sessions', 'TerminateInstances']);
     expect(haltBodies).toEqual([]);
-  });
-
-  it('still terminates when the monitor finished the stop first', async () => {
-    patchStatusQueue = [200, 409];
-
-    const response = await launcher.handler(apiEvent('/strategy-sessions/stop', { sessionId: 's1' }));
-
-    expect(response.statusCode).toBe(409);
-    expect(events).toContain('POST /risk/halts');
-    expect(events).toContain('TerminateInstances');
   });
 
   it('fails without killing when the session cannot be marked STOPPING', async () => {
@@ -410,7 +412,8 @@ describe('POST /strategy-sessions/stop', () => {
 
     expect(sleeps).toEqual([]);
     expect(events).not.toContain('TerminateInstances');
-    expect(events).toContain('PATCH /strategy-sessions');
+    // Nothing is running, so nothing will ever report it terminated: the stop marks it STOPPED itself.
+    expect(patchBodies[patchBodies.length - 1]).toMatchObject({ status: 'STOPPED', expectedStatus: ['STOPPING'] });
   });
 
   it('returns 404 for an unknown session without killing anything', async () => {

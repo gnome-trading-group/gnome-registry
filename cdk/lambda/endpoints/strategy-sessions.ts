@@ -1,5 +1,5 @@
 import { APIGatewayProxyEvent, APIGatewayProxyEventQueryStringParameters } from 'aws-lambda';
-import { ResourceHandler } from './base';
+import { ResourceHandler, withTransaction } from './base';
 
 interface ISession {
   sessionId: string;
@@ -119,6 +119,9 @@ export class StrategySessionHandler extends ResourceHandler {
     return this.createResponse(200, result.rows[0]);
   }
 
+  // The session and its leases go in together: a session that trades a listing holds it from creation until its
+  // process is gone, so a second session of the same strategy and mode can't take it in between. A clash is a 409
+  // naming the session that holds the listing.
   async createOne(body: string | null) {
     if (!body) return this.createResponse(400, { message: 'Missing body' });
 
@@ -126,28 +129,57 @@ export class StrategySessionHandler extends ResourceHandler {
     if (!s.sessionId || !s.strategyId || !s.status || !s.mode || !s.config) {
       return this.createResponse(400, { message: 'Missing required fields: sessionId, strategyId, status, mode, config' });
     }
+    const listings = parseListings(s.config.listings);
+    if (!listings) {
+      return this.createResponse(400, { message: 'config.listings must be a non-empty list of listing ids' });
+    }
 
     const nullable = (v?: string) => (v != null ? `'${v}'` : 'null');
 
-    const result = await this.client.query(`
-      INSERT INTO strategy.session (
-        session_id, strategy_id, status, mode, config, research_commit,
-        instance_id, instance_type, launch_region, availability_zone, orchestrator_version, gnomepy_version
-      )
-      VALUES (
-        '${s.sessionId}', ${s.strategyId}, '${s.status}', '${s.mode}', '${JSON.stringify(s.config)}', ${nullable(s.researchCommit)},
-        ${nullable(s.instanceId)}, ${nullable(s.instanceType)}, ${nullable(s.launchRegion)}, ${nullable(s.availabilityZone)},
-        ${nullable(s.orchestratorVersion)}, ${nullable(s.gnomepyVersion)}
-      )
-      RETURNING *;
-    `);
-
-    if (result.rowCount !== 1) {
-      return this.createResponse(500, { message: `Insert returned ${result.rowCount} rows`, body });
+    try {
+      const row = await withTransaction(this.client, async (client) => {
+        const result = await client.query(`
+          INSERT INTO strategy.session (
+            session_id, strategy_id, status, mode, config, research_commit,
+            instance_id, instance_type, launch_region, availability_zone, orchestrator_version, gnomepy_version
+          )
+          VALUES (
+            '${s.sessionId}', ${s.strategyId}, '${s.status}', '${s.mode}', '${JSON.stringify(s.config)}', ${nullable(s.researchCommit)},
+            ${nullable(s.instanceId)}, ${nullable(s.instanceType)}, ${nullable(s.launchRegion)}, ${nullable(s.availabilityZone)},
+            ${nullable(s.orchestratorVersion)}, ${nullable(s.gnomepyVersion)}
+          )
+          RETURNING *;
+        `);
+        await client.query(
+          `INSERT INTO strategy.session_listing (session_id, strategy_id, mode, listing_id)
+           SELECT $1, $2, $3, unnest($4::int[])`,
+          [s.sessionId, s.strategyId, s.mode, listings]);
+        return result.rows[0];
+      });
+      return this.createResponse(200, row);
+    } catch (error) {
+      if ((error as { constraint?: string })?.constraint === 'idx_session_listing_lease') {
+        const holder = await this.client.query(
+          `SELECT session_id, listing_id FROM strategy.session_listing
+           WHERE strategy_id = $1 AND mode = $2 AND listing_id = ANY($3::int[]) AND active LIMIT 1`,
+          [s.strategyId, s.mode, listings]);
+        const clash = holder.rows[0];
+        return this.createResponse(409, {
+          message: clash
+            ? `Session ${clash.session_id} of this strategy is already trading listing ${clash.listing_id} in ${s.mode}`
+            : 'Another session of this strategy is already trading one of these listings',
+          conflictingSessionId: clash?.session_id,
+        });
+      }
+      throw error;
     }
-
-    return this.createResponse(200, result.rows[0]);
   }
+}
+
+export function parseListings(value: unknown): number[] | null {
+  if (!Array.isArray(value) || value.length === 0) return null;
+  const ids = value.map(Number);
+  return ids.every(id => Number.isInteger(id) && id > 0) ? [...new Set(ids)] : null;
 }
 
 export const handler = async (event: APIGatewayProxyEvent) => {

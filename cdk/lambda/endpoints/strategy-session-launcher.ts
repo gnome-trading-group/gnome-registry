@@ -372,7 +372,9 @@ async function handleLaunch(body: string | null) {
   }
 
   // The row exists before the instance does, so an instance can never be running without a session to stop it.
-  await registryFetch('/strategy-sessions', 'POST', {
+  // A 409 means another session of this strategy already holds one of these listings: passed back as is, so the
+  // caller sees which session.
+  const created = await registryRequest('/strategy-sessions', 'POST', {
     sessionId: s.sessionId,
     strategyId: s.strategyId,
     status: 'SUBMITTED',
@@ -384,6 +386,12 @@ async function handleLaunch(body: string | null) {
     orchestratorVersion,
     gnomepyVersion,
   });
+  if (created.status === 409) {
+    return createResponse(409, created.body);
+  }
+  if (created.status < 200 || created.status >= 300) {
+    throw new Error(`Registry POST /strategy-sessions failed (${created.status}): ${JSON.stringify(created.body)}`);
+  }
 
   const tags = [
     { Key: 'gnome:purpose', Value: INSTANCE_PURPOSE },
@@ -501,9 +509,13 @@ async function handleStop(event: APIGatewayProxyEvent) {
     await sleep(clampStopGraceMs(stopGraceMs));
   }
 
-  // STOPPED is written before terminating, so the termination event that follows finds the session already
-  // terminal and leaves it alone instead of marking it FAILED.
-  // A 409 here means the session monitor already moved it on (the instance died mid-stop), which is fine.
+  // A session with an instance stays STOPPING until the session monitor sees that instance terminated: only then is
+  // the orchestrator (and its final ledger writes) certainly gone, so only then may its listings be released. A
+  // session that never got an instance has nothing to wait for.
+  if (session.instance_id) {
+    await terminateInstance(session);
+    return createResponse(200, { ...session, status: 'STOPPING' });
+  }
   const stopped = await registryRequest('/strategy-sessions', 'PATCH', {
     status: 'STOPPED',
     stoppedAt: new Date().toISOString(),
@@ -512,9 +524,6 @@ async function handleStop(event: APIGatewayProxyEvent) {
   if (stopped.status !== 200 && stopped.status !== 409) {
     throw new Error(`Registry PATCH /strategy-sessions failed (${stopped.status}): ${JSON.stringify(stopped.body)}`);
   }
-
-  await terminateInstance(session);
-
   return createResponse(stopped.status, stopped.body);
 }
 

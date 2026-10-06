@@ -127,4 +127,18 @@ describe('POST /risk/halts upsert', () => {
     expect(sql).not.toMatch(/enabled\s*=\s*false\s*(,|$)/);
     expect(sql).not.toMatch(/SET[^W]*enabled=false/);
   });
+
+  it('halts a strategy on one listing only', async () => {
+    upsertReturns(11);
+    const response = await handler(postEvent({ strategyId: 7, listingId: 500, reason: 'unattributable order' }));
+    expect(response.statusCode).toBe(200);
+    const sql = String(mockQuery.mock.calls[2][0]).replace(/\s+/g, ' ');
+    expect(sql).toContain("SELECT 'KILL_SWITCH', NULL, 7, 500, '{}'::jsonb, true");
+    expect(sql).toContain('session_id IS NULL AND strategy_id=7 AND listing_id=500');
+  });
+
+  it('refuses a listing without a strategy', async () => {
+    expect((await handler(postEvent({ sessionId: 'abc', listingId: 500, reason: 'x' }))).statusCode).toBe(400);
+    expect((await handler(postEvent({ listingId: 500, reason: 'x' }))).statusCode).toBe(400);
+  });
 });

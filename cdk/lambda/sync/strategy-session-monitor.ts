@@ -18,7 +18,13 @@ interface Transition {
 // An instance that goes away mid-stop finishes that stop (STOPPED) rather than failing: a stop was requested.
 export function resolveTransitions(ec2State: string): Transition[] {
   if (ec2State === 'running') return [{ status: 'STARTING', from: ['SUBMITTED'] }];
-  if (ec2State === 'shutting-down' || ec2State === 'terminated') {
+  // A crashed session's process has already exited (its last ledger writes done) before the instance shuts down, so
+  // it can fail as soon as shutdown starts. A stopping session's orchestrator is only told to exit by that shutdown
+  // and still writes its final ledger batch during it, so it stays STOPPING, holding its listings, until terminated.
+  if (ec2State === 'shutting-down') {
+    return [{ status: 'FAILED', from: ['SUBMITTED', 'STARTING', 'RUNNING'] }];
+  }
+  if (ec2State === 'terminated') {
     return [
       { status: 'FAILED', from: ['SUBMITTED', 'STARTING', 'RUNNING'] },
       { status: 'STOPPED', from: ['STOPPING'] },

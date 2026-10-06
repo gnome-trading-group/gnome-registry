@@ -94,6 +94,8 @@ describe('ApiStack auth', () => {
     ['cognito/strategy-sessions/logs', 'GET'],
     ['cognito/listings', 'PATCH'],
     ['cognito/hedge-keywords', 'DELETE'],
+    ['cognito/ledger/adjustments', 'POST'],
+    ['cognito/pnl/series', 'GET'],
   ])('%s %s is reachable with a Cognito token', (path, httpMethod) => {
     const props = method(template, resourceId(template, path), httpMethod);
     expect(props.AuthorizerId).toBeDefined();
@@ -104,7 +106,9 @@ describe('ApiStack auth', () => {
     ['risk/policies/history', 'GET'],
     ['risk/halts', 'POST'],
     ['strategy-sessions/launch', 'POST'],
-    ['pnl/snapshots', 'POST'],
+    ['ledger/batch', 'POST'],
+    ['ledger/positions', 'GET'],
+    ['ledger/orders', 'GET'],
     ['strategy-sessions/stop', 'POST'],
   ])('%s %s stays on the API key for services', (path, httpMethod) => {
     method(template, resourceId(template, path), httpMethod);
@@ -121,9 +125,17 @@ describe('ApiStack auth', () => {
     expect(Object.keys(methods)).toHaveLength(0);
   });
 
+  it('keeps position adjustments Cognito-only, so each is attributed to a person', () => {
+    expect(hasResource(template, 'ledger/adjustments')).toBe(false);
+  });
+
+  it('stays well under the CloudFormation limit of 500 resources per stack', () => {
+    expect(Object.keys(template.toJSON().Resources).length).toBeLessThan(450);
+  });
+
   it.each([
     ['cognito/risk/halts', 'POST'],
-    ['cognito/pnl/snapshots', 'POST'],
+    ['cognito/ledger/batch', 'POST'],
     ['cognito/strategy-sessions', 'PATCH'],
     ['cognito/strategy-sessions', 'POST'],
   ])('keeps service-only %s %s off /cognito', (path, httpMethod) => {

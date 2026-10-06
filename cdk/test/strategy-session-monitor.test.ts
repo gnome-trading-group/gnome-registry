@@ -9,8 +9,10 @@ describe('EC2 state to session status', () => {
     expect(resolveTransitions(state)).toContainEqual({ status: 'FAILED', from: ['SUBMITTED', 'STARTING', 'RUNNING'] });
   });
 
-  it.each(['shutting-down', 'terminated'])('finishes a stop in progress as STOPPED when its instance goes %s', (state) => {
-    expect(resolveTransitions(state)).toContainEqual({ status: 'STOPPED', from: ['STOPPING'] });
+  it('finishes a stop in progress as STOPPED only once its instance has terminated', () => {
+    expect(resolveTransitions('terminated')).toContainEqual({ status: 'STOPPED', from: ['STOPPING'] });
+    // The orchestrator still writes its final ledger batch while the instance shuts down.
+    expect(resolveTransitions('shutting-down').map((t) => t.status)).not.toContain('STOPPED');
   });
 
   it('never fails a session that is stopping', () => {

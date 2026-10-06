@@ -12,7 +12,7 @@ export interface RegistryConfig {
 
 const defaultConfig = {
   slackChannel: '',
-  dbInstanceType: ec2.InstanceType.of(ec2.InstanceClass.T3, ec2.InstanceSize.MICRO),
+  dbInstanceType: ec2.InstanceType.of(ec2.InstanceClass.T4G, ec2.InstanceSize.SMALL),
 };
 
 export const CONFIGS: { [stage in Stage]?: RegistryConfig } = {

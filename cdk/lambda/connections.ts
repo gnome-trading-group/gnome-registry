@@ -2,7 +2,8 @@ import { Pool } from 'pg';
 
 let pool: Pool | null = null;
 
-export async function connectDatabase() {
+// maxConnections only applies to the first call in a container, which creates the pool.
+export async function connectDatabase(maxConnections: number = 10) {
   if (pool) {
     return pool;
   }
@@ -21,7 +22,7 @@ export async function connectDatabase() {
     database: dbname,
     password,
     port: parseInt(port),
-    max: 10,
+    max: maxConnections,
     idleTimeoutMillis: 30000,
     connectionTimeoutMillis: 5000,
   });
