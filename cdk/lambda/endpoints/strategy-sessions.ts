@@ -63,6 +63,9 @@ export class StrategySessionHandler extends ResourceHandler {
     if (params?.instanceId) {
       query += ` AND instance_id='${params.instanceId}'`;
     }
+    if (params?.mode === 'paper' || params?.mode === 'live') {
+      query += ` AND mode='${params.mode}'`;
+    }
     return query;
   }
 

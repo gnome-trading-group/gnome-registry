@@ -13,6 +13,11 @@ describe('strategy session queries', () => {
     expect(handler.generateSelectQuery({ status: 'RUNNING' })).toContain("AND status IN ('RUNNING')");
   });
 
+  it('filters by mode, ignoring anything but paper or live', () => {
+    expect(handler.generateSelectQuery({ mode: 'live' })).toContain("AND mode='live'");
+    expect(handler.generateSelectQuery({ mode: "x' OR 1=1" })).not.toContain('mode=');
+  });
+
   it('guards an update on the expected statuses', () => {
     const query = handler.generateModifyQuery(
       { session_id: 's1' },

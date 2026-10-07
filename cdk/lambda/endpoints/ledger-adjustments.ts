@@ -1,37 +1,119 @@
 import { APIGatewayProxyEvent } from 'aws-lambda';
+import { PoolClient } from 'pg';
 import { getActor, withTransaction } from './base';
 import { connectLedgerDatabase, createResponse, isPositiveInt, parseMode } from './ledger-common';
+import { applyTrade, toBigInt, Trade } from './ledger-math';
 
-// An operator setting what a strategy holds on a listing: correcting a position the ledger can't trust, or booking a
-// market's settlement (setting it to flat). Refused while any session of the strategy holds the listing, so it can
-// never race a running OMS.
+// An operator changing what a strategy holds on a listing, refused while any session of the strategy holds the
+// listing so it can never race a running OMS. Either:
+//   a trade      one made outside any session (closing by hand on the venue), booked as a MANUAL fill: it moves the
+//                position as a fill would and realizes PnL against the average entry
+//   a correction setting the position outright (ADJUSTMENT), for a ledger that was wrong; it realizes nothing, so
+//                any unrealized PnL on what it removes is written off
 interface IAdjustment {
   strategyId: number;
   listingId: number;
   mode: string;
-  netQuantity: string | number;
-  totalCost: string | number;
+  netQuantity?: string | number;
+  totalCost?: string | number;
+  trade?: { side: number; qty: string | number; price: string | number; fee?: string | number };
   reason: string;
 }
 
+type Change =
+  | { kind: 'trade'; trade: Trade }
+  | { kind: 'correction'; netQuantity: bigint; totalCost: bigint };
+
 class ConflictError extends Error {}
 
-function parseAdjustment(body: string): IAdjustment & { mode: 'paper' | 'live' } {
+function scaledInt(name: string, value: unknown): bigint {
+  if (value === undefined || value === null || !/^-?\d+$/.test(String(value))) {
+    throw new Error(`${name} must be an integer in its scaled units`);
+  }
+  return BigInt(String(value));
+}
+
+export function parseAdjustment(body: string) {
   const a = JSON.parse(body) as IAdjustment;
   if (!isPositiveInt(a.strategyId) || !isPositiveInt(a.listingId)) {
     throw new Error('strategyId and listingId must be positive integers');
   }
   const mode = parseMode(a.mode);
   if (!mode) throw new Error('mode is required');
-  for (const [name, value] of [['netQuantity', a.netQuantity], ['totalCost', a.totalCost]] as const) {
-    if (value === undefined || value === null || !/^-?\d+$/.test(String(value))) {
-      throw new Error(`${name} must be an integer in its scaled units`);
-    }
-  }
-  if (BigInt(a.totalCost) < 0n) throw new Error('totalCost must not be negative');
-  if (BigInt(a.netQuantity) === 0n && BigInt(a.totalCost) !== 0n) throw new Error('a flat position has no cost');
   if (typeof a.reason !== 'string' || a.reason.trim().length === 0) throw new Error('reason is required');
-  return { ...a, mode };
+  const isTrade = a.trade !== undefined;
+  if (isTrade === (a.netQuantity !== undefined || a.totalCost !== undefined)) {
+    throw new Error('give either a trade or a netQuantity and totalCost');
+  }
+  let change: Change;
+  if (a.trade) {
+    if (a.trade.side !== 0 && a.trade.side !== 1) throw new Error('trade.side must be 0 (buy) or 1 (sell)');
+    const trade: Trade = {
+      side: a.trade.side,
+      qty: scaledInt('trade.qty', a.trade.qty),
+      price: scaledInt('trade.price', a.trade.price),
+      fee: a.trade.fee === undefined ? 0n : scaledInt('trade.fee', a.trade.fee),
+    };
+    if (trade.qty <= 0n) throw new Error('trade.qty must be positive');
+    if (trade.price < 0n) throw new Error('trade.price must not be negative');
+    change = { kind: 'trade', trade };
+  } else {
+    const netQuantity = scaledInt('netQuantity', a.netQuantity);
+    const totalCost = scaledInt('totalCost', a.totalCost);
+    if (totalCost < 0n) throw new Error('totalCost must not be negative');
+    if (netQuantity === 0n && totalCost !== 0n) throw new Error('a flat position has no cost');
+    change = { kind: 'correction', netQuantity, totalCost };
+  }
+  return { strategyId: a.strategyId, listingId: a.listingId, mode, reason: a.reason, change };
+}
+
+// Applies an adjustment inside the caller's transaction, returning the position after it.
+export async function bookAdjustment(c: PoolClient, adjustment: ReturnType<typeof parseAdjustment>, actor: string) {
+  const held = await c.query(
+    `SELECT session_id FROM strategy.session_listing
+     WHERE strategy_id = $1 AND mode = $2 AND listing_id = $3 AND active`,
+    [adjustment.strategyId, adjustment.mode, adjustment.listingId]);
+  if (held.rowCount && held.rowCount > 0) {
+    throw new ConflictError(`Session ${held.rows[0].session_id} holds this listing; stop it first`);
+  }
+  const current = await c.query(
+    `SELECT net_quantity, total_cost, version FROM ledger.position
+     WHERE strategy_id = $1 AND listing_id = $2 AND mode = $3 FOR UPDATE`,
+    [adjustment.strategyId, adjustment.listingId, adjustment.mode]);
+  const holding = { netQuantity: toBigInt(current.rows[0]?.net_quantity), totalCost: toBigInt(current.rows[0]?.total_cost) };
+  const version = BigInt(current.rows[0]?.version ?? 0) + 1n;
+  const { change } = adjustment;
+  let after: { netQuantity: bigint; totalCost: bigint };
+  if (change.kind === 'trade') {
+    const traded = applyTrade(holding, change.trade);
+    after = traded;
+    await c.query(
+      `INSERT INTO ledger.fill (source, strategy_id, listing_id, mode, side, fill_qty, fill_price, fee,
+         net_quantity_after, total_cost_after, realized_pnl_after, fees_after, position_version, actor, reason)
+       VALUES ('MANUAL', $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $7, $11, $12, $13)`,
+      [adjustment.strategyId, adjustment.listingId, adjustment.mode, change.trade.side,
+        change.trade.qty.toString(), change.trade.price.toString(), change.trade.fee.toString(),
+        traded.netQuantity.toString(), traded.totalCost.toString(), traded.realized.toString(),
+        version.toString(), actor, adjustment.reason]);
+  } else {
+    after = change;
+    await c.query(
+      `INSERT INTO ledger.fill (source, strategy_id, listing_id, mode, net_quantity_after, total_cost_after,
+         position_version, actor, reason)
+       VALUES ('ADJUSTMENT', $1, $2, $3, $4, $5, $6, $7, $8)`,
+      [adjustment.strategyId, adjustment.listingId, adjustment.mode, change.netQuantity.toString(),
+        change.totalCost.toString(), version.toString(), actor, adjustment.reason]);
+  }
+  const result = await c.query(
+    `INSERT INTO ledger.position (strategy_id, listing_id, mode, net_quantity, total_cost, version, needs_review)
+     VALUES ($1, $2, $3, $4, $5, $6, FALSE)
+     ON CONFLICT (strategy_id, listing_id, mode) DO UPDATE SET net_quantity = EXCLUDED.net_quantity,
+       total_cost = EXCLUDED.total_cost, version = EXCLUDED.version, session_id = NULL, needs_review = FALSE,
+       updated_at = NOW()
+     RETURNING *`,
+    [adjustment.strategyId, adjustment.listingId, adjustment.mode, after.netQuantity.toString(),
+      after.totalCost.toString(), version.toString()]);
+  return result.rows[0];
 }
 
 export const handler = async (event: APIGatewayProxyEvent) => {
@@ -47,35 +129,7 @@ export const handler = async (event: APIGatewayProxyEvent) => {
   const pool = await connectLedgerDatabase();
   const client = await pool.connect();
   try {
-    const row = await withTransaction(client, async (c) => {
-      const held = await c.query(
-        `SELECT session_id FROM strategy.session_listing
-         WHERE strategy_id = $1 AND mode = $2 AND listing_id = $3 AND active`,
-        [adjustment.strategyId, adjustment.mode, adjustment.listingId]);
-      if (held.rowCount && held.rowCount > 0) {
-        throw new ConflictError(`Session ${held.rows[0].session_id} holds this listing; stop it first`);
-      }
-      const current = await c.query(
-        `SELECT version FROM ledger.position WHERE strategy_id = $1 AND listing_id = $2 AND mode = $3 FOR UPDATE`,
-        [adjustment.strategyId, adjustment.listingId, adjustment.mode]);
-      const version = BigInt(current.rows[0]?.version ?? 0) + 1n;
-      await c.query(
-        `INSERT INTO ledger.fill (source, strategy_id, listing_id, mode, net_quantity_after, total_cost_after,
-           position_version, actor, reason)
-         VALUES ('ADJUSTMENT', $1, $2, $3, $4, $5, $6, $7, $8)`,
-        [adjustment.strategyId, adjustment.listingId, adjustment.mode, String(adjustment.netQuantity),
-          String(adjustment.totalCost), version.toString(), actor, adjustment.reason]);
-      const result = await c.query(
-        `INSERT INTO ledger.position (strategy_id, listing_id, mode, net_quantity, total_cost, version, needs_review)
-         VALUES ($1, $2, $3, $4, $5, $6, FALSE)
-         ON CONFLICT (strategy_id, listing_id, mode) DO UPDATE SET net_quantity = EXCLUDED.net_quantity,
-           total_cost = EXCLUDED.total_cost, version = EXCLUDED.version, session_id = NULL, needs_review = FALSE,
-           updated_at = NOW()
-         RETURNING *`,
-        [adjustment.strategyId, adjustment.listingId, adjustment.mode, String(adjustment.netQuantity),
-          String(adjustment.totalCost), version.toString()]);
-      return result.rows[0];
-    });
+    const row = await withTransaction(client, (c) => bookAdjustment(c, adjustment, actor));
     return createResponse(200, row);
   } catch (error) {
     if (error instanceof ConflictError) return createResponse(409, { message: error.message });

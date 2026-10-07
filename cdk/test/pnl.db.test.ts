@@ -6,6 +6,7 @@ import { series } from '../lambda/endpoints/pnl-series';
 import { summarize } from '../lambda/endpoints/pnl-summary';
 import { marks } from '../lambda/endpoints/ledger-marks';
 import { daily } from '../lambda/endpoints/pnl-daily';
+import { bookAdjustment, parseAdjustment } from '../lambda/endpoints/ledger-adjustments';
 
 const url = process.env.LEDGER_TEST_DB;
 const describeDb = url ? describe : describe.skip;
@@ -183,6 +184,55 @@ describeDb('PnL derived from the ledger, against Postgres', () => {
     expect(s.total).toEqual([cents(144), cents(144), cents(54), cents(54)]);
   });
 
+  async function adjust(at: string, change: Record<string, unknown>) {
+    const adjustment = parseAdjustment(JSON.stringify({ strategyId: 1, listingId: 500, mode: 'paper', reason: 'closed by hand', ...change }));
+    await withTransaction(client, (c) => bookAdjustment(c, adjustment, 'ops@example.com'));
+    await client.query(`UPDATE ledger.fill SET recorded_at = $1 WHERE fill_id = (SELECT MAX(fill_id) FROM ledger.fill)`, [at]);
+  }
+
+  // After the story, new stops holding 6 at 40c with the mark at 55c (unrealized 90c, lifetime 144c).
+  it('a trade booked by hand realizes its PnL: closing at the mark changes the lifetime only by its fee', async () => {
+    await story();
+    await stop('new', '2026-10-06T13:00:00Z');
+    await expect(adjust('2026-10-06T13:10:00Z', { trade: { side: 1, qty: 6 * UNIT, price: 55 * CENT, fee: CENT } }))
+      .resolves.toBeUndefined();
+    const later = new Date('2026-10-06T14:00:00Z');
+
+    const strategy = await summarize(client, { strategyId: '1', mode: 'paper' }, later) as any;
+    expect([strategy.totals.lifetime, strategy.totals.realized, strategy.totals.unrealized, strategy.totals.fees])
+      .toEqual([cents(143), cents(146), cents(0), cents(3)]);
+    // The trade belongs to no session, so it lands between them: 143 - (49 + 45).
+    expect(strategy.totals.betweenSessions).toBe(cents(49));
+    expect(strategy.openPositions).toBe(0);
+
+    const s = await series(client, {
+      strategyId: '1', mode: 'paper', start: '2026-10-06T13:00:00Z', resolution: String(HALF_HOUR),
+    }, later) as any;
+    const manual = s.events.find((e: any) => e.kind === 'MANUAL');
+    expect([manual.pnlImpact, manual.actor, manual.reason]).toEqual([cents(-1), 'ops@example.com', 'closed by hand']);
+    expect(s.total).toEqual([cents(144), cents(143), cents(143)]);
+
+    const position = (await client.query(`SELECT net_quantity, total_cost, version FROM ledger.position`)).rows[0];
+    expect([position.net_quantity, position.total_cost, position.version]).toEqual(['0', '0', '3']);
+  });
+
+  it('a correction to flat realizes nothing, so it writes the unrealized PnL off', async () => {
+    await story();
+    await stop('new', '2026-10-06T13:00:00Z');
+    await adjust('2026-10-06T13:10:00Z', { netQuantity: 0, totalCost: 0 });
+    const strategy = await summarize(client, { strategyId: '1', mode: 'paper' }, new Date('2026-10-06T14:00:00Z')) as any;
+    expect([strategy.totals.lifetime, strategy.totals.realized]).toEqual([cents(54), cents(56)]);
+  });
+
+  it('refuses a booking while a session holds the listing, or one that mixes a trade with a correction', async () => {
+    await story();
+    await expect(adjust('2026-10-06T13:10:00Z', { trade: { side: 1, qty: UNIT, price: CENT } })).rejects.toThrow(/holds this listing/);
+    expect(() => parseAdjustment(JSON.stringify({ strategyId: 1, listingId: 500, mode: 'paper', reason: 'x',
+      netQuantity: 0, totalCost: 0, trade: { side: 1, qty: UNIT, price: CENT } }))).toThrow(/either a trade/);
+    expect(() => parseAdjustment(JSON.stringify({ strategyId: 1, listingId: 500, mode: 'paper', reason: 'x',
+      trade: { side: 2, qty: UNIT, price: CENT } }))).toThrow(/side/);
+  });
+
   it('a short position gains when the mark falls', async () => {
     await session('short', '2026-10-06T10:00:00Z');
     await mark('2026-10-06T10:00:00Z', 59, 61);
@@ -240,6 +290,9 @@ describeDb('PnL derived from the ledger, against Postgres', () => {
     ]);
     const firm = await daily(client, { mode: 'paper', days: '2' }, now);
     expect(firm.days.map(d => d.pnl)).toEqual(utc.days.map(d => d.pnl));
+    const byStrategy = await daily(client, { mode: 'paper', days: '2', byStrategy: 'true' }, now);
+    expect(byStrategy.strategies?.map(st => [st.strategyId, st.days.map(d => d.pnl)])).toEqual([[1, [cents(0), cents(144)]]]);
+    expect(firm.strategies).toBeUndefined();
     await expect(daily(client, { strategyId: '1' }, now)).rejects.toThrow(/mode/);
   });
 });

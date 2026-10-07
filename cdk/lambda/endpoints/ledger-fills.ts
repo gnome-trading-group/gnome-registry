@@ -8,7 +8,7 @@ import { toMark } from './pnl-state';
 // one order's fills (?orderSessionId=&clientOidCounter=), oldest first, including those a later session recovered
 // from the venue for it. Each fill carries the listing's mark when it traded and its slippage against it: positive
 // when the fill was better than the mark (bought below it, sold above it), in money for the fill's whole quantity.
-const SOURCES = ['VENUE', 'RECOVERY', 'RESET', 'ADJUSTMENT', 'GAP'];
+const SOURCES = ['VENUE', 'RECOVERY', 'RESET', 'ADJUSTMENT', 'MANUAL', 'GAP'];
 // Event times before this are not epoch nanoseconds (rows that never traded carry none).
 const MIN_EPOCH_NS = 1_000_000_000_000_000_000n;
 

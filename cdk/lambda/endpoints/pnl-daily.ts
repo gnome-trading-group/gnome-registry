@@ -6,7 +6,8 @@ import { walkLifetime } from './pnl-walk';
 
 // PnL per day in the viewer's time zone: the change in lifetime PnL from one local midnight to the next (today's up
 // to now). Taken from the same walk as the charts, so the days always add up to the chart's change.
-//   ?strategyId=&mode=&tz=&days=   one strategy; or ?mode=&tz=&days= for every strategy in the mode
+//   ?strategyId=&mode=&tz=&days=   one strategy; or ?mode=&tz=&days= for every strategy in the mode, with each
+//                                  strategy's own days as well when &byStrategy=true
 
 const DEFAULT_DAYS = 30;
 const MAX_DAYS = 366;
@@ -41,14 +42,22 @@ export async function daily(client: PoolClient, params: Record<string, string | 
     mode, strategyId: strategyId ?? null, fromMs: times[0], toMs: now.getTime(), markStepMs: MARK_STEP_MS, times,
     sessionEvents: false,
   });
-  return {
-    timeZone,
-    days: starts.map((s, i) => ({
-      date: s.date,
-      start: s.start.toISOString(),
-      pnl: (walk.total[i + 1] - walk.total[i]).toString(),
-    })),
-  };
+  const changes = (totals: bigint[]) => starts.map((s, i) => ({
+    date: s.date,
+    start: s.start.toISOString(),
+    pnl: (totals[i + 1] - totals[i]).toString(),
+  }));
+  type Days = ReturnType<typeof changes>;
+  const result: { timeZone: string; days: Days; strategies?: { strategyId: number; days: Days }[] } =
+    { timeZone, days: changes(walk.total) };
+  if (strategyId === undefined && params.byStrategy === 'true') {
+    const strategyIds = [...new Set(walk.keys.map(k => k.strategyId))];
+    result.strategies = strategyIds.map(id => ({
+      strategyId: id,
+      days: changes(walk.t.map((_, p) => walk.keys.reduce((sum, key, k) => (key.strategyId === id ? sum + walk.keyTotal[k][p] : sum), 0n))),
+    }));
+  }
+  return result;
 }
 
 export const handler = async (event: APIGatewayProxyEvent) => {

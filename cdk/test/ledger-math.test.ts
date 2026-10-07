@@ -1,4 +1,4 @@
-import { avgEntryPrice, markPrice, pnl } from '../lambda/endpoints/ledger-math';
+import { applyTrade, avgEntryPrice, markPrice, pnl } from '../lambda/endpoints/ledger-math';
 
 const DOLLAR = 1_000_000_000n;
 const CENT = DOLLAR / 100n;
@@ -43,5 +43,38 @@ describe('ledger PnL matches the OMS', () => {
     expect(avgEntryPrice(position(3n * UNIT, DOLLAR))).toBe(333_333_333n);
     expect(pnl(position(-3n * UNIT, DOLLAR), { bid: 0n, ask: 0n, lastTrade: 1n }).unrealizedPnl)
       .toBe(((1n - 333_333_333n) * -3n * UNIT) / UNIT);
+  });
+});
+
+describe('a trade booked by hand moves the position as Position.applyFill does', () => {
+  const held = (netQuantity: bigint, totalCost: bigint) => ({ netQuantity, totalCost });
+  const sell = (qty: bigint, price: bigint) => ({ side: 1 as const, qty, price, fee: 0n });
+  const buy = (qty: bigint, price: bigint) => ({ side: 0 as const, qty, price, fee: 0n });
+
+  it('closing a long realizes the move from its average entry', () => {
+    expect(applyTrade(held(10n * UNIT, 400n * CENT), sell(10n * UNIT, 55n * CENT)))
+      .toEqual({ netQuantity: 0n, totalCost: 0n, realized: 150n * CENT });
+  });
+
+  it('a partial close keeps the rest at its entry', () => {
+    expect(applyTrade(held(10n * UNIT, 400n * CENT), sell(4n * UNIT, 30n * CENT)))
+      .toEqual({ netQuantity: 6n * UNIT, totalCost: 240n * CENT, realized: -40n * CENT });
+  });
+
+  it('closing a short gains when bought back lower', () => {
+    expect(applyTrade(held(-5n * UNIT, 300n * CENT), buy(5n * UNIT, 50n * CENT)))
+      .toEqual({ netQuantity: 0n, totalCost: 0n, realized: 50n * CENT });
+  });
+
+  it('a trade past flat closes the position and opens the rest at its price', () => {
+    expect(applyTrade(held(2n * UNIT, 80n * CENT), sell(5n * UNIT, 50n * CENT)))
+      .toEqual({ netQuantity: -3n * UNIT, totalCost: 150n * CENT, realized: 20n * CENT });
+  });
+
+  it('adding to a position, or trading from flat, realizes nothing', () => {
+    expect(applyTrade(held(2n * UNIT, 80n * CENT), buy(1n * UNIT, 50n * CENT)))
+      .toEqual({ netQuantity: 3n * UNIT, totalCost: 130n * CENT, realized: 0n });
+    expect(applyTrade(held(0n, 0n), sell(UNIT / 2n, 62_000n * DOLLAR)))
+      .toEqual({ netQuantity: -UNIT / 2n, totalCost: 31_000n * DOLLAR, realized: 0n });
   });
 });

@@ -184,9 +184,12 @@ export async function walkLifetime(client: PoolClient, options: LifetimeWalkOpti
         realized += after.realized - prior.realized;
         fees += after.fees - prior.fees;
         sessionTotals.set(sessionKey, after);
+      } else if (fill.source === 'MANUAL') {
+        realized += toBigInt(fill.realized_pnl_after);
+        fees += toBigInt(fill.fees_after);
       }
       position.set(keyOf(key.strategyId, key.listingId), fillPosition(fill, realized, fees));
-      if (fill.source === 'RESET' || fill.source === 'ADJUSTMENT') {
+      if (fill.source === 'RESET' || fill.source === 'ADJUSTMENT' || fill.source === 'MANUAL') {
         walk.events.push({
           time: fill.recorded_at.toISOString(), kind: fill.source, sessionId: fill.session_id,
           listingId: fill.listing_id, pnlImpact: (valued(key).total - before).toString(),

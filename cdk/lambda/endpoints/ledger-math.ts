@@ -59,3 +59,31 @@ export function toBigInt(value: unknown): bigint {
   if (value === null || value === undefined || value === '') return 0n;
   return BigInt(value as string | number);
 }
+
+// Position.applyFill: a trade of qty at price (side 0 buys, 1 sells) applied to a position. Closing realizes the
+// difference from the average entry; a trade that flips the position opens the remainder at the trade's price.
+export interface Trade {
+  side: 0 | 1;
+  qty: bigint;
+  price: bigint;
+  fee: bigint;
+}
+
+export function applyTrade(position: { netQuantity: bigint; totalCost: bigint }, trade: Trade): {
+  netQuantity: bigint; totalCost: bigint; realized: bigint;
+} {
+  const signed = trade.side === 0 ? trade.qty : -trade.qty;
+  const net = position.netQuantity;
+  if (net === 0n) return { netQuantity: signed, totalCost: notional(trade.price, trade.qty), realized: 0n };
+  if ((net > 0n) === (signed > 0n)) {
+    return { netQuantity: net + signed, totalCost: position.totalCost + notional(trade.price, trade.qty), realized: 0n };
+  }
+  const closed = abs(net) < trade.qty ? abs(net) : trade.qty;
+  const entry = avgEntryPrice({ ...position, realizedPnl: 0n, totalFees: 0n });
+  const realized = net > 0n ? notional(trade.price - entry, closed) : notional(entry - trade.price, closed);
+  const after = net + signed;
+  const totalCost = after === 0n ? 0n
+    : (after > 0n) !== (net > 0n) ? notional(trade.price, abs(after))
+    : notional(entry, abs(after));
+  return { netQuantity: after, totalCost, realized };
+}
