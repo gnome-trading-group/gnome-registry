@@ -259,4 +259,19 @@ describeDb('ledger batch against Postgres', () => {
     expect((await list('OPEN')).map(r => r.client_oid_counter)).toEqual(['2']);
     expect(await list('ANY')).toHaveLength(2);
   });
+
+  it('reads one order\'s fills, oldest first, with those a later session recovered for it', async () => {
+    await session('old', [], 'STOPPED');
+    await client.query(`INSERT INTO ledger.fill (source, session_id, strategy_id, listing_id, mode, client_oid_counter,
+        cum_qty_after, fill_qty, fill_price, net_quantity_after, total_cost_after, position_version)
+      VALUES ('VENUE', 'old', 1, 500, 'paper', 3, 1000000, 1000000, 400000000, 1000000, 400000000, 1),
+             ('VENUE', 'old', 1, 500, 'paper', 4, 1000000, 1000000, 400000000, 2000000, 800000000, 2)`);
+    await post('s1', { fills: [fill(3, 3_000_000, 4_000_000, 3, { source: 'RECOVERY', originSessionId: 'old', fillQty: 2_000_000 })] });
+    const rows = (await client.query(buildFillsQuery({ orderSessionId: 'old', clientOidCounter: '3' }))).rows;
+    expect(rows.map(r => [r.source, r.session_id, r.cum_qty_after])).toEqual([
+      ['VENUE', 'old', '1000000'],
+      ['RECOVERY', 's1', '3000000'],
+    ]);
+    expect(() => buildFillsQuery({ orderSessionId: 'old' })).toThrow(/clientOidCounter/);
+  });
 });
