@@ -1,17 +1,21 @@
 import { APIGatewayProxyEvent } from 'aws-lambda';
 import { PoolClient } from 'pg';
-import { connectLedgerDatabase, createResponse, parseMode, parsePositiveInt } from './ledger-common';
-import { markPrice, notional, PositionState } from './ledger-math';
-import { lifetimePnl } from './pnl-math';
-import { ListingInfo, loadListingInfo, loadStrategyState, StrategyListingState } from './pnl-state';
+import { connectLedgerDatabase, createResponse, isSessionId, parseMode, parsePositiveInt } from './ledger-common';
+import { avgEntryPrice, MarkInputs, markPrice, notional, pnl, PositionState } from './ledger-math';
+import { lifetimePnl, sessionPnl } from './pnl-math';
+import {
+  ListingInfo, loadListingInfo, loadSessionStates, loadStrategyState, SessionListingState, StrategyListingState,
+} from './pnl-state';
 
-// A strategy's prediction-market positions grouped by event, with what each would be worth if each outcome won.
+// A strategy's (or one session's) prediction-market positions grouped by event, with what each would be worth if each
+// outcome won.
 // Contracts settle at $1 if their outcome wins and $0 otherwise, and exactly one outcome of a market wins:
 //   BINARY         two contracts on one market (YES/NO, or two named sides), sharing the market's id
 //   MULTI_OUTCOME  one contract per outcome of the event, the outcomes mutually exclusive
-// A scenario is the lifetime PnL of the strategy's positions on that market if that outcome won. It covers only
-// those contracts: a hedge on another listing (a perp, say) pays the same whoever wins and isn't in it. Positions
-// on listings that aren't event contracts are returned as they are, under `other`.
+// A scenario is the PnL of the positions on that market if that outcome won: the strategy's lifetime PnL, or for
+// ?sessionId= the session's PnL (from $0 at its start, as pnl-math defines it). It covers only those contracts: a
+// hedge on another listing (a perp, say) pays the same whoever wins and isn't in it. Positions on listings that
+// aren't event contracts are returned as they are, under `other`.
 
 const BINARY = 7;
 const MULTI_OUTCOME = 8;
@@ -58,26 +62,66 @@ function settledPnl(position: PositionState, settle: bigint): bigint {
   return position.realizedPnl - position.totalFees + notional(settle, position.netQuantity) - signedCost;
 }
 
-function heldRow(state: StrategyListingState, info: ListingInfo | undefined): Held {
-  const valued = lifetimePnl(state.position, state.mark);
-  const net = state.position.netQuantity;
+// A position and how it's valued: now, and if its contract settled at a price.
+interface Holding {
+  listingId: number;
+  position: PositionState;
+  mark: MarkInputs | null;
+  total: () => bigint;
+  settled: (settle: bigint) => bigint;
+}
+
+function strategyHolding(state: StrategyListingState): Holding {
   return {
     listingId: state.listingId,
+    position: state.position,
+    mark: state.mark,
+    total: () => lifetimePnl(state.position, state.mark).total,
+    settled: settle => settledPnl(state.position, settle),
+  };
+}
+
+// Session PnL leaves out what its inherited inventory was worth when it started.
+function sessionHolding(state: SessionListingState): Holding {
+  const valued = (mark: MarkInputs | null) => sessionPnl({
+    opening: state.opening, openingMark: state.openingMark, current: state.current, mark,
+  });
+  const openingUnrealized = valued(state.mark).openingUnrealized;
+  return {
+    listingId: state.listingId,
+    position: state.current,
+    mark: state.mark,
+    total: () => valued(state.mark).total,
+    settled: settle => settledPnl(state.current, settle) - openingUnrealized,
+  };
+}
+
+function heldRow(holding: Holding, info: ListingInfo | undefined): Held {
+  const unrealized = pnl(holding.position, holding.mark).unrealizedPnl;
+  const net = holding.position.netQuantity;
+  return {
+    listingId: holding.listingId,
     symbol: info?.symbol ?? null,
     exchangeId: info?.exchangeId ?? null,
     tickSize: info?.tickSize ?? null,
     lotSize: info?.lotSize ?? null,
     netQuantity: net.toString(),
-    avgEntryPrice: (net === 0n ? 0n : (state.position.totalCost * 1_000_000n) / (net < 0n ? -net : net)).toString(),
-    markPrice: markPrice(state.mark).toString(),
-    unrealized: money(valued.unrealized),
-    total: money(valued.total),
+    avgEntryPrice: avgEntryPrice(holding.position).toString(),
+    markPrice: markPrice(holding.mark).toString(),
+    unrealized: money(unrealized),
+    total: money(holding.total()),
   };
 }
 
-export async function events(client: PoolClient, params: Record<string, string | undefined>, now: Date) {
+async function loadHoldings(
+  client: PoolClient, params: Record<string, string | undefined>, now: Date,
+): Promise<Holding[]> {
+  if (params.sessionId) {
+    if (!isSessionId(params.sessionId)) throw new BadRequest('sessionId must be a session id');
+    return (await loadSessionStates(client, [params.sessionId], now)).map(sessionHolding);
+  }
   const strategyId = parsePositiveInt(params.strategyId);
-  if (strategyId === undefined || Number.isNaN(strategyId)) throw new BadRequest('strategyId is required');
+  if (strategyId === undefined || Number.isNaN(strategyId)) throw new BadRequest('strategyId or sessionId is required');
   let mode;
   try {
     mode = parseMode(params.mode);
@@ -85,9 +129,12 @@ export async function events(client: PoolClient, params: Record<string, string |
     throw new BadRequest(error instanceof Error ? error.message : String(error));
   }
   if (!mode) throw new BadRequest('mode is required');
+  return (await loadStrategyState(client, mode, strategyId, now)).listings.map(strategyHolding);
+}
 
-  const state = await loadStrategyState(client, mode, strategyId, now);
-  const listingIds = state.listings.map(l => l.listingId);
+export async function events(client: PoolClient, params: Record<string, string | undefined>, now: Date) {
+  const holdings = await loadHoldings(client, params, now);
+  const listingIds = holdings.map(h => h.listingId);
   const traded = (await client.query(`
     SELECT l.listing_id, l.exchange_security_id, l.exchange_security_symbol AS symbol, s.contract_type, ev.event_id
     FROM sm.listing l
@@ -119,8 +166,8 @@ export async function events(client: PoolClient, params: Record<string, string |
     listingId: r.listing_id, marketKey: marketKey(r.contract_type, r.event_id, r.exchange_security_id), symbol: r.symbol,
   }));
 
-  const positions = new Map(state.listings.map(l => [l.listingId, l]));
-  const heldKeys = new Set(state.listings
+  const positions = new Map(holdings.map(h => [h.listingId, h]));
+  const heldKeys = new Set(holdings
     .filter(l => isContract(tradedById.get(l.listingId)))
     .map(l => {
       const t = tradedById.get(l.listingId);
@@ -132,14 +179,10 @@ export async function events(client: PoolClient, params: Record<string, string |
       const outcomes = contracts.filter(c => c.marketKey === key);
       const held = outcomes.filter(c => c.listingId !== null && positions.has(c.listingId));
       const kind = outcomes[0]?.contractType === BINARY ? 'BINARY' : 'MULTI_OUTCOME';
-      const current = held.reduce((sum, c) => {
-        const p = positions.get(c.listingId as number) as StrategyListingState;
-        return sum + lifetimePnl(p.position, p.mark).total;
-      }, 0n);
-      const scenarioFor = (winner: Contract | null) => held.reduce((sum, c) => {
-        const p = positions.get(c.listingId as number) as StrategyListingState;
-        return sum + settledPnl(p.position, winner !== null && c.contractId === winner.contractId ? DOLLAR : 0n);
-      }, 0n);
+      const holding = (c: Contract) => positions.get(c.listingId as number) as Holding;
+      const current = held.reduce((sum, c) => sum + holding(c).total(), 0n);
+      const scenarioFor = (winner: Contract | null) => held.reduce(
+        (sum, c) => sum + holding(c).settled(winner !== null && c.contractId === winner.contractId ? DOLLAR : 0n), 0n);
       // Every outcome the strategy holds gets its own scenario; the rest all pay the same, so they share one.
       const unheld = outcomes.filter(c => !held.includes(c));
       const scenarios = [
@@ -166,7 +209,7 @@ export async function events(client: PoolClient, params: Record<string, string |
           listingId: c.listingId,
           symbol: c.symbol,
           held: c.listingId !== null && positions.has(c.listingId)
-            ? heldRow(positions.get(c.listingId) as StrategyListingState, info.get(c.listingId))
+            ? heldRow(positions.get(c.listingId) as Holding, info.get(c.listingId))
             : null,
         })),
         netExposure,
@@ -179,9 +222,9 @@ export async function events(client: PoolClient, params: Record<string, string |
     return { eventId: e.event_id, title: e.title, expiry: e.expiry, resolved: e.resolved, markets };
   });
 
-  const other = state.listings
-    .filter(l => !isContract(tradedById.get(l.listingId)))
-    .map(l => heldRow(l, info.get(l.listingId)));
+  const other = holdings
+    .filter(h => !isContract(tradedById.get(h.listingId)))
+    .map(h => heldRow(h, info.get(h.listingId)));
   return { asOf: now.toISOString(), events: out, other };
 }
 

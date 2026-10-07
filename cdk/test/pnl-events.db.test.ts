@@ -90,4 +90,22 @@ describeDb('positions by event against Postgres', () => {
     const threeWay = (await events(client, { strategyId: '1', mode: 'paper' }, now)).events[0].markets[0];
     expect(threeWay.scenarios.map(s => [s.label, s.pnl])).toEqual([['A', cents(350)], ['Any of the other 2 outcomes', cents(-150)]]);
   });
+
+  it("values a session's scenarios as session PnL, leaving out what its inherited inventory was worth at the start", async () => {
+    // Session s bought 10 YES at 40c and stopped; session t started at 12:00, inheriting them, valued at 50c then.
+    await hold(500, 10, 400);
+    await client.query(`UPDATE strategy.session SET started_at = '2026-10-07T10:00:00Z', stopped_at = '2026-10-07T11:45:00Z'`);
+    await client.query(`INSERT INTO ledger.mark VALUES (500, '2026-10-07T11:30:00Z', $1, $1, 0), (500, '2026-10-07T12:30:00Z', $2, $2, 0)`,
+      [50 * CENT, 45 * CENT]);
+    await client.query(`INSERT INTO strategy.session (session_id, strategy_id, status, mode, config, started_at)
+      VALUES ('t', 1, 'RUNNING', 'paper', '{}', '2026-10-07T12:00:00Z')`);
+    await client.query(`INSERT INTO strategy.session_listing VALUES ('t', 1, 'paper', 500, true)`);
+
+    const market = (await events(client, { sessionId: 't' }, new Date('2026-10-07T13:00:00Z'))).events[0].markets[0];
+    // Now 45c: session PnL 10 x (45 - 50) = -50c. If Yes: 10 x (100 - 50) = +500c; if No: 10 x (0 - 50) = -500c.
+    expect(market.current).toBe(cents(-50));
+    expect(market.scenarios.map(x => [x.label, x.pnl])).toEqual([['Yes', cents(500)], ['No', cents(-500)]]);
+    expect(market.outcomes[0].held?.total).toBe(cents(-50));
+    await expect(events(client, {}, now)).rejects.toThrow(/strategyId or sessionId/);
+  });
 });
