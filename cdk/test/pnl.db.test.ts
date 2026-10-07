@@ -1,4 +1,5 @@
 import { Pool, PoolClient } from 'pg';
+import { connectExclusive, LOCK_TIMEOUT_MS, release } from './ledger-db';
 import { withTransaction } from '../lambda/endpoints/base';
 import { writeBatch } from '../lambda/endpoints/ledger-batch';
 import { sessionSeries } from '../lambda/endpoints/pnl-series';
@@ -14,13 +15,11 @@ describeDb('PnL derived from the ledger, against Postgres', () => {
   let client: PoolClient;
 
   beforeAll(async () => {
-    pool = new Pool({ connectionString: url });
-    client = await pool.connect();
-  });
+    ({ pool, client } = await connectExclusive(url as string));
+  }, LOCK_TIMEOUT_MS);
 
   afterAll(async () => {
-    client.release();
-    await pool.end();
+    await release(pool, client);
   });
 
   beforeEach(async () => {
@@ -99,5 +98,25 @@ describeDb('PnL derived from the ledger, against Postgres', () => {
     expect(times[0]).toBe('2026-10-06T11:00:00.000Z');
     // Opens holding the inherited 10, valued at the mark the old session left.
     expect(series.find(r => r.snapshot_time === times[0])?.total_pnl).toBe(String(-90 * CENT));
+  });
+
+  it('a session that started flat charts from flat, not from what it chose not to inherit', async () => {
+    await session('old', '2026-10-06T10:00:00Z');
+    await post('old', { fills: [{ source: 'VENUE', listingId: 500, clientOidCounter: 1, cumQtyAfter: 10 * UNIT,
+      side: 0, fillQty: 10 * UNIT, fillPrice: 40 * CENT, fee: 0, eventTimeNs: 1, netQuantityAfter: 10 * UNIT,
+      totalCostAfter: 400 * CENT, realizedPnlAfter: 0, feesAfter: 0, positionVersion: 1 }],
+      marks: [{ listingId: 500, tsMs: Date.parse('2026-10-06T10:30:00Z'), bid: 30 * CENT, ask: 32 * CENT, lastTrade: 0 }] },
+      '2026-10-06T10:01:00Z');
+    await client.query(`UPDATE strategy.session SET status = 'STOPPED' WHERE session_id = 'old'`);
+    await session('new', '2026-10-06T11:00:00Z');
+    // Written once the new session's process has started, a minute after the session itself.
+    await post('new', { fills: [{ source: 'RESET', listingId: 500, eventTimeNs: 1, netQuantityAfter: 0,
+      totalCostAfter: 0, realizedPnlAfter: 0, feesAfter: 0, positionVersion: 2, reason: 'started flat' }] },
+      '2026-10-06T11:01:00Z');
+
+    const series = await sessionSeries(client, 'new', undefined, new Date('2026-10-06T11:05:00Z'));
+
+    const opening = series.find(r => r.snapshot_time === '2026-10-06T11:00:00.000Z');
+    expect([opening?.net_quantity, opening?.total_pnl]).toEqual(['0', '0']);
   });
 });

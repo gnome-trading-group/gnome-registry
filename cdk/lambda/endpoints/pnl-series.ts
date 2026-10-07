@@ -36,13 +36,18 @@ export async function sessionSeries(client: PoolClient, sessionId: string, start
   if (listings.length === 0) return [];
 
   // What each listing held when the window opens: the session's own last fill before it, else what it inherited.
+  // A session that started flat (it wrote a RESET for the listing) inherited nothing, though its RESET is only
+  // written once its process starts, after the session itself.
   const opening = (await client.query(`
     SELECT DISTINCT ON (listing_id) listing_id, net_quantity_after, total_cost_after,
       CASE WHEN session_id = $1 THEN realized_pnl_after ELSE 0 END AS realized_pnl_after,
       CASE WHEN session_id = $1 THEN fees_after ELSE 0 END AS fees_after
-    FROM ledger.fill
+    FROM ledger.fill f
     WHERE listing_id = ANY($2::int[]) AND strategy_id = $3 AND mode = $4 AND source <> 'GAP'
-      AND ((session_id = $1 AND recorded_at < $5) OR (session_id IS DISTINCT FROM $1 AND recorded_at < $6))
+      AND ((session_id = $1 AND recorded_at < $5)
+        OR (session_id IS DISTINCT FROM $1 AND recorded_at < $6 AND NOT EXISTS (
+          SELECT 1 FROM ledger.fill reset
+          WHERE reset.session_id = $1 AND reset.listing_id = f.listing_id AND reset.source = 'RESET')))
     ORDER BY listing_id, fill_id DESC`,
   [sessionId, listings, session.strategy_id, session.mode, from, session.started_at])).rows;
 

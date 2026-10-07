@@ -1,4 +1,5 @@
 import { Pool, PoolClient } from 'pg';
+import { connectExclusive, LOCK_TIMEOUT_MS, release } from './ledger-db';
 import { withTransaction } from '../lambda/endpoints/base';
 import { writeBatch } from '../lambda/endpoints/ledger-batch';
 import { StrategySessionHandler } from '../lambda/endpoints/strategy-sessions';
@@ -15,13 +16,11 @@ describeDb('ledger batch against Postgres', () => {
   let client: PoolClient;
 
   beforeAll(async () => {
-    pool = new Pool({ connectionString: url });
-    client = await pool.connect();
-  });
+    ({ pool, client } = await connectExclusive(url as string));
+  }, LOCK_TIMEOUT_MS);
 
   afterAll(async () => {
-    client.release();
-    await pool.end();
+    await release(pool, client);
   });
 
   beforeEach(async () => {
