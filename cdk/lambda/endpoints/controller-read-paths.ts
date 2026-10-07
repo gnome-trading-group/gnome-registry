@@ -5,6 +5,7 @@ export const CONTROLLER_READ_PATHS = [
   'pnl/daily',
   'pnl/events',
   'monitoring/attention',
+  'monitoring/tables',
   'risk/usage',
   'ledger/fills',
   'ledger/orders/list',

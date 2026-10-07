@@ -2,6 +2,7 @@ import { Pool, PoolClient } from 'pg';
 import { connectExclusive, LOCK_TIMEOUT_MS, release } from './ledger-db';
 import { attention } from '../lambda/endpoints/monitoring-attention';
 import { series } from '../lambda/endpoints/pnl-series';
+import { tableSizes } from '../lambda/endpoints/monitoring-tables';
 
 const url = process.env.LEDGER_TEST_DB;
 const describeDb = url ? describe : describe.skip;
@@ -143,5 +144,18 @@ describeDb('monitoring against Postgres', () => {
     // At 11:00: arb 5 + 10 x 5 = 55c; mm -2 + 10 x -2 = -22c.
     expect(firm.strategies.map((s: any) => [s.strategyId, s.total[1]])).toEqual([[1, String(55 * CENT)], [2, String(-22 * CENT)]]);
     expect(firm.total[1]).toBe(String(33 * CENT));
+  });
+
+  it('lists the largest tables of every schema, biggest first', async () => {
+    await client.query(`INSERT INTO ledger.mark (listing_id, ts, bid, ask, last_trade)
+      SELECT 500, NOW() - make_interval(secs => g), 1, 2, 0 FROM generate_series(1, 2000) g`);
+    await client.query('ANALYZE ledger.mark');
+    const sizes = await tableSizes(client);
+    const mark = sizes.tables.find(t => t.schema === 'ledger' && t.name === 'mark');
+    expect(mark?.rows).toBe('2000');
+    expect(BigInt(mark?.totalBytes ?? 0)).toBeGreaterThan(BigInt(mark?.tableBytes ?? 0));
+    const totals = sizes.tables.map(t => BigInt(t.totalBytes));
+    expect(totals).toEqual([...totals].sort((a, b) => (b > a ? 1 : b < a ? -1 : 0)));
+    expect(BigInt(sizes.databaseBytes)).toBeGreaterThan(0n);
   });
 });

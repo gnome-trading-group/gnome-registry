@@ -5,6 +5,7 @@ import { handler as fills } from './ledger-fills';
 import { handler as marks } from './ledger-marks';
 import { handler as orderList } from './ledger-order-list';
 import { handler as attention } from './monitoring-attention';
+import { handler as tables } from './monitoring-tables';
 import { handler as usage } from './risk-usage';
 import { handler as summary } from './pnl-summary';
 import { handler as series } from './pnl-series';
@@ -20,6 +21,7 @@ const ROUTES: Record<ControllerReadPath, (event: APIGatewayProxyEvent) => Promis
   'pnl/daily': daily,
   'pnl/events': events,
   'monitoring/attention': attention,
+  'monitoring/tables': tables,
   'risk/usage': usage,
   'ledger/fills': fills,
   'ledger/orders/list': orderList,
