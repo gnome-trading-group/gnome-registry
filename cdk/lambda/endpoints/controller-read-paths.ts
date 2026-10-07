@@ -2,6 +2,7 @@
 export const CONTROLLER_READ_PATHS = [
   'pnl/summary',
   'pnl/series',
+  'pnl/daily',
   'monitoring/attention',
   'ledger/fills',
   'ledger/orders/list',

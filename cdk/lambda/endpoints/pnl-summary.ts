@@ -234,9 +234,9 @@ export async function firmSummary(client: PoolClient, mode: string, timeZone: st
   };
 }
 
-class BadRequest extends Error {}
+export class BadRequest extends Error {}
 
-function parseTimeZone(value: string | undefined): string {
+export function parseTimeZone(value: string | undefined): string {
   const timeZone = value || 'UTC';
   try {
     new Intl.DateTimeFormat('en-US', { timeZone });

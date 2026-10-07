@@ -274,4 +274,22 @@ describeDb('ledger batch against Postgres', () => {
     ]);
     expect(() => buildFillsQuery({ orderSessionId: 'old' })).toThrow(/clientOidCounter/);
   });
+
+  it('lists a whole mode across strategies, narrowed by strategy and side', async () => {
+    await client.query(`INSERT INTO strategy.strategy (name) VALUES ('mm')`);
+    await client.query(`INSERT INTO strategy.session (session_id, strategy_id, status, mode, config)
+      VALUES ('s2', 2, 'RUNNING', 'paper', '{}'), ('l1', 1, 'RUNNING', 'live', '{}')`);
+    await client.query(`INSERT INTO strategy.session_listing VALUES ('s2', 2, 'paper', 501, true), ('l1', 1, 'live', 500, true)`);
+    await post('s1', { fills: [fill(1, 1_000_000, 1_000_000, 1)] });
+    await post('s2', { fills: [fill(1, 1_000_000, -1_000_000, 1, { listingId: 501, side: 1 })] });
+    await post('l1', { fills: [fill(1, 1_000_000, 1_000_000, 1)] });
+    const sessions = async (params: Record<string, string>) =>
+      (await client.query(buildFillsQuery(params))).rows.map(r => r.session_id).sort();
+    expect(await sessions({ mode: 'paper' })).toEqual(['s1', 's2']);
+    expect(await sessions({ mode: 'paper', strategyId: '2' })).toEqual(['s2']);
+    expect(await sessions({ mode: 'paper', side: '0' })).toEqual(['s1']);
+    expect(await sessions({ mode: 'live' })).toEqual(['l1']);
+    expect(() => buildFillsQuery({})).toThrow(/mode/);
+    expect(() => buildOrderListQuery({ mode: 'paper', side: '2' })).toThrow(/side/);
+  });
 });

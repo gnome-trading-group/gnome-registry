@@ -1,7 +1,7 @@
 import { isSessionId, parseMode, parsePositiveInt } from './ledger-common';
 
-// Shared paging and filters for the controller's fills and orders lists: one session, or one strategy in one mode,
-// newest first. `before` pages back through older rows; `after` fetches only rows newer than the newest one shown,
+// Shared paging and filters for the controller's fills and orders lists: one session, or every strategy (or one) in
+// one mode, optionally one listing and side and a time range, newest first. `before` pages back through older rows; `after` fetches only rows newer than the newest one shown,
 // for polling. Cursors are the rows' own sequence numbers, so rows arriving meanwhile are never skipped or repeated.
 
 export const DEFAULT_PAGE = 100;
@@ -27,17 +27,20 @@ export function pageFilters(
     if (!isSessionId(params.sessionId)) throw new Error('sessionId must be a session id');
     add(p => `${alias}.session_id = ${p}`, params.sessionId);
   } else {
-    const strategyId = parsePositiveInt(params.strategyId);
     const mode = parseMode(params.mode);
-    if (strategyId === undefined || Number.isNaN(strategyId) || !mode) {
-      throw new Error('Either sessionId, or strategyId and mode, are required');
-    }
-    add(p => `${alias}.strategy_id = ${p}`, strategyId);
+    if (!mode) throw new Error('Either sessionId or mode is required');
     add(p => `${alias}.mode = ${p}`, mode);
+    const strategyId = parsePositiveInt(params.strategyId);
+    if (Number.isNaN(strategyId)) throw new Error('strategyId must be a positive integer');
+    if (strategyId !== undefined) add(p => `${alias}.strategy_id = ${p}`, strategyId);
   }
   const listingId = parsePositiveInt(params.listingId);
   if (Number.isNaN(listingId)) throw new Error('listingId must be a positive integer');
   if (listingId !== undefined) add(p => `${alias}.listing_id = ${p}`, listingId);
+  if (params.side !== undefined) {
+    if (params.side !== '0' && params.side !== '1') throw new Error('side must be 0 (buy) or 1 (sell)');
+    add(p => `${alias}.side = ${p}`, Number(params.side));
+  }
   for (const [name, op] of [['start', '>='], ['end', '<=']] as const) {
     const value = params[name];
     if (!value) continue;

@@ -5,6 +5,7 @@ import { writeBatch } from '../lambda/endpoints/ledger-batch';
 import { series } from '../lambda/endpoints/pnl-series';
 import { summarize } from '../lambda/endpoints/pnl-summary';
 import { marks } from '../lambda/endpoints/ledger-marks';
+import { daily } from '../lambda/endpoints/pnl-daily';
 
 const url = process.env.LEDGER_TEST_DB;
 const describeDb = url ? describe : describe.skip;
@@ -225,5 +226,20 @@ describeDb('PnL derived from the ledger, against Postgres', () => {
     expect(m.mark).toEqual([cents(41), cents(43), '0']);
     expect(m.ask).toEqual([cents(42), cents(44), cents(45)]);
     await expect(marks(client, {}, now)).rejects.toThrow(/listingId/);
+  });
+
+  it('daily PnL is the change between local midnights, so the days add up to the lifetime change', async () => {
+    await story();
+    const utc = await daily(client, { strategyId: '1', mode: 'paper', days: '2' }, now);
+    expect(utc.days.map(d => [d.date, d.pnl])).toEqual([['2026-10-05', cents(0)], ['2026-10-06', cents(144)]]);
+    // In Pago Pago (UTC-11) the old session's day ended at 11:00 UTC on the 6th, with the strategy at 49c.
+    const pagoPago = await daily(client, { strategyId: '1', mode: 'paper', days: '2', tz: 'Pacific/Pago_Pago' }, now);
+    expect(pagoPago.days.map(d => [d.date, d.start, d.pnl])).toEqual([
+      ['2026-10-05', '2026-10-05T11:00:00.000Z', cents(49)],
+      ['2026-10-06', '2026-10-06T11:00:00.000Z', cents(95)],
+    ]);
+    const firm = await daily(client, { mode: 'paper', days: '2' }, now);
+    expect(firm.days.map(d => d.pnl)).toEqual(utc.days.map(d => d.pnl));
+    await expect(daily(client, { strategyId: '1' }, now)).rejects.toThrow(/mode/);
   });
 });
