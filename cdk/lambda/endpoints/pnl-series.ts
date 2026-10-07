@@ -1,49 +1,20 @@
 import { APIGatewayProxyEvent } from 'aws-lambda';
 import { PoolClient } from 'pg';
 import { connectLedgerDatabase, createResponse, isSessionId, parseMode, parsePositiveInt } from './ledger-common';
-import { MarkInputs, pnl, PositionState, toBigInt } from './ledger-math';
-import { lifetimePnl, pickResolution, pointTimes, sessionPnl } from './pnl-math';
-import { FLAT, loadListingInfo, loadSessionStates, loadStrategyState, toMark } from './pnl-state';
+import { MarkInputs, PositionState, toBigInt } from './ledger-math';
+import { pickResolution, pointTimes, sessionPnl } from './pnl-math';
+import { FLAT, loadListingInfo, loadSessionStates } from './pnl-state';
+import { FillRow, fillPosition, inOrder, loadMarkChanges, SeriesEvent, walkLifetime } from './pnl-walk';
 
 // PnL over time for a chart, one point per resolution step (the smallest that keeps the series within a bounded
 // number of points), each the state at that moment: the position the newest fill left, valued at the newest mark.
 //   ?sessionId=            the session's PnL since it started (it starts at $0; see pnl-math)
-//   ?strategyId=&mode=     the strategy's lifetime PnL, continuous across its sessions
+//   ?strategyId=&mode=     the strategy's lifetime PnL, continuous across its sessions (&listingId= for one listing)
+//   ?mode=                 every strategy's: the firm's lifetime PnL, with each strategy's line
 // Optional: start, end (ISO), resolution (ms), since (ms; only points from then on, for appending to a chart).
 // Every listing is carried forward between its own updates, so the totals always equal the sum of the listings.
 
 class BadRequest extends Error {}
-
-interface Change {
-  timeMs: number;
-  listingId: number;
-  mark?: MarkInputs | null;
-  fill?: FillRow;
-}
-
-interface FillRow {
-  fill_id: string;
-  source: string;
-  session_id: string | null;
-  listing_id: number;
-  recorded_at: Date;
-  net_quantity_after: string;
-  total_cost_after: string;
-  realized_pnl_after: string | null;
-  fees_after: string | null;
-  actor: string | null;
-  reason: string | null;
-}
-
-interface SeriesEvent {
-  time: string;
-  kind: string;
-  sessionId: string | null;
-  listingId: number | null;
-  pnlImpact: string | null;
-  actor: string | null;
-  reason: string | null;
-}
 
 interface Window {
   fromMs: number;
@@ -68,35 +39,6 @@ function parseTime(value: string | undefined, name: string): Date | undefined {
   const time = new Date(value);
   if (Number.isNaN(time.getTime())) throw new BadRequest(`${name} must be an ISO time`);
   return time;
-}
-
-// Each listing's last mark at or before the window opens, then the last mark in each step inside it.
-async function loadMarkChanges(client: PoolClient, listingIds: number[], w: Window): Promise<Change[]> {
-  if (listingIds.length === 0) return [];
-  const rows = (await client.query(`
-    (SELECT DISTINCT ON (listing_id) listing_id, ts, bid, ask, last_trade FROM ledger.mark
-     WHERE listing_id = ANY($1::int[]) AND ts <= $2 ORDER BY listing_id, ts DESC)
-    UNION ALL
-    (SELECT DISTINCT ON (listing_id, date_bin($4::interval, ts, 'epoch'::timestamptz))
-       listing_id, ts, bid, ask, last_trade
-     FROM ledger.mark WHERE listing_id = ANY($1::int[]) AND ts > $2 AND ts <= $3
-     ORDER BY listing_id, date_bin($4::interval, ts, 'epoch'::timestamptz), ts DESC)`,
-  [listingIds, new Date(w.fromMs), new Date(w.toMs), `${w.stepMs} milliseconds`])).rows;
-  return rows.map(r => ({ timeMs: Math.max(w.fromMs, r.ts.getTime()), listingId: r.listing_id, mark: toMark(r) }));
-}
-
-function inOrder(changes: Change[]): Change[] {
-  // Fills before marks at the same moment, and fills in the order they were booked.
-  return changes.sort((a, b) => a.timeMs - b.timeMs
-    || Number(Boolean(a.mark !== undefined)) - Number(Boolean(b.mark !== undefined))
-    || Number(BigInt(a.fill?.fill_id ?? 0) - BigInt(b.fill?.fill_id ?? 0)));
-}
-
-function fillPosition(row: FillRow, realized: bigint, fees: bigint): PositionState {
-  return {
-    netQuantity: toBigInt(row.net_quantity_after), totalCost: toBigInt(row.total_cost_after),
-    realizedPnl: realized, totalFees: fees,
-  };
 }
 
 function seriesShape(w: Window, listingIds: number[]) {
@@ -154,7 +96,7 @@ export async function sessionSeries(client: PoolClient, sessionId: string, param
   }
 
   const changes = inOrder([
-    ...await loadMarkChanges(client, listingIds, w),
+    ...await loadMarkChanges(client, listingIds, w.fromMs, w.toMs, w.stepMs),
     ...fills.map(fill => ({ timeMs: fill.recorded_at.getTime(), listingId: fill.listing_id, fill })),
   ]);
   for (const kind of ['SESSION_START', 'SESSION_STOP'] as const) {
@@ -220,110 +162,58 @@ export async function strategySeries(
   const start = parseTime(params.start, 'start') ?? first ?? now;
   const until = parseTime(params.end, 'end');
   const w = window(start, until && until < now ? until : now, params);
-  const from = new Date(w.fromMs);
-
-  const state = await loadStrategyState(client, mode, strategyId, from);
-  const fills = (await client.query(`
-    SELECT * FROM ledger.fill
-    WHERE strategy_id = $1 AND mode = $2 AND recorded_at > $3 AND recorded_at <= $4 ORDER BY fill_id`,
-  [strategyId, mode, from, new Date(w.toMs)])).rows as FillRow[];
-  const listingIds = [...new Set([...state.listings.map(l => l.listingId), ...fills.map(f => f.listing_id)])].sort((a, b) => a - b);
+  const listingId = parsePositiveInt(params.listingId);
+  if (Number.isNaN(listingId)) throw new BadRequest('listingId must be a positive integer');
+  const walk = await walkLifetime(client, {
+    mode, strategyId, listingId, fromMs: w.fromMs, toMs: w.toMs, markStepMs: w.stepMs,
+    times: pointTimes(w.fromMs, w.toMs, w.stepMs), sessionEvents: true,
+  });
+  const listingIds = walk.keys.map(k => k.listingId);
   const series = seriesShape(w, listingIds);
   const info = await loadListingInfo(client, listingIds);
-  series.listings.forEach(l => {
+  series.listings.forEach((l, i) => {
     l.symbol = info.get(l.listingId)?.symbol ?? null;
     l.lotSize = info.get(l.listingId)?.lotSize ?? null;
+    l.total = walk.keyTotal[i].map(String);
+    l.netQuantity = walk.keyNet[i].map(String);
   });
-
-  // Per listing: the position's quantity and cost, and each session's realized PnL and fees so far.
-  const position = new Map<number, PositionState>();
-  const sessionTotals = new Map<string, { realized: bigint; fees: bigint }>();
-  const mark = new Map<number, MarkInputs | null>();
-  for (const l of state.listings) position.set(l.listingId, { ...l.position });
-  for (const s of state.sessions) sessionTotals.set(`${s.sessionId}/${s.listingId}`, { realized: s.realized, fees: s.fees });
-
-  const sessions = (await client.query(`
-    SELECT session_id, started_at, stopped_at FROM strategy.session
-    WHERE strategy_id = $1 AND mode = $2 AND started_at <= $4 AND (stopped_at IS NULL OR stopped_at >= $3)`,
-  [strategyId, mode, from, new Date(w.toMs)])).rows;
-  for (const s of sessions) {
-    for (const [kind, at] of [['SESSION_START', s.started_at], ['SESSION_STOP', s.stopped_at]] as const) {
-      if (at && at.getTime() >= w.fromMs && at.getTime() <= w.toMs) {
-        series.events.push({
-          time: at.toISOString(), kind, sessionId: s.session_id, listingId: null, pnlImpact: null, actor: null,
-          reason: null,
-        });
-      }
-    }
-  }
-
-  const listingTotal = (listingId: number) => {
-    const p = position.get(listingId) ?? FLAT;
-    return lifetimePnl(p, mark.get(listingId) ?? null);
-  };
-
-  const changes = inOrder([
-    ...await loadMarkChanges(client, listingIds, w),
-    ...fills.map(fill => ({ timeMs: fill.recorded_at.getTime(), listingId: fill.listing_id, fill })),
-  ]);
-  let next = 0;
-  for (const t of pointTimes(w.fromMs, w.toMs, w.stepMs)) {
-    for (; next < changes.length && changes[next].timeMs <= t; next++) {
-      const change = changes[next];
-      if (change.mark !== undefined) {
-        mark.set(change.listingId, change.mark);
-        continue;
-      }
-      const fill = change.fill as FillRow;
-      if (fill.source === 'GAP') {
-        series.events.push({
-          time: fill.recorded_at.toISOString(), kind: 'GAP', sessionId: fill.session_id, listingId: fill.listing_id,
-          pnlImpact: null, actor: fill.actor, reason: fill.reason,
-        });
-        continue;
-      }
-      const before = listingTotal(fill.listing_id).total;
-      const held = position.get(fill.listing_id) ?? FLAT;
-      let realized = held.realizedPnl;
-      let fees = held.totalFees;
-      if (fill.session_id !== null) {
-        const key = `${fill.session_id}/${fill.listing_id}`;
-        const prior = sessionTotals.get(key) ?? { realized: 0n, fees: 0n };
-        const now = { realized: toBigInt(fill.realized_pnl_after), fees: toBigInt(fill.fees_after) };
-        realized += now.realized - prior.realized;
-        fees += now.fees - prior.fees;
-        sessionTotals.set(key, now);
-      }
-      position.set(fill.listing_id, fillPosition(fill, realized, fees));
-      if (fill.source === 'RESET' || fill.source === 'ADJUSTMENT') {
-        series.events.push({
-          time: fill.recorded_at.toISOString(), kind: fill.source, sessionId: fill.session_id,
-          listingId: fill.listing_id, pnlImpact: (listingTotal(fill.listing_id).total - before).toString(),
-          actor: fill.actor, reason: fill.reason,
-        });
-      }
-    }
-    let total = 0n;
-    let realized = 0n;
-    let unrealized = 0n;
-    let fees = 0n;
-    listingIds.forEach((listingId, i) => {
-      const p = listingTotal(listingId);
-      total += p.total;
-      realized += p.realized;
-      unrealized += p.unrealized;
-      fees += p.fees;
-      series.listings[i].total.push(p.total.toString());
-      series.listings[i].netQuantity.push((position.get(listingId) ?? FLAT).netQuantity.toString());
-    });
-    series.t.push(t);
-    series.total.push(total.toString());
-    series.realized.push(realized.toString());
-    series.unrealized.push(unrealized.toString());
-    series.fees.push(fees.toString());
-  }
-  series.events.sort((a, b) => a.time.localeCompare(b.time));
+  series.t = walk.t;
+  series.total = walk.total.map(String);
+  series.realized = walk.realized.map(String);
+  series.unrealized = walk.unrealized.map(String);
+  series.fees = walk.fees.map(String);
+  series.events = walk.events;
   return series;
+}
+
+// Every strategy in a mode: the firm's lifetime PnL, and each strategy's own line (for sparklines).
+export async function firmSeries(client: PoolClient, mode: string, params: Record<string, string | undefined>, now: Date) {
+  const first = (await client.query(
+    'SELECT MIN(recorded_at) AS first FROM ledger.fill WHERE mode = $1', [mode])).rows[0].first as Date | null;
+  const start = parseTime(params.start, 'start') ?? first ?? now;
+  const until = parseTime(params.end, 'end');
+  const w = window(start, until && until < now ? until : now, params);
+  const walk = await walkLifetime(client, {
+    mode, strategyId: null, fromMs: w.fromMs, toMs: w.toMs, markStepMs: w.stepMs,
+    times: pointTimes(w.fromMs, w.toMs, w.stepMs), sessionEvents: false,
+  });
+  const strategyIds = [...new Set(walk.keys.map(k => k.strategyId))];
+  return {
+    resolutionMs: w.stepMs,
+    t: walk.t,
+    total: walk.total.map(String),
+    realized: walk.realized.map(String),
+    unrealized: walk.unrealized.map(String),
+    fees: walk.fees.map(String),
+    listings: [],
+    events: walk.events,
+    strategies: strategyIds.map(strategyId => ({
+      strategyId,
+      total: walk.t.map((_, p) => walk.keys
+        .reduce((sum, key, k) => (key.strategyId === strategyId ? sum + walk.keyTotal[k][p] : sum), 0n)
+        .toString()),
+    })),
+  };
 }
 
 export async function series(client: PoolClient, params: Record<string, string | undefined>, now: Date) {
@@ -332,9 +222,7 @@ export async function series(client: PoolClient, params: Record<string, string |
     return sessionSeries(client, params.sessionId, params, now);
   }
   const strategyId = parsePositiveInt(params.strategyId);
-  if (strategyId === undefined || Number.isNaN(strategyId)) {
-    throw new BadRequest('sessionId, or strategyId and mode, are required');
-  }
+  if (Number.isNaN(strategyId)) throw new BadRequest('strategyId must be a positive integer');
   let mode;
   try {
     mode = parseMode(params.mode);
@@ -342,7 +230,9 @@ export async function series(client: PoolClient, params: Record<string, string |
     throw new BadRequest(error instanceof Error ? error.message : String(error));
   }
   if (!mode) throw new BadRequest('mode is required');
-  return strategySeries(client, strategyId, mode, params, now);
+  return strategyId === undefined
+    ? firmSeries(client, mode, params, now)
+    : strategySeries(client, strategyId, mode, params, now);
 }
 
 export const handler = async (event: APIGatewayProxyEvent) => {

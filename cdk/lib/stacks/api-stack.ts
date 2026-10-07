@@ -11,6 +11,7 @@ import * as ssm from 'aws-cdk-lib/aws-ssm';
 import { join } from 'path';
 import { Runtime } from 'aws-cdk-lib/aws-lambda';
 import { Stage } from '@gnome-trading-group/gnome-shared-cdk';
+import { CONTROLLER_READ_PATHS } from '../../lambda/endpoints/controller-read-paths';
 
 interface Props extends cdk.StackProps {
   database: rds.DatabaseInstance;
@@ -111,17 +112,18 @@ export class ApiStack extends cdk.Stack {
       this.attachMethods(resourceName, `${resourceName}.ts`, ALL, cognitoMethods);
     }
 
-    // PnL is derived from the ledger's fills and marks; nothing about it is stored.
-    this.attachMethods('pnl/summary', 'pnl-summary.ts', ['GET'], ['GET']);
-    this.attachMethods('pnl/series', 'pnl-series.ts', ['GET'], ['GET']);
+    // The controller's PnL, ledger and monitoring reads (PnL is derived from the ledger's fills and marks; nothing
+    // about it is stored). One Lambda serves them all, for people only.
+    const controllerReads = this.createIntegration('controller-reads.ts');
+    for (const path of CONTROLLER_READ_PATHS) {
+      this.attachIntegration(path, controllerReads, [], ['GET']);
+    }
 
     // The trading ledger. Running sessions write with the API key; an operator's position adjustments are Cognito
     // only, so each one is attributed to a person.
     this.attachMethods('ledger/batch', 'ledger-batch.ts', ['POST']);
     this.attachMethods('ledger/positions', 'ledger-positions.ts', ['GET'], ['GET']);
-    this.attachMethods('ledger/fills', 'ledger-fills.ts', ['GET'], ['GET']);
     this.attachMethods('ledger/orders', 'ledger-orders.ts', ['GET'], ['GET']);
-    this.attachMethods('ledger/orders/list', 'ledger-order-list.ts', ['GET'], ['GET']);
     this.attachMethods('ledger/adjustments', 'ledger-adjustments.ts', [], ['POST']);
 
     // Policy writes are Cognito-only so the audit log attributes every change to a person.

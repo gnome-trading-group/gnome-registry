@@ -4,6 +4,7 @@ import { withTransaction } from '../lambda/endpoints/base';
 import { writeBatch } from '../lambda/endpoints/ledger-batch';
 import { series } from '../lambda/endpoints/pnl-series';
 import { summarize } from '../lambda/endpoints/pnl-summary';
+import { marks } from '../lambda/endpoints/ledger-marks';
 
 const url = process.env.LEDGER_TEST_DB;
 const describeDb = url ? describe : describe.skip;
@@ -198,5 +199,31 @@ describeDb('PnL derived from the ledger, against Postgres', () => {
     await expect(summarize(client, { mode: 'paper', tz: 'Mars/Olympus' }, now)).rejects.toThrow(/tz/);
     await expect(series(client, { strategyId: '1' }, now)).rejects.toThrow(/mode/);
     expect(await summarize(client, { sessionId: 'nope' }, now)).toBeNull();
+  });
+
+  it('a strategy series for one listing leaves the others out', async () => {
+    await story();
+    await client.query(`INSERT INTO sm.listing (listing_id, exchange_id, security_id) VALUES (501, 1, 1)`);
+    await client.query(`INSERT INTO ledger.fill (source, session_id, strategy_id, listing_id, mode, client_oid_counter,
+        cum_qty_after, net_quantity_after, total_cost_after, realized_pnl_after, fees_after, position_version, recorded_at)
+      VALUES ('VENUE', 'new', 1, 501, 'paper', 2, 1, 0, 0, $1, 0, 1, '2026-10-06T12:50:00Z')`, [3 * CENT]);
+    const params = { strategyId: '1', mode: 'paper', start: '2026-10-06T10:00:00Z', resolution: String(HALF_HOUR) };
+    const all = await series(client, params, now) as any;
+    const one = await series(client, { ...params, listingId: '500' }, now) as any;
+    expect(all.total.at(-1)).toBe(cents(147));
+    expect(one.total.at(-1)).toBe(cents(144));
+    expect(one.listings.map((l: any) => l.listingId)).toEqual([500]);
+  });
+
+  it('price history opens with the price in force, then the last in each step, with the mark derived', async () => {
+    await mark('2026-10-06T10:00:10Z', 40, 42);
+    await mark('2026-10-06T10:00:40Z', 41, 43);
+    await mark('2026-10-06T10:00:50Z', 42, 44);
+    await mark('2026-10-06T10:01:20Z', 0, 45);
+    const m = await marks(client, { listingId: '500', start: '2026-10-06T10:00:30Z', resolution: '60000' }, now);
+    expect(m.t.map(t => new Date(t).toISOString().slice(11, 19))).toEqual(['10:00:30', '10:00:50', '10:01:20']);
+    expect(m.mark).toEqual([cents(41), cents(43), '0']);
+    expect(m.ask).toEqual([cents(42), cents(44), cents(45)]);
+    await expect(marks(client, {}, now)).rejects.toThrow(/listingId/);
   });
 });
