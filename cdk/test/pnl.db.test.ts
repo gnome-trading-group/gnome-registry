@@ -2,17 +2,30 @@ import { Pool, PoolClient } from 'pg';
 import { connectExclusive, LOCK_TIMEOUT_MS, release } from './ledger-db';
 import { withTransaction } from '../lambda/endpoints/base';
 import { writeBatch } from '../lambda/endpoints/ledger-batch';
-import { sessionSeries } from '../lambda/endpoints/pnl-series';
-import { sessionRows, strategyRows } from '../lambda/endpoints/pnl-latest';
+import { series } from '../lambda/endpoints/pnl-series';
+import { summarize } from '../lambda/endpoints/pnl-summary';
 
 const url = process.env.LEDGER_TEST_DB;
 const describeDb = url ? describe : describe.skip;
 const CENT = 10_000_000;
 const UNIT = 1_000_000;
+const HALF_HOUR = 30 * 60 * 1000;
+const cents = (value: number) => String(value * CENT);
 
+// One strategy on one listing, priced in cents:
+//   10:01  session old buys 10 at 40c (fee 1c)
+//   10:30  mark 45c (bid 44, ask 46)
+//   11:00  old stops: its PnL is 10 x (45 - 40) - 1 = 49c
+//   11:30  mark 50c while nothing runs: +50c on the inventory, which belongs to no session
+//   12:00  session new starts, inheriting the 10 at 40c, valued at 50c: opening unrealized 100c
+//   12:30  mark 55c
+//   12:40  new sells 4 at 54c (fee 1c): realizes 4 x 14 = 56c, keeps 6 at 40c
+//   13:00  now: new's PnL = 56 + 6 x 15 - 1 - 100 = 45c, of which carry 10 x (55 - 50) = 50c and trading -5c
+//          (sold 1c under the mark on 4, and the fee). Lifetime = 56 + 90 - 2 = 144c = 49 + 45 + 50 between sessions.
 describeDb('PnL derived from the ledger, against Postgres', () => {
   let pool: Pool;
   let client: PoolClient;
+  const now = new Date('2026-10-06T13:00:00Z');
 
   beforeAll(async () => {
     ({ pool, client } = await connectExclusive(url as string));
@@ -24,99 +37,166 @@ describeDb('PnL derived from the ledger, against Postgres', () => {
 
   beforeEach(async () => {
     await client.query(`TRUNCATE ledger.fill, ledger.position, ledger.order, ledger.mark, strategy.session_listing,
-      risk.policy, risk.policy_history, strategy.session, strategy.strategy, sm.listing, sm.security, sm.exchange
-      RESTART IDENTITY CASCADE`);
+      risk.policy, risk.policy_history, strategy.session, strategy.strategy, sm.listing_spec, sm.listing, sm.security,
+      sm.exchange RESTART IDENTITY CASCADE`);
     await client.query(`INSERT INTO sm.exchange (exchange_id, exchange_name, region, schema_type, exchange_code)
       VALUES (1, 'K', 'us-east-1', 'mbp-10', 'KALSHI')`);
     await client.query(`INSERT INTO sm.security (security_id, symbol, type) VALUES (1, 'X', 0)`);
-    await client.query(`INSERT INTO sm.listing (listing_id, exchange_id, security_id) VALUES (500, 1, 1)`);
+    await client.query(`INSERT INTO sm.listing (listing_id, exchange_id, security_id, exchange_security_symbol)
+      VALUES (500, 1, 1, 'KX-YES')`);
+    await client.query(`INSERT INTO sm.listing_spec (listing_id, tick_size, lot_size) VALUES (500, $1, $2)`,
+      [CENT, UNIT]);
     await client.query(`INSERT INTO strategy.strategy (name) VALUES ('arb')`);
   });
 
-  async function session(id: string, startedAt: string) {
+  async function session(id: string, startedAt: string, stoppedAt: string | null = null) {
     await client.query(`INSERT INTO strategy.session (session_id, strategy_id, status, mode, config, started_at)
       VALUES ($1, 1, 'RUNNING', 'paper', '{}', $2)`, [id, startedAt]);
     await client.query(`INSERT INTO strategy.session_listing VALUES ($1, 1, 'paper', 500, true)`, [id]);
+    if (stoppedAt) await stop(id, stoppedAt);
   }
 
-  async function post(sessionId: string, events: Record<string, unknown>, at: string) {
-    const body = JSON.stringify({ sessionId, ...events });
+  async function stop(id: string, at: string) {
+    await client.query(`UPDATE strategy.session SET status = 'STOPPED', stopped_at = $2 WHERE session_id = $1`, [id, at]);
+  }
+
+  async function fill(sessionId: string, at: string, f: Record<string, unknown>) {
+    const body = JSON.stringify({ sessionId, fills: [{ source: 'VENUE', listingId: 500, eventTimeNs: 1, ...f }] });
     await withTransaction(client, (c) => writeBatch(c, sessionId, body));
-    await client.query(`UPDATE ledger.fill SET recorded_at = $2 WHERE session_id = $1 AND recorded_at > NOW() - INTERVAL '1 minute'`,
-      [sessionId, at]);
+    await client.query(`UPDATE ledger.fill SET recorded_at = $1 WHERE fill_id = (SELECT MAX(fill_id) FROM ledger.fill)`, [at]);
   }
 
-  it('a relaunched session starts from the inventory it inherited, then moves with its fills and marks', async () => {
+  async function mark(at: string, bidCents: number, askCents: number) {
+    await client.query(`INSERT INTO ledger.mark (listing_id, ts, bid, ask, last_trade) VALUES (500, $1, $2, $3, 0)`,
+      [at, bidCents * CENT, askCents * CENT]);
+  }
+
+  async function story() {
     await session('old', '2026-10-06T10:00:00Z');
-    // The old session bought 10 at 40c and realized nothing.
-    await post('old', { fills: [{ source: 'VENUE', listingId: 500, clientOidCounter: 1, cumQtyAfter: 10 * UNIT,
-      side: 0, fillQty: 10 * UNIT, fillPrice: 40 * CENT, fee: 0, eventTimeNs: 1, netQuantityAfter: 10 * UNIT,
-      totalCostAfter: 400 * CENT, realizedPnlAfter: 0, feesAfter: 0, positionVersion: 1 }] }, '2026-10-06T10:01:00Z');
-    await client.query(`UPDATE strategy.session SET status = 'STOPPED' WHERE session_id = 'old'`);
+    await fill('old', '2026-10-06T10:01:00Z', { clientOidCounter: 1, cumQtyAfter: 10 * UNIT, side: 0,
+      fillQty: 10 * UNIT, fillPrice: 40 * CENT, fee: CENT, netQuantityAfter: 10 * UNIT, totalCostAfter: 400 * CENT,
+      realizedPnlAfter: 0, feesAfter: CENT, positionVersion: 1, liquidity: 'MAKER' });
+    await mark('2026-10-06T10:30:00Z', 44, 46);
+    await stop('old', '2026-10-06T11:00:00Z');
+    await mark('2026-10-06T11:30:00Z', 49, 51);
+    await session('new', '2026-10-06T12:00:00Z');
+    await mark('2026-10-06T12:30:00Z', 54, 56);
+    await fill('new', '2026-10-06T12:40:00Z', { clientOidCounter: 1, cumQtyAfter: 4 * UNIT, side: 1,
+      fillQty: 4 * UNIT, fillPrice: 54 * CENT, fee: CENT, netQuantityAfter: 6 * UNIT, totalCostAfter: 240 * CENT,
+      realizedPnlAfter: 56 * CENT, feesAfter: CENT, positionVersion: 2, liquidity: 'TAKER' });
+  }
 
-    await session('new', '2026-10-06T11:00:00Z');
-    await post('new', { marks: [{ listingId: 500, tsMs: Date.parse('2026-10-06T11:00:30Z'), bid: 30 * CENT, ask: 32 * CENT, lastTrade: 0 }] },
-      '2026-10-06T11:00:30Z');
-    // The new session sells the 10 at 35c: realizes -$0.50 and goes flat.
-    await post('new', { fills: [{ source: 'VENUE', listingId: 500, clientOidCounter: 1, cumQtyAfter: 10 * UNIT,
-      side: 1, fillQty: 10 * UNIT, fillPrice: 35 * CENT, fee: CENT, eventTimeNs: 1, netQuantityAfter: 0,
-      totalCostAfter: 0, realizedPnlAfter: -50 * CENT, feesAfter: CENT, positionVersion: 2 }] }, '2026-10-06T11:02:00Z');
+  it('a session that inherited inventory starts at $0 and splits its PnL into carry and trading', async () => {
+    await story();
+    const summary = await summarize(client, { sessionId: 'new' }, now) as any;
+    expect(summary.opening).toBe('INHERITED');
+    expect(summary.totals).toEqual({
+      total: cents(45), realized: cents(56), unrealized: cents(90), fees: cents(1), carry: cents(50),
+      trading: cents(-5), openingUnrealized: cents(100),
+    });
+    const row = summary.listings[0];
+    expect([row.symbol, row.tickSize, row.lotSize]).toEqual(['KX-YES', String(CENT), String(UNIT)]);
+    expect([row.netQuantity, row.markPrice, row.opening.netQuantity, row.opening.markPrice])
+      .toEqual([String(6 * UNIT), cents(55), String(10 * UNIT), cents(50)]);
+    expect(summary.counts.fills).toBe(1);
 
-    const latestNew = await sessionRows(client, 'new');
-    expect(latestNew.map(r => [r.net_quantity, r.realized_pnl, r.total_fees])).toEqual([['0', String(-50 * CENT), String(CENT)]]);
-    const latestOld = await sessionRows(client, 'old');
-    expect(latestOld.map(r => [r.net_quantity, r.realized_pnl])).toEqual([[String(10 * UNIT), '0']]);
-    // The strategy as a whole: flat now, with each session's realized PnL and fees summed.
-    const strategy = await strategyRows(client, 1, ['paper']);
-    expect(strategy.map(r => [r.net_quantity, r.realized_pnl, r.total_fees])).toEqual([['0', String(-50 * CENT), String(CENT)]]);
+    const old = await summarize(client, { sessionId: 'old' }, now) as any;
+    expect(old.opening).toBe('NONE');
+    expect(old.totals.total).toBe(cents(49));
+    expect(old.asOf).toBe('2026-10-06T11:00:00.000Z');
+  });
 
-    const series = await sessionSeries(client, 'new', new Date('2026-10-06T11:00:00Z'), new Date('2026-10-06T11:05:00Z'));
-    const ordered = [...series].reverse().map(r => ({ time: r.snapshot_time, net: r.net_quantity, total: r.total_pnl }));
-    expect(ordered).toEqual([
-      // Opens holding the inherited 10 with no mark yet: valued at entry.
-      { time: '2026-10-06T11:00:00.000Z', net: String(10 * UNIT), total: '0' },
-      // Marked at 31c: -$0.90 unrealized on the inherited position.
-      { time: '2026-10-06T11:00:30.000Z', net: String(10 * UNIT), total: String(-90 * CENT) },
-      // Sold at 35c: -$0.50 realized and $0.01 of fees, flat.
-      { time: '2026-10-06T11:02:00.000Z', net: '0', total: String(-51 * CENT) },
+  it("a strategy's lifetime is its sessions' PnL plus what moved between them; today starts at the zone's midnight", async () => {
+    await story();
+    const utc = await summarize(client, { strategyId: '1', mode: 'paper' }, now) as any;
+    expect(utc.totals).toEqual({
+      lifetime: cents(144), today: cents(144), realized: cents(56), unrealized: cents(90), fees: cents(2),
+      betweenSessions: cents(50),
+    });
+    expect(utc.openPositions).toBe(1);
+    expect(utc.modesWithData).toEqual(['paper']);
+
+    // 13:00 UTC is 02:00 in Pago Pago (UTC-11), whose day began at 11:00 UTC, when the strategy stood at 49c.
+    const pagoPago = await summarize(client, { strategyId: '1', mode: 'paper', tz: 'Pacific/Pago_Pago' }, now) as any;
+    expect(pagoPago.totals.today).toBe(cents(95));
+    expect(pagoPago.scope.dayStart).toBe('2026-10-06T11:00:00.000Z');
+
+    const firm = await summarize(client, { mode: 'paper' }, now) as any;
+    expect(firm.strategies).toEqual([
+      { strategyId: 1, lifetime: cents(144), today: cents(144), unrealized: cents(90), openPositions: 1 },
     ]);
+
+    const page = await summarize(client, { sessionIds: 'new,old' }, now) as any;
+    expect(page.map((s: any) => [s.sessionId, s.opening, s.totals.total, s.fills]))
+      .toEqual([['new', 'INHERITED', cents(45), 1], ['old', 'NONE', cents(49), 1]]);
   });
 
-  it('a window reaching back before the session started begins at its start', async () => {
-    await session('old', '2026-10-06T10:00:00Z');
-    await post('old', { fills: [{ source: 'VENUE', listingId: 500, clientOidCounter: 1, cumQtyAfter: 10 * UNIT,
-      side: 0, fillQty: 10 * UNIT, fillPrice: 40 * CENT, fee: 0, eventTimeNs: 1, netQuantityAfter: 10 * UNIT,
-      totalCostAfter: 400 * CENT, realizedPnlAfter: 0, feesAfter: 0, positionVersion: 1 }],
-      marks: [{ listingId: 500, tsMs: Date.parse('2026-10-06T10:30:00Z'), bid: 30 * CENT, ask: 32 * CENT, lastTrade: 0 }] },
-      '2026-10-06T10:01:00Z');
-    await client.query(`UPDATE strategy.session SET status = 'STOPPED' WHERE session_id = 'old'`);
-    await session('new', '2026-10-06T11:00:00Z');
+  it('a session series starts at $0 and steps with its marks and fills; since returns only new points', async () => {
+    await story();
+    const s = await series(client, { sessionId: 'new', resolution: String(HALF_HOUR) }, now) as any;
+    expect(s.t.map((t: number) => new Date(t).toISOString().slice(11, 16))).toEqual(['12:00', '12:30', '13:00']);
+    expect(s.total).toEqual([cents(0), cents(50), cents(45)]);
+    expect(s.listings[0].symbol).toBe('KX-YES');
+    expect(s.listings[0].netQuantity).toEqual([String(10 * UNIT), String(10 * UNIT), String(6 * UNIT)]);
+    expect(s.events.map((e: any) => e.kind)).toEqual(['SESSION_START']);
 
-    const series = await sessionSeries(client, 'new', new Date('2026-10-06T09:00:00Z'), new Date('2026-10-06T11:05:00Z'));
-
-    const times = series.map(r => r.snapshot_time).sort();
-    expect(times[0]).toBe('2026-10-06T11:00:00.000Z');
-    // Opens holding the inherited 10, valued at the mark the old session left.
-    expect(series.find(r => r.snapshot_time === times[0])?.total_pnl).toBe(String(-90 * CENT));
+    const tail = await series(client, {
+      sessionId: 'new', resolution: String(HALF_HOUR), since: String(Date.parse('2026-10-06T12:30:00Z')),
+    }, now) as any;
+    expect(tail.total).toEqual([cents(50), cents(45)]);
   });
 
-  it('a session that started flat charts from flat, not from what it chose not to inherit', async () => {
-    await session('old', '2026-10-06T10:00:00Z');
-    await post('old', { fills: [{ source: 'VENUE', listingId: 500, clientOidCounter: 1, cumQtyAfter: 10 * UNIT,
-      side: 0, fillQty: 10 * UNIT, fillPrice: 40 * CENT, fee: 0, eventTimeNs: 1, netQuantityAfter: 10 * UNIT,
-      totalCostAfter: 400 * CENT, realizedPnlAfter: 0, feesAfter: 0, positionVersion: 1 }],
-      marks: [{ listingId: 500, tsMs: Date.parse('2026-10-06T10:30:00Z'), bid: 30 * CENT, ask: 32 * CENT, lastTrade: 0 }] },
-      '2026-10-06T10:01:00Z');
-    await client.query(`UPDATE strategy.session SET status = 'STOPPED' WHERE session_id = 'old'`);
-    await session('new', '2026-10-06T11:00:00Z');
-    // Written once the new session's process has started, a minute after the session itself.
-    await post('new', { fills: [{ source: 'RESET', listingId: 500, eventTimeNs: 1, netQuantityAfter: 0,
-      totalCostAfter: 0, realizedPnlAfter: 0, feesAfter: 0, positionVersion: 2, reason: 'started flat' }] },
-      '2026-10-06T11:01:00Z');
+  it('a strategy series is continuous across sessions, including what moved between them', async () => {
+    await story();
+    const s = await series(client, {
+      strategyId: '1', mode: 'paper', start: '2026-10-06T10:00:00Z', resolution: String(HALF_HOUR),
+    }, now) as any;
+    // 10:00, 10:30 (bought, marked 45c), 11:00, 11:30 (50c), 12:00, 12:30 (55c), 13:00 (sold 4)
+    expect(s.total).toEqual([0, 49, 49, 99, 99, 149, 144].map(cents));
+    expect(s.events.map((e: any) => [e.kind, e.sessionId]))
+      .toEqual([['SESSION_START', 'old'], ['SESSION_STOP', 'old'], ['SESSION_START', 'new']]);
+  });
 
-    const series = await sessionSeries(client, 'new', undefined, new Date('2026-10-06T11:05:00Z'));
+  it('starting flat writes off the inventory: the strategy shows the loss, the session starts at $0 with nothing', async () => {
+    await story();
+    await stop('new', '2026-10-06T13:00:00Z');
+    await session('flat', '2026-10-06T14:00:00Z');
+    await fill('flat', '2026-10-06T14:00:05Z', { source: 'RESET', clientOidCounter: 0, netQuantityAfter: 0,
+      totalCostAfter: 0, realizedPnlAfter: 0, feesAfter: 0, positionVersion: 3, reason: 'started flat' });
+    const later = new Date('2026-10-06T15:00:00Z');
 
-    const opening = series.find(r => r.snapshot_time === '2026-10-06T11:00:00.000Z');
-    expect([opening?.net_quantity, opening?.total_pnl]).toEqual(['0', '0']);
+    const flat = await summarize(client, { sessionId: 'flat' }, later) as any;
+    expect(flat.opening).toBe('FLAT');
+    expect(flat.totals.total).toBe(cents(0));
+
+    const strategy = await summarize(client, { strategyId: '1', mode: 'paper' }, later) as any;
+    expect(strategy.totals.lifetime).toBe(cents(54));
+    expect(strategy.totals.betweenSessions).toBe(cents(-40));
+
+    const s = await series(client, {
+      strategyId: '1', mode: 'paper', start: '2026-10-06T13:30:00Z', resolution: String(HALF_HOUR),
+    }, later) as any;
+    const reset = s.events.find((e: any) => e.kind === 'RESET');
+    expect([reset.sessionId, reset.pnlImpact, reset.reason]).toEqual(['flat', cents(-90), 'started flat']);
+    expect(s.total).toEqual([cents(144), cents(144), cents(54), cents(54)]);
+  });
+
+  it('a short position gains when the mark falls', async () => {
+    await session('short', '2026-10-06T10:00:00Z');
+    await mark('2026-10-06T10:00:00Z', 59, 61);
+    await fill('short', '2026-10-06T10:01:00Z', { clientOidCounter: 1, cumQtyAfter: 10 * UNIT, side: 1,
+      fillQty: 10 * UNIT, fillPrice: 60 * CENT, fee: 0, netQuantityAfter: -10 * UNIT, totalCostAfter: 600 * CENT,
+      realizedPnlAfter: 0, feesAfter: 0, positionVersion: 1 });
+    await mark('2026-10-06T10:30:00Z', 49, 51);
+    const summary = await summarize(client, { sessionId: 'short' }, now) as any;
+    expect([summary.totals.unrealized, summary.totals.total, summary.totals.carry])
+      .toEqual([cents(100), cents(100), cents(0)]);
+  });
+
+  it('rejects what it cannot answer', async () => {
+    await expect(summarize(client, { strategyId: '1' }, now)).rejects.toThrow(/mode is required/);
+    await expect(summarize(client, { mode: 'paper', tz: 'Mars/Olympus' }, now)).rejects.toThrow(/tz/);
+    await expect(series(client, { strategyId: '1' }, now)).rejects.toThrow(/mode/);
+    expect(await summarize(client, { sessionId: 'nope' }, now)).toBeNull();
   });
 });

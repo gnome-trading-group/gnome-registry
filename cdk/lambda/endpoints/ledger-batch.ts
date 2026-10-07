@@ -11,6 +11,8 @@ import { connectLedgerDatabase, createResponse, isSessionId, WRITABLE_SESSION_ST
 // successor now owns.
 
 const BATCH_SOURCES = ['VENUE', 'RECOVERY', 'RESET', 'GAP'];
+const LIQUIDITIES = ['MAKER', 'TAKER'];
+const CLOSE_STATES = ['FILLED', 'CANCELED', 'REJECTED', 'EXPIRED'];
 
 interface Session {
   strategy_id: number;
@@ -39,16 +41,16 @@ const INSERT_FILLS = `
       source text, "originSessionId" text, "listingId" int, "clientOidCounter" bigint, "cumQtyAfter" bigint,
       side smallint, "fillQty" bigint, "fillPrice" bigint, fee bigint, "eventTimeNs" bigint,
       "netQuantityAfter" bigint, "totalCostAfter" bigint, "realizedPnlAfter" bigint, "feesAfter" bigint,
-      "positionVersion" bigint, reason text)
+      "positionVersion" bigint, reason text, liquidity text)
   ),
   ins AS (
     INSERT INTO ledger.fill (
       source, session_id, origin_session_id, strategy_id, listing_id, mode, client_oid_counter, cum_qty_after,
       side, fill_qty, fill_price, fee, event_time_ns, net_quantity_after, total_cost_after, realized_pnl_after,
-      fees_after, position_version, actor, reason)
+      fees_after, position_version, actor, reason, liquidity)
     SELECT f.source, $2, f."originSessionId", $3, f."listingId", $4, f."clientOidCounter", f."cumQtyAfter",
       f.side, f."fillQty", f."fillPrice", f.fee, f."eventTimeNs", f."netQuantityAfter", f."totalCostAfter",
-      f."realizedPnlAfter", f."feesAfter", f."positionVersion", 'session ' || $2, f.reason
+      f."realizedPnlAfter", f."feesAfter", f."positionVersion", 'session ' || $2, f.reason, f.liquidity
     FROM src f
     ON CONFLICT DO NOTHING
     RETURNING *
@@ -83,7 +85,7 @@ const RECOVERY_ORIGINS_VALID = `
   ) AS valid`;
 
 const ORDER_COLUMNS = `"clientOidCounter" bigint, "listingId" int, "exchangeId" int, side smallint, price bigint,
-  size bigint, "exchangeOrderId" text, "filledQty" bigint, "eventTimeNs" bigint`;
+  size bigint, "exchangeOrderId" text, "filledQty" bigint, "eventTimeNs" bigint, state text, "rejectReason" text`;
 
 function eventTime(column: string): string {
   return `CASE WHEN ${column} > 0 THEN to_timestamp(${column}::numeric / 1e9) ELSE NOW() END`;
@@ -113,13 +115,24 @@ const UPSERT_ORDER_ACKS = `
 
 const UPSERT_ORDER_CLOSES = `
   INSERT INTO ledger.order (session_id, client_oid_counter, strategy_id, listing_id, exchange_id, mode, status,
-    filled_qty, closed_at)
+    filled_qty, closed_at, close_state, reject_reason)
   SELECT $2, o."clientOidCounter", $3, o."listingId", o."exchangeId", $4, 'CLOSED', o."filledQty",
-    ${eventTime('o."eventTimeNs"')}
+    ${eventTime('o."eventTimeNs"')}, o.state, o."rejectReason"
   FROM jsonb_to_recordset(COALESCE($1::jsonb->'orderCloses', '[]')) AS o(${ORDER_COLUMNS})
   ON CONFLICT (session_id, client_oid_counter) DO UPDATE SET
     status = CASE WHEN ledger.order.status = 'OPEN' THEN 'CLOSED' ELSE ledger.order.status END,
-    filled_qty = EXCLUDED.filled_qty, closed_at = EXCLUDED.closed_at`;
+    filled_qty = EXCLUDED.filled_qty, closed_at = EXCLUDED.closed_at, close_state = EXCLUDED.close_state,
+    reject_reason = EXCLUDED.reject_reason`;
+
+// Running totals from the OMS: a late or retried batch carries a smaller or equal count, so it never lowers one.
+// Not lease-checked: an order refused for naming a listing the session doesn't trade is exactly what to count, and
+// counts never touch a position.
+const UPSERT_REJECT_COUNTS = `
+  INSERT INTO ledger.reject_count (session_id, listing_id, reason, count)
+  SELECT $2, r."listingId", r.reason, r.count
+  FROM jsonb_to_recordset(COALESCE($1::jsonb->'rejectCounts', '[]')) AS r("listingId" int, reason text, count bigint)
+  ON CONFLICT (session_id, listing_id, reason) DO UPDATE SET
+    count = GREATEST(ledger.reject_count.count, EXCLUDED.count), updated_at = NOW()`;
 
 // A starting session settles an order an ended session of its strategy left: cancelled on the venue if it was still
 // resting, and any fills the ledger missed booked as RECOVERY fills. Only an ended session's orders can be settled,
@@ -169,6 +182,7 @@ export async function writeBatch(client: PoolClient, sessionId: string, body: st
   await client.query(INSERT_ORDER_OPENS, args);
   await client.query(UPSERT_ORDER_ACKS, args);
   await client.query(UPSERT_ORDER_CLOSES, args);
+  await client.query(UPSERT_REJECT_COUNTS, [body, sessionId]);
   await client.query(MARK_ORDERS_RECOVERED, [body, session.strategy_id, session.mode, WRITABLE_SESSION_STATUSES]);
   await client.query(INSERT_MARKS, [body]);
 }
@@ -179,6 +193,14 @@ export function validateBatch(body: string): string {
   for (const fill of parsed.fills ?? []) {
     if (!BATCH_SOURCES.includes(fill?.source)) {
       throw new Error(`fill source must be one of ${BATCH_SOURCES.join(', ')}`);
+    }
+    if (fill.liquidity != null && !LIQUIDITIES.includes(fill.liquidity)) {
+      throw new Error(`fill liquidity must be one of ${LIQUIDITIES.join(', ')} or null`);
+    }
+  }
+  for (const close of parsed.orderCloses ?? []) {
+    if (close?.state != null && !CLOSE_STATES.includes(close.state)) {
+      throw new Error(`order close state must be one of ${CLOSE_STATES.join(', ')}`);
     }
   }
   return parsed.sessionId;

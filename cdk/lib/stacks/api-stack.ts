@@ -112,7 +112,7 @@ export class ApiStack extends cdk.Stack {
     }
 
     // PnL is derived from the ledger's fills and marks; nothing about it is stored.
-    this.attachMethods('pnl/latest', 'pnl-latest.ts', ['GET'], ['GET']);
+    this.attachMethods('pnl/summary', 'pnl-summary.ts', ['GET'], ['GET']);
     this.attachMethods('pnl/series', 'pnl-series.ts', ['GET'], ['GET']);
 
     // The trading ledger. Running sessions write with the API key; an operator's position adjustments are Cognito
@@ -121,6 +121,7 @@ export class ApiStack extends cdk.Stack {
     this.attachMethods('ledger/positions', 'ledger-positions.ts', ['GET'], ['GET']);
     this.attachMethods('ledger/fills', 'ledger-fills.ts', ['GET'], ['GET']);
     this.attachMethods('ledger/orders', 'ledger-orders.ts', ['GET'], ['GET']);
+    this.attachMethods('ledger/orders/list', 'ledger-order-list.ts', ['GET'], ['GET']);
     this.attachMethods('ledger/adjustments', 'ledger-adjustments.ts', [], ['POST']);
 
     // Policy writes are Cognito-only so the audit log attributes every change to a person.
@@ -197,6 +198,8 @@ export class ApiStack extends cdk.Stack {
     // with the API key and name themselves in the body, so the kill-switch audit entry still says who stopped it.
     this.attachIntegration('strategy-sessions/stop', sessionsLauncherIntegration, ['POST'], ['POST']);
     this.attachIntegration('strategy-sessions/logs', sessionsLauncherIntegration, ['GET'], ['GET']);
+    // A running session's liveness and health, every few seconds; API key only, from the session itself.
+    this.attachMethods('strategy-sessions/heartbeat', 'strategy-session-heartbeat.ts', ['POST']);
     // For the controller's override picker; the launcher Lambda already reads the orchestrator's SSM parameters.
     this.attachIntegration('orchestrator/properties', sessionsLauncherIntegration, [], ['GET']);
 

@@ -5,6 +5,9 @@ import { writeBatch } from '../lambda/endpoints/ledger-batch';
 import { StrategySessionHandler } from '../lambda/endpoints/strategy-sessions';
 import { generateHaltUpsertQuery } from '../lambda/endpoints/risk-halts';
 import { buildOrdersQuery } from '../lambda/endpoints/ledger-orders';
+import { buildFillsQuery, withSlippage } from '../lambda/endpoints/ledger-fills';
+import { buildOrderListQuery } from '../lambda/endpoints/ledger-order-list';
+import { recordHeartbeat } from '../lambda/endpoints/strategy-session-heartbeat';
 
 // Runs the ledger's SQL against a real Postgres with every migration applied. Set LEDGER_TEST_DB to its connection
 // string (a throwaway database: each test resets the tables it uses).
@@ -179,5 +182,81 @@ describeDb('ledger batch against Postgres', () => {
     await post('s1', { orderAcks: acks });
     const rows = await client.query('SELECT exchange_order_id FROM ledger.order ORDER BY client_oid_counter');
     expect(rows.rows).toEqual([{ exchange_order_id: null }, { exchange_order_id: null }]);
+  });
+
+  it('fills say whether they made or took, and closed orders how they ended', async () => {
+    await post('s1', {
+      fills: [fill(1, 1_000_000, 1_000_000, 1, { liquidity: 'MAKER' })],
+      orderCloses: [
+        { clientOidCounter: 1, listingId: 500, exchangeId: 1, filledQty: 1_000_000, state: 'FILLED', rejectReason: null },
+        { clientOidCounter: 2, listingId: 500, exchangeId: 1, filledQty: 0, state: 'REJECTED',
+          rejectReason: 'POST_ONLY_WOULD_CROSS' },
+      ],
+    });
+    expect((await client.query('SELECT liquidity FROM ledger.fill')).rows).toEqual([{ liquidity: 'MAKER' }]);
+    const orders = await client.query('SELECT close_state, reject_reason FROM ledger.order ORDER BY client_oid_counter');
+    expect(orders.rows).toEqual([
+      { close_state: 'FILLED', reject_reason: null },
+      { close_state: 'REJECTED', reject_reason: 'POST_ONLY_WOULD_CROSS' },
+    ]);
+  });
+
+  it('refusal counts only ever rise, and one on a listing the session does not trade never fences it', async () => {
+    await post('s1', { rejectCounts: [{ listingId: 500, reason: 'HALTED', count: 5 }] });
+    await post('s1', { rejectCounts: [{ listingId: 500, reason: 'HALTED', count: 3 }, { listingId: 999, reason: 'INVALID_PRICE', count: 1 }] });
+    const counts = await client.query('SELECT listing_id, reason, count FROM ledger.reject_count ORDER BY listing_id');
+    expect(counts.rows).toEqual([
+      { listing_id: 500, reason: 'HALTED', count: '5' },
+      { listing_id: 999, reason: 'INVALID_PRICE', count: '1' },
+    ]);
+  });
+
+  it('a heartbeat is kept while the session runs, refused once it ended, and names unknown sessions', async () => {
+    const body = JSON.stringify({ sessionId: 's1', uptimeMs: 5000, agents: [{ name: 'OmsAgent', stalledMs: 0 }] });
+    expect(await recordHeartbeat(client, 's1', body)).toBe(200);
+    const row = (await client.query(`SELECT health, last_heartbeat_at IS NOT NULL AS beat FROM strategy.session
+      WHERE session_id = 's1'`)).rows[0];
+    expect(row).toEqual({ health: { uptimeMs: 5000, agents: [{ name: 'OmsAgent', stalledMs: 0 }] }, beat: true });
+    await client.query(`UPDATE strategy.session SET status = 'STOPPED' WHERE session_id = 's1'`);
+    expect(await recordHeartbeat(client, 's1', body)).toBe(409);
+    expect(await recordHeartbeat(client, 'ghost', body)).toBe(404);
+  });
+
+  it('pages through fills newest first without skipping or repeating, and polls for newer ones', async () => {
+    await post('s1', { fills: [1, 2, 3, 4, 5].map(n => fill(n, 1_000_000, n * 1_000_000, n)) });
+    const page = async (params: Record<string, string>) =>
+      (await client.query(buildFillsQuery({ sessionId: 's1', limit: '2', ...params }))).rows
+        .sort((a, b) => Number(b.fill_id) - Number(a.fill_id))
+        .map(r => Number(r.client_oid_counter));
+    expect(await page({})).toEqual([5, 4]);
+    expect(await page({ before: '4' })).toEqual([3, 2]);
+    expect(await page({ before: '2' })).toEqual([1]);
+    expect(await page({ after: '2' })).toEqual([4, 3]);
+    await expect(async () => buildFillsQuery({ sessionId: 's1', before: '1', after: '2' })).rejects.toThrow(/combined/);
+  });
+
+  it('values each fill against the mark when it traded: a buy below the mark is positive slippage', async () => {
+    await client.query(`INSERT INTO ledger.mark (listing_id, ts, bid, ask, last_trade)
+      VALUES (500, NOW() - INTERVAL '1 minute', 390000000, 430000000, 0)`);
+    await post('s1', { fills: [fill(1, 2_000_000, 2_000_000, 1)] });
+    const row = withSlippage((await client.query(buildFillsQuery({ sessionId: 's1' }))).rows[0]);
+    // Bought 2 at 40c against a 41c mid: 2c better.
+    expect([row.mark_price, row.slippage]).toEqual(['410000000', '20000000']);
+  });
+
+  it('lists orders with what filled, filtered to open or closed', async () => {
+    await post('s1', {
+      orderOpens: [1, 2].map(n => ({ clientOidCounter: n, listingId: 500, exchangeId: 1, side: 0, price: 400_000_000, size: 4_000_000 })),
+      fills: [fill(1, 1_000_000, 1_000_000, 1), { ...fill(1, 3_000_000, 3_000_000, 2), fillQty: 2_000_000, fillPrice: 430_000_000 }],
+      orderCloses: [{ clientOidCounter: 1, listingId: 500, exchangeId: 1, filledQty: 3_000_000, state: 'CANCELED' }],
+    });
+    const list = async (status: string) =>
+      (await client.query(buildOrderListQuery({ sessionId: 's1', status }))).rows;
+    const [closed] = await list('CLOSED');
+    // 1 at 40c and 2 at 43c average 42c.
+    expect([closed.client_oid_counter, closed.fills, closed.fill_qty, closed.avg_fill_price, closed.close_state])
+      .toEqual(['1', '2', '3000000', '420000000', 'CANCELED']);
+    expect((await list('OPEN')).map(r => r.client_oid_counter)).toEqual(['2']);
+    expect(await list('ANY')).toHaveLength(2);
   });
 });
