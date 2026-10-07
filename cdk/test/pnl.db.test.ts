@@ -136,7 +136,7 @@ describeDb('PnL derived from the ledger, against Postgres', () => {
     const s = await series(client, { sessionId: 'new', resolution: String(HALF_HOUR) }, now) as any;
     expect(s.t.map((t: number) => new Date(t).toISOString().slice(11, 16))).toEqual(['12:00', '12:30', '13:00']);
     expect(s.total).toEqual([cents(0), cents(50), cents(45)]);
-    expect(s.listings[0].symbol).toBe('KX-YES');
+    expect([s.listings[0].symbol, s.listings[0].lotSize]).toEqual(['KX-YES', String(UNIT)]);
     expect(s.listings[0].netQuantity).toEqual([String(10 * UNIT), String(10 * UNIT), String(6 * UNIT)]);
     expect(s.events.map((e: any) => e.kind)).toEqual(['SESSION_START']);
 

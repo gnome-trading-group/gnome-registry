@@ -108,7 +108,8 @@ function seriesShape(w: Window, listingIds: number[]) {
     unrealized: [] as string[],
     fees: [] as string[],
     listings: listingIds.map(listingId => ({
-      listingId, symbol: null as string | null, total: [] as string[], netQuantity: [] as string[],
+      listingId, symbol: null as string | null, lotSize: null as string | null, total: [] as string[],
+      netQuantity: [] as string[],
     })),
     events: [] as SeriesEvent[],
   };
@@ -129,7 +130,10 @@ export async function sessionSeries(client: PoolClient, sessionId: string, param
   const listingIds = states.map(s => s.listingId);
   const series = seriesShape(w, listingIds);
   const info = await loadListingInfo(client, listingIds);
-  series.listings.forEach(l => { l.symbol = info.get(l.listingId)?.symbol ?? null; });
+  series.listings.forEach(l => {
+    l.symbol = info.get(l.listingId)?.symbol ?? null;
+    l.lotSize = info.get(l.listingId)?.lotSize ?? null;
+  });
 
   // Where each listing stood when the window opens: the session's own last fill, else what it inherited.
   const atStart = (await client.query(`
@@ -226,7 +230,10 @@ export async function strategySeries(
   const listingIds = [...new Set([...state.listings.map(l => l.listingId), ...fills.map(f => f.listing_id)])].sort((a, b) => a - b);
   const series = seriesShape(w, listingIds);
   const info = await loadListingInfo(client, listingIds);
-  series.listings.forEach(l => { l.symbol = info.get(l.listingId)?.symbol ?? null; });
+  series.listings.forEach(l => {
+    l.symbol = info.get(l.listingId)?.symbol ?? null;
+    l.lotSize = info.get(l.listingId)?.lotSize ?? null;
+  });
 
   // Per listing: the position's quantity and cost, and each session's realized PnL and fees so far.
   const position = new Map<number, PositionState>();
