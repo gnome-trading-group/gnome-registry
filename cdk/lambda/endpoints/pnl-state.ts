@@ -180,12 +180,12 @@ export async function loadStrategyState(
       SELECT DISTINCT ON (session_id, listing_id) strategy_id, listing_id, realized_pnl_after, fees_after
       FROM f WHERE session_id IS NOT NULL ORDER BY session_id, listing_id, fill_id DESC
     ),
-    -- Each session's running totals end at its last row; a manual trade carries only its own amounts.
+    -- Each session's running totals end at its last row; a manual trade or a settlement carries only its own amounts.
     tot AS (
       SELECT strategy_id, listing_id, SUM(realized_pnl_after) AS realized, SUM(fees_after) AS fees
       FROM (SELECT * FROM sess
             UNION ALL
-            SELECT strategy_id, listing_id, realized_pnl_after, fees_after FROM f WHERE source = 'MANUAL') booked
+            SELECT strategy_id, listing_id, realized_pnl_after, fees_after FROM f WHERE source IN ('MANUAL', 'SETTLEMENT')) booked
       GROUP BY strategy_id, listing_id
     )
     SELECT pos.*, COALESCE(tot.realized, 0) AS realized, COALESCE(tot.fees, 0) AS fees,

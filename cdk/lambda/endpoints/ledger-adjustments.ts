@@ -24,8 +24,6 @@ type Change =
   | { kind: 'trade'; trade: Trade }
   | { kind: 'correction'; netQuantity: bigint; totalCost: bigint };
 
-class ConflictError extends Error {}
-
 function scaledInt(name: string, value: unknown): bigint {
   if (value === undefined || value === null || !/^-?\d+$/.test(String(value))) {
     throw new Error(`${name} must be an integer in its scaled units`);
@@ -67,53 +65,92 @@ export function parseAdjustment(body: string) {
   return { strategyId: a.strategyId, listingId: a.listingId, mode, reason: a.reason, change };
 }
 
-// Applies an adjustment inside the caller's transaction, returning the position after it.
-export async function bookAdjustment(c: PoolClient, adjustment: ReturnType<typeof parseAdjustment>, actor: string) {
+export class ConflictError extends Error {}
+
+type Holding = { netQuantity: bigint; totalCost: bigint; version: bigint };
+
+// Refuses while any session of the strategy holds the listing, then locks the position so nothing else moves it
+// before the caller's transaction commits.
+async function lockUnheldPosition(c: PoolClient, strategyId: number, listingId: number, mode: string): Promise<Holding> {
   const held = await c.query(
     `SELECT session_id FROM strategy.session_listing
      WHERE strategy_id = $1 AND mode = $2 AND listing_id = $3 AND active`,
-    [adjustment.strategyId, adjustment.mode, adjustment.listingId]);
+    [strategyId, mode, listingId]);
   if (held.rowCount && held.rowCount > 0) {
     throw new ConflictError(`Session ${held.rows[0].session_id} holds this listing; stop it first`);
   }
   const current = await c.query(
     `SELECT net_quantity, total_cost, version FROM ledger.position
      WHERE strategy_id = $1 AND listing_id = $2 AND mode = $3 FOR UPDATE`,
-    [adjustment.strategyId, adjustment.listingId, adjustment.mode]);
-  const holding = { netQuantity: toBigInt(current.rows[0]?.net_quantity), totalCost: toBigInt(current.rows[0]?.total_cost) };
-  const version = BigInt(current.rows[0]?.version ?? 0) + 1n;
-  const { change } = adjustment;
-  let after: { netQuantity: bigint; totalCost: bigint };
-  if (change.kind === 'trade') {
-    const traded = applyTrade(holding, change.trade);
-    after = traded;
-    await c.query(
-      `INSERT INTO ledger.fill (source, strategy_id, listing_id, mode, side, fill_qty, fill_price, fee,
-         net_quantity_after, total_cost_after, realized_pnl_after, fees_after, position_version, actor, reason)
-       VALUES ('MANUAL', $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $7, $11, $12, $13)`,
-      [adjustment.strategyId, adjustment.listingId, adjustment.mode, change.trade.side,
-        change.trade.qty.toString(), change.trade.price.toString(), change.trade.fee.toString(),
-        traded.netQuantity.toString(), traded.totalCost.toString(), traded.realized.toString(),
-        version.toString(), actor, adjustment.reason]);
-  } else {
-    after = change;
-    await c.query(
-      `INSERT INTO ledger.fill (source, strategy_id, listing_id, mode, net_quantity_after, total_cost_after,
-         position_version, actor, reason)
-       VALUES ('ADJUSTMENT', $1, $2, $3, $4, $5, $6, $7, $8)`,
-      [adjustment.strategyId, adjustment.listingId, adjustment.mode, change.netQuantity.toString(),
-        change.totalCost.toString(), version.toString(), actor, adjustment.reason]);
-  }
+    [strategyId, listingId, mode]);
+  return {
+    netQuantity: toBigInt(current.rows[0]?.net_quantity),
+    totalCost: toBigInt(current.rows[0]?.total_cost),
+    version: BigInt(current.rows[0]?.version ?? 0),
+  };
+}
+
+async function upsertPosition(c: PoolClient, strategyId: number, listingId: number, mode: string,
+  after: { netQuantity: bigint; totalCost: bigint }, version: bigint) {
   const result = await c.query(
     `INSERT INTO ledger.position (strategy_id, listing_id, mode, net_quantity, total_cost, version, needs_review)
      VALUES ($1, $2, $3, $4, $5, $6, FALSE)
      ON CONFLICT (strategy_id, listing_id, mode) DO UPDATE SET net_quantity = EXCLUDED.net_quantity,
        total_cost = EXCLUDED.total_cost, version = EXCLUDED.version, session_id = NULL, needs_review = FALSE,
        updated_at = NOW()
+     WHERE ledger.position.version < EXCLUDED.version
      RETURNING *`,
-    [adjustment.strategyId, adjustment.listingId, adjustment.mode, after.netQuantity.toString(),
-      after.totalCost.toString(), version.toString()]);
+    [strategyId, listingId, mode, after.netQuantity.toString(), after.totalCost.toString(), version.toString()]);
   return result.rows[0];
+}
+
+// A trade made outside any session, applied inside the caller's transaction: an operator's MANUAL trade, or the
+// settlement sweeper closing a settled position (SETTLEMENT). Returns the position after it.
+export interface IBookedTrade {
+  strategyId: number;
+  listingId: number;
+  mode: string;
+  trade: Trade;
+  actor: string;
+  reason: string;
+  source: 'MANUAL' | 'SETTLEMENT';
+  // Books nothing unless the position still holds this, for a caller that decided on a quantity read earlier.
+  expectedNetQuantity?: bigint;
+}
+
+export async function bookTrade(c: PoolClient, booked: IBookedTrade) {
+  const { strategyId, listingId, mode, trade } = booked;
+  const holding = await lockUnheldPosition(c, strategyId, listingId, mode);
+  if (booked.expectedNetQuantity !== undefined && holding.netQuantity !== booked.expectedNetQuantity) {
+    throw new ConflictError(`Position is ${holding.netQuantity}, not the ${booked.expectedNetQuantity} expected`);
+  }
+  const version = holding.version + 1n;
+  const traded = applyTrade(holding, trade);
+  await c.query(
+    `INSERT INTO ledger.fill (source, strategy_id, listing_id, mode, side, fill_qty, fill_price, fee,
+       net_quantity_after, total_cost_after, realized_pnl_after, fees_after, position_version, actor, reason)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $8, $12, $13, $14)`,
+    [booked.source, strategyId, listingId, mode, trade.side, trade.qty.toString(), trade.price.toString(),
+      trade.fee.toString(), traded.netQuantity.toString(), traded.totalCost.toString(), traded.realized.toString(),
+      version.toString(), booked.actor, booked.reason]);
+  return upsertPosition(c, strategyId, listingId, mode, traded, version);
+}
+
+// Applies an adjustment inside the caller's transaction, returning the position after it.
+export async function bookAdjustment(c: PoolClient, adjustment: ReturnType<typeof parseAdjustment>, actor: string) {
+  const { strategyId, listingId, mode, change, reason } = adjustment;
+  if (change.kind === 'trade') {
+    return bookTrade(c, { strategyId, listingId, mode, trade: change.trade, actor, reason, source: 'MANUAL' });
+  }
+  const holding = await lockUnheldPosition(c, strategyId, listingId, mode);
+  const version = holding.version + 1n;
+  await c.query(
+    `INSERT INTO ledger.fill (source, strategy_id, listing_id, mode, net_quantity_after, total_cost_after,
+       position_version, actor, reason)
+     VALUES ('ADJUSTMENT', $1, $2, $3, $4, $5, $6, $7, $8)`,
+    [strategyId, listingId, mode, change.netQuantity.toString(), change.totalCost.toString(), version.toString(),
+      actor, reason]);
+  return upsertPosition(c, strategyId, listingId, mode, change, version);
 }
 
 export const handler = async (event: APIGatewayProxyEvent) => {

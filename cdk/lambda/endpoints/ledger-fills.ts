@@ -8,7 +8,7 @@ import { toMark } from './pnl-state';
 // one order's fills (?orderSessionId=&clientOidCounter=), oldest first, including those a later session recovered
 // from the venue for it. Each fill carries the listing's mark when it traded and its slippage against it: positive
 // when the fill was better than the mark (bought below it, sold above it), in money for the fill's whole quantity.
-const SOURCES = ['VENUE', 'RECOVERY', 'RESET', 'ADJUSTMENT', 'MANUAL', 'GAP'];
+const SOURCES = ['VENUE', 'RECOVERY', 'RESET', 'ADJUSTMENT', 'MANUAL', 'SETTLEMENT', 'GAP'];
 // Event times before this are not epoch nanoseconds (rows that never traded carry none).
 const MIN_EPOCH_NS = 1_000_000_000_000_000_000n;
 
@@ -61,7 +61,8 @@ export function buildFillsQuery(params: Record<string, string | undefined>): { t
 export function withSlippage<T extends Record<string, unknown>>(row: T) {
   const mark = markPrice(toMark({ bid: row.mark_bid, ask: row.mark_ask, last_trade: row.mark_last_trade }));
   let slippage: string | null = null;
-  if (mark !== 0n && row.fill_price !== null && row.fill_qty !== null) {
+  // A settlement trades at the market's result, not against its book, so it has no slippage.
+  if (mark !== 0n && row.fill_price !== null && row.fill_qty !== null && row.source !== 'SETTLEMENT') {
     const price = toBigInt(row.fill_price);
     const better = row.side === 0 ? mark - price : price - mark;
     slippage = notional(better, toBigInt(row.fill_qty)).toString();

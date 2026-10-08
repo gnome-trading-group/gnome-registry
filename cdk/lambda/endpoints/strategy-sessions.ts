@@ -141,6 +141,16 @@ export class StrategySessionHandler extends ResourceHandler {
 
     try {
       const row = await withTransaction(this.client, async (client) => {
+        // Locked so the classifier can't record a settlement between this check and the lease below: the
+        // settlement sweeper books a settled position as soon as no lease holds it, which must never race a session.
+        const settled = await client.query(
+          `SELECT l.listing_id FROM sm.listing l JOIN sm.event_contract ec USING (security_id)
+           WHERE l.listing_id = ANY($1::int[]) AND ec.settlement_price IS NOT NULL
+           FOR SHARE OF ec`,
+          [listings]);
+        if (settled.rowCount && settled.rowCount > 0) {
+          throw new SettledListingError(settled.rows[0].listing_id);
+        }
         const result = await client.query(`
           INSERT INTO strategy.session (
             session_id, strategy_id, status, mode, config, research_commit,
@@ -161,6 +171,9 @@ export class StrategySessionHandler extends ResourceHandler {
       });
       return this.createResponse(200, row);
     } catch (error) {
+      if (error instanceof SettledListingError) {
+        return this.createResponse(409, { message: `Listing ${error.listingId} has settled; it can no longer be traded` });
+      }
       if ((error as { constraint?: string })?.constraint === 'idx_session_listing_lease') {
         const holder = await this.client.query(
           `SELECT session_id, listing_id FROM strategy.session_listing
@@ -176,6 +189,12 @@ export class StrategySessionHandler extends ResourceHandler {
       }
       throw error;
     }
+  }
+}
+
+class SettledListingError extends Error {
+  constructor(readonly listingId: number) {
+    super(`listing ${listingId} has settled`);
   }
 }
 

@@ -24,7 +24,8 @@ export class DatabaseInitLambda extends Construct {
         subnetType: ec2.SubnetType.PRIVATE_ISOLATED,
       }),
       runtime: Runtime.NODEJS_22_X,
-      timeout: cdk.Duration.seconds(30),
+      // Data migrations rewrite whole tables (e.g. re-keying every Kalshi binary event) and run in one transaction.
+      timeout: cdk.Duration.minutes(5),
       memorySize: 512,
       environment: {
         DATABASE_SECRET_JSON: props.rootUserSecret.secretValue.unsafeUnwrap(),

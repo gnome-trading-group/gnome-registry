@@ -30,7 +30,7 @@ export function markPrice(mark: MarkInputs | null): bigint {
   return mark.lastTrade;
 }
 
-function abs(value: bigint): bigint {
+export function abs(value: bigint): bigint {
   return value < 0n ? -value : value;
 }
 

@@ -81,6 +81,10 @@ interface IEventContractBase {
   outcomeLabel: string;
 }
 export interface ICreateEventContract extends IEventContractBase {}
+export interface IModifyEventContract {
+  outcomeLabel?: string;
+  settlementPrice?: string | number;
+}
 export interface IDeleteEventContract {
   eventContractId: number;
 }

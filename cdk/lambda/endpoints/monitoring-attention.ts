@@ -5,8 +5,8 @@ import { connectLedgerDatabase, createResponse, parseMode } from './ledger-commo
 // Everything about trading in one mode that someone should look at, most serious first, for the controller's
 // overview. Each item names what it concerns so the page can link to it.
 //   critical  trading is halted everywhere, a running session has gone silent, or its ledger is failing
-//   warning   a strategy or listing is halted, a position needs review, a session failed, or a part of a running
-//             session is stalled or reconnecting
+//   warning   a strategy or listing is halted, a position needs review, a session failed, a part of a running
+//             session is stalled or reconnecting, or a position on a finished market hasn't been settled
 //   info      a held position has had no price for a while (prediction markets can be quiet; worth knowing)
 
 export const SILENT_AFTER_MS = 60_000;
@@ -15,6 +15,10 @@ export const NO_HEARTBEAT_AFTER_MS = 120_000;
 export const HOT_PATH_STALL_MS = 2_000;
 export const FAILED_WITHIN_MS = 24 * 3_600_000;
 export const NO_PRICE_AFTER_MS = 3_600_000;
+// How long a deactivated prediction listing may hold a position with no settlement value before the classifier is
+// suspected of missing it, and how long a settled one may stay open before the sweeper is.
+export const SETTLEMENT_PENDING_AFTER_MS = 24 * 3_600_000;
+export const SETTLEMENT_BOOKING_AFTER_MS = 15 * 60_000;
 
 type Severity = 'critical' | 'warning' | 'info';
 const ORDER: Record<Severity, number> = { critical: 0, warning: 1, info: 2 };
@@ -161,6 +165,41 @@ export async function attention(client: PoolClient, mode: string, now: Date): Pr
       detail: 'Valued at its last known price', strategyId: q.strategy_id, strategyName: q.strategy_name,
       listingId: q.listing_id, symbol: q.symbol, since: q.ts?.toISOString() ?? null,
     }));
+  }
+
+  // Settlement: a market that has finished still leaves positions open until its value is recorded and the
+  // sweeper books it. Either step stalling leaves a position valued at a stale mark.
+  const unsettled = (await client.query(`
+    SELECT p.strategy_id, st.name AS strategy_name, p.listing_id, l.exchange_security_symbol AS symbol,
+      p.needs_review, ec.settlement_price, ec.settled_at, l.date_modified,
+      EXISTS (SELECT 1 FROM strategy.session_listing sl WHERE sl.strategy_id = p.strategy_id AND sl.mode = p.mode
+        AND sl.listing_id = p.listing_id AND sl.active) AS held
+    FROM ledger.position p
+    JOIN strategy.strategy st ON st.strategy_id = p.strategy_id
+    JOIN sm.listing l ON l.listing_id = p.listing_id
+    JOIN LATERAL (
+      SELECT settlement_price, settled_at FROM sm.event_contract
+      WHERE security_id = l.security_id ORDER BY settlement_price NULLS LAST LIMIT 1
+    ) ec ON TRUE
+    WHERE p.mode = $1 AND p.net_quantity <> 0
+      AND (ec.settlement_price IS NOT NULL OR (NOT l.active AND l.date_modified < $2))`,
+  [mode, new Date(now.getTime() - SETTLEMENT_PENDING_AFTER_MS)])).rows;
+  for (const u of unsettled) {
+    const fields = { strategyId: u.strategy_id, strategyName: u.strategy_name, listingId: u.listing_id, symbol: u.symbol };
+    if (u.settlement_price === null) {
+      items.push(item('warning', 'SETTLEMENT_PENDING', 'Finished market has no settlement value', {
+        ...fields, detail: 'The listing was deactivated but its result was never recorded',
+        since: u.date_modified.toISOString(),
+      }));
+    } else if (u.needs_review || u.held || now.getTime() - u.settled_at.getTime() > SETTLEMENT_BOOKING_AFTER_MS) {
+      items.push(item('warning', 'SETTLEMENT_BLOCKED', 'Settled market still has an open position', {
+        ...fields,
+        detail: u.needs_review ? 'Adjust the position to clear its review; the sweeper then settles what remains'
+          : u.held ? 'A session still holds the listing; it settles once that session stops'
+          : 'The settlement sweeper has not booked it',
+        since: u.settled_at.toISOString(),
+      }));
+    }
   }
 
   // Within a severity, the longest-standing first; problems that are only a current state (no start time) after.

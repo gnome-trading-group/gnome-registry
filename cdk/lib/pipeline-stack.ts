@@ -7,6 +7,7 @@ import { DatabaseStack } from "./stacks/database-stack";
 import { ApiStack } from "./stacks/api-stack";
 import { ExchangeSyncStack } from "./stacks/exchange-sync-stack";
 import { StrategySessionMonitorStack } from "./stacks/strategy-session-monitor-stack";
+import { SettlementSweeperStack } from "./stacks/settlement-sweeper-stack";
 import { MonitoringStack } from "./stacks/monitoring-stack";
 import { GITHUB_REPO, GITHUB_BRANCH, CONFIGS, RegistryConfig } from "./config";
 
@@ -38,9 +39,16 @@ class AppStage extends cdk.Stage {
       rootUserSecret: databaseStack.rootUserSecret,
     });
 
+    const settlementSweeperStack = new SettlementSweeperStack(this, "SettlementSweeperStack", {
+      database: databaseStack.database,
+      vpc: databaseStack.vpc,
+      rootUserSecret: databaseStack.rootUserSecret,
+    });
+
     new MonitoringStack(this, "MonitoringStack", {
       api: apiStack.api,
       syncLambda: exchangeSyncStack.syncLambda,
+      settlementSweeperLambda: settlementSweeperStack.sweeperLambda,
       database: databaseStack.database,
     });
   }
