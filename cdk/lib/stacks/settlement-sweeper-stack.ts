@@ -26,8 +26,8 @@ export class SettlementSweeperStack extends cdk.Stack {
       runtime: Runtime.NODEJS_20_X,
       timeout: cdk.Duration.seconds(60),
       memorySize: 256,
-      // Overlapping sweeps would only contend for the same position locks.
-      reservedConcurrentExecutions: 1,
+      // No reserved concurrency: sweeps run 5 minutes apart and finish within the timeout, and an overlap would still
+      // book nothing twice (each booking locks its position, and SETTLEMENT rows are unique per position).
       environment: {
         DATABASE_SECRET_JSON: props.rootUserSecret.secretValue.unsafeUnwrap(),
       },
