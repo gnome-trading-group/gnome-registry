@@ -28,11 +28,29 @@ DELETE FROM kalshi_binary b WHERE NOT EXISTS (SELECT 1 FROM sm.event_contract ec
 DELETE FROM sm.event e WHERE e.event_id IN (SELECT event_id FROM dropped_event)
   AND NOT EXISTS (SELECT 1 FROM sm.event_contract ec WHERE ec.event_id = e.event_id);
 
+-- Earlier cleanups removed some flipped markets' contracts but left their events, empty, still holding the market
+-- ticker a binary is about to take. They hold nothing, so they go.
+DELETE FROM sm.event o USING sm.exchange x
+WHERE x.exchange_code = 'KALSHI' AND o.exchange_id = x.exchange_id
+  AND o.native_event_id IN (SELECT ticker FROM kalshi_binary)
+  AND NOT EXISTS (SELECT 1 FROM sm.event_contract ec WHERE ec.event_id = o.event_id);
+
 -- A binary event holds one market's YES and NO; one spanning several markets can't be keyed by a market ticker.
+-- Any other event already holding a binary's market ticker would need a decision about which one to keep.
 DO $$
+DECLARE
+    clash TEXT;
 BEGIN
     IF EXISTS (SELECT 1 FROM kalshi_binary GROUP BY event_id HAVING count(DISTINCT ticker) > 1) THEN
         RAISE EXCEPTION 'Kalshi binary events spanning more than one market; resolve them before re-keying';
+    END IF;
+    SELECT string_agg(DISTINCT b.ticker, ', ') INTO clash
+    FROM kalshi_binary b
+    JOIN sm.event e ON e.event_id = b.event_id
+    JOIN sm.event o ON o.exchange_id = e.exchange_id AND o.native_event_id = b.ticker AND o.event_id <> e.event_id
+    WHERE e.native_event_id <> b.ticker;
+    IF clash IS NOT NULL THEN
+        RAISE EXCEPTION 'Market tickers already used by another Kalshi event: %', clash;
     END IF;
 END $$;
 
