@@ -269,13 +269,22 @@ async function checkPositions(
 
   let checked = 0;
   let breaks = 0;
-  const keys = new Set([...ledger.keys(), ...venueByKey.keys()]);
+  // What was checked before too: a market closed outside the ledger leaves both sides empty, and only judging it
+  // again clears what it was flagged for.
+  const keys = new Set([...ledger.keys(), ...venueByKey.keys(), ...previous.keys()]);
   for (const key of keys) {
     const held = ledger.get(key);
     const reported = venueByKey.get(key);
     const listing = listingsByKey.get(key);
-    // A settled market's positions close by settlement on both sides, at different moments; cash covers it.
-    if (held?.settled || listing?.settled || reported?.redeemable) continue;
+    // A settled market's positions close by settlement on both sides, at different moments; cash covers it. It is no
+    // longer checked, so what it was flagged for goes too.
+    if (held?.settled || listing?.settled || reported?.redeemable) {
+      if (previous.has(key)) {
+        await client.query('DELETE FROM treasury.position_check WHERE account_id = $1 AND venue_key = $2',
+          [account.account_id, key]);
+      }
+      continue;
+    }
     const venueQty = reported ? toBigInt(reported.quantity) : 0n;
     const ledgerQty = held?.qty ?? 0n;
     let status: string;

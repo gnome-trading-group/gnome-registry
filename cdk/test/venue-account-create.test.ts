@@ -1,5 +1,5 @@
 import { generateKeyPairSync } from 'crypto';
-import { CreateError, credentialsFor } from '../lambda/endpoints/venue-account-create';
+import { CreateError, credentialsFor, readSecretFor } from '../lambda/endpoints/venue-account-create';
 
 const pem = generateKeyPairSync('rsa', { modulusLength: 2048 }).privateKey
   .export({ type: 'pkcs8', format: 'pem' }).toString();
@@ -45,5 +45,13 @@ describe('venue account credentials', () => {
   it('refuses a missing field, naming it, and a venue it can\'t trade', () => {
     expect(() => credentialsFor('KALSHI', { privateKey: pem }, 'credentials')).toThrow('credentials needs apiKey');
     expect(() => credentialsFor('BINANCE', {}, 'credentials')).toThrow(CreateError);
+  });
+
+  it('reads with the trading key unless given a read-only one, and never reads Polymarket Intl with a key', () => {
+    const trading = { apiKey: 'k', privateKey: pem };
+    expect(readSecretFor('KALSHI', undefined, trading)).toBe(trading);
+    expect(readSecretFor('KALSHI', { apiKey: 'ro', privateKey: pem }, trading)).toEqual({ apiKey: 'ro', privateKey: pem.trim() });
+    expect(readSecretFor('POLYMARKET_INTL', undefined, { apiKey: 'k' })).toBeNull();
+    expect(() => readSecretFor('POLYMARKET_INTL', { apiKey: 'k' }, { apiKey: 'k' })).toThrow(/without credentials/);
   });
 });

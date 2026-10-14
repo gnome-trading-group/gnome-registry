@@ -250,6 +250,30 @@ describeDb('treasury, against Postgres', () => {
     ]);
   });
 
+  it('clears a flagged position once it is closed outside the ledger, or its market resolves', async () => {
+    const pm = await account(2, 'quiet-falcon-01');
+    await open(pm, 100);
+    const t0 = Date.now() - 30 * MINUTE;
+    const at = (minutes: number) => new Date(t0 + minutes * MINUTE);
+    const held = [{ venueKey: '222', quantity: 3 * UNIT }, { venueKey: '999', quantity: 2 * UNIT }];
+    await snapshot(pm, 10000, at(0), { positions: held });
+    await snapshot(pm, 10000, at(6), { positions: held });
+    const statuses = async () => (await client.query(
+      'SELECT venue_key, status FROM treasury.position_check ORDER BY venue_key')).rows;
+    expect(await statuses()).toEqual([
+      { venue_key: '222', status: 'BREAK' }, { venue_key: '999', status: 'UNKNOWN_VENUE_POSITION' },
+    ]);
+    // Sold by hand on the venue: neither side holds anything now.
+    await snapshot(pm, 10000, at(12), { positions: [] });
+    expect(await statuses()).toEqual([{ venue_key: '222', status: 'OK' }, { venue_key: '999', status: 'OK' }]);
+
+    await snapshot(pm, 10000, at(18), { positions: held });
+    await snapshot(pm, 10000, at(24), { positions: held });
+    // Resolved and redeemable: settlement is cash's to check, so the position check lets it go.
+    await snapshot(pm, 10000, at(30), { positions: [{ venueKey: '222', quantity: 3 * UNIT, redeemable: true }] });
+    expect(await statuses()).toEqual([{ venue_key: '999', status: 'OK' }]);
+  });
+
   it('reconciles each wallet in a pool on its own', async () => {
     const falcon = await account(2, 'quiet-falcon-01');
     const otter = await account(2, 'sleepy-otter-42');

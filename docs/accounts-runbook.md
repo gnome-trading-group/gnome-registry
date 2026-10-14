@@ -13,8 +13,9 @@ Lifecycle: `PROVISIONING` → `ACTIVE` → `DRAINING` → `RETIRED` (a draining 
    fund it **directly from a CEX withdrawal**. Never fund it from another of our wallets, and never fund gas or
    approvals from a shared address: either links the wallets publicly.
 2. On the **Treasury** page, click **Register account**, pick the exchange and enter the credentials (or upload them:
-   a JSON file for Polymarket, the `.pem` key file for Kalshi). For Kalshi and Polymarket US, add read-only
-   credentials for the poller if the venue issues them.
+   a JSON file for Polymarket, the `.pem` key file for Kalshi). For Kalshi and Polymarket US, tick "Use a separate
+   read-only key" and enter one if the venue issues them; otherwise the poller reads with a copy of the trading key
+   (`/read`).
    The registry draws a gamer-tag label (e.g. `sleepy-otter-42`), stores the credentials in Secrets Manager as
    `gnome/accounts/<label>/trading` (and `/read`) in every trading region, derives the public identifiers (wallet
    addresses, Kalshi subaccount) from them, and registers the account as `PROVISIONING`. The credentials are never
@@ -32,7 +33,7 @@ run; running sessions keep the old keys until relaunched.
 
 The three accounts seeded by migration 036 start on the old shared `gnome/exchange-credentials/*` secrets, with no
 read-only key and (Polymarket Intl) no wallet address, so the poller can't read them: update each one's credentials
-once before trading live. That also fills in the Polymarket Intl funder address.
+once before trading live (this writes a `/read` secret too). That also fills in the Polymarket Intl funder address.
 
 ## Rotate a Polymarket Intl wallet
 

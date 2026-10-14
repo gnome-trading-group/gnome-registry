@@ -101,10 +101,17 @@ export function credentialsFor(exchangeCode: string, fields: Fields, what: strin
   }
 }
 
-// What a read-only secret must hold for the poller; Polymarket Intl reads the chain and needs none.
-function readSecretFor(exchangeCode: string, fields: Fields | undefined): Record<string, string> | null {
-  if (fields === undefined || fields === null) return null;
-  if (exchangeCode === 'POLYMARKET_INTL') throw new CreateError(400, 'Polymarket Intl accounts are read without credentials');
+// What the poller reads the account with; Polymarket Intl reads the chain and needs none. Without a separate
+// read-only key, the trading key is copied for it: the poller only reads with it, and still never sees the trading
+// secret itself.
+export function readSecretFor(
+  exchangeCode: string, fields: Fields | undefined, trading: Record<string, string>,
+): Record<string, string> | null {
+  if (exchangeCode === 'POLYMARKET_INTL') {
+    if (fields !== undefined && fields !== null) throw new CreateError(400, 'Polymarket Intl accounts are read without credentials');
+    return null;
+  }
+  if (fields === undefined || fields === null) return trading;
   return credentialsFor(exchangeCode, fields, 'readCredentials').secret;
 }
 
@@ -163,7 +170,7 @@ export async function createAccount(body: CreateRequest, actor: string) {
     `/exchanges?exchangeId=${body.exchangeId}`, 'GET', apiKey))[0];
   if (!exchange) throw new CreateError(400, `Unknown exchange ${body.exchangeId}`);
   const { secret, venueRef } = credentialsFor(exchange.exchange_code, body.credentials, 'credentials');
-  const readSecret = readSecretFor(exchange.exchange_code, body.readCredentials);
+  const readSecret = readSecretFor(exchange.exchange_code, body.readCredentials, secret);
 
   for (let attempt = 0; attempt < LABEL_ATTEMPTS; attempt++) {
     const label = gamertag();
@@ -217,8 +224,7 @@ interface UpdateRequest {
 }
 
 // Gives an existing account new credentials under its own label's secrets, for keys a venue rotated, or for the
-// accounts seeded from the old per-exchange secrets, which had no read-only key or wallet address. Without new
-// read-only credentials, the account keeps the read secret it has.
+// accounts seeded from the old per-exchange secrets, which had no read-only key or wallet address.
 export async function updateCredentials(body: UpdateRequest, actor: string) {
   if (!isPositiveInt(body.accountId)) throw new CreateError(400, 'accountId must be a positive integer');
   if (body.credentials === null || typeof body.credentials !== 'object') throw new CreateError(400, 'credentials are required');
@@ -233,7 +239,7 @@ export async function updateCredentials(body: UpdateRequest, actor: string) {
   const { secret, venueRef } = credentialsFor(account.exchange_code, body.credentials, 'credentials');
   const changed = identityChange(account.venue_ref, venueRef);
   if (changed) throw new CreateError(409, changed);
-  const readSecret = readSecretFor(account.exchange_code, body.readCredentials);
+  const readSecret = readSecretFor(account.exchange_code, body.readCredentials, secret);
 
   const tradingSecretName = `gnome/accounts/${account.label}/trading`;
   const readSecretName = readSecret ? `gnome/accounts/${account.label}/read` : account.read_secret_name;
