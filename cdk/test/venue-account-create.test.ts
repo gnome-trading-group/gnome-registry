@@ -22,6 +22,15 @@ describe('venue account credentials', () => {
       .toThrow(/readable PEM/);
   });
 
+  it('stores a Kalshi key as PKCS#8, the only form the orchestrator reads, even when uploaded as PKCS#1', () => {
+    const { privateKey } = generateKeyPairSync('rsa', { modulusLength: 2048 });
+    const pkcs1 = privateKey.export({ type: 'pkcs1', format: 'pem' }).toString();
+    expect(pkcs1).toContain('BEGIN RSA PRIVATE KEY');
+    const { secret } = credentialsFor('KALSHI', { apiKey: 'key', privateKey: pkcs1 }, 'credentials');
+    expect(secret.privateKey).toBe(privateKey.export({ type: 'pkcs8', format: 'pem' }).toString().trim());
+    expect(secret.privateKey.startsWith('-----BEGIN PRIVATE KEY-----')).toBe(true);
+  });
+
   it('takes a Polymarket wallet\'s public addresses from the very credentials it signs with', () => {
     const { secret, venueRef } = credentialsFor('POLYMARKET_INTL', polymarket, 'credentials');
     expect(secret.signatureType).toBe('3');

@@ -49,10 +49,14 @@ export function credentialsFor(exchangeCode: string, fields: Fields, what: strin
 } {
   switch (exchangeCode) {
     case 'KALSHI': {
-      const privateKey = text(fields, 'privateKey', what);
+      // Kalshi issues PKCS#1 keys (BEGIN RSA PRIVATE KEY), but the orchestrator reads only PKCS#8, so every key is
+      // stored as PKCS#8 whatever form it was uploaded in.
+      let privateKey: string;
       try {
-        createPrivateKey(privateKey);
-      } catch {
+        privateKey = createPrivateKey(text(fields, 'privateKey', what))
+          .export({ type: 'pkcs8', format: 'pem' }).toString().trim();
+      } catch (error) {
+        if (error instanceof CreateError) throw error;
         throw new CreateError(400, `${what}: privateKey isn't a readable PEM private key`);
       }
       const secret: Record<string, string> = { apiKey: text(fields, 'apiKey', what), privateKey };
