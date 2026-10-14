@@ -1,7 +1,7 @@
 import { isAutomaticActor, normalizeType, severityOf } from '../lambda/alerts/alert-types';
 import { sinksFor } from '../lambda/alerts/routes';
 import { fromAlarm } from '../lambda/alerts/alert-router';
-import { escape, messageFor } from '../lambda/alerts/sinks/slack';
+import { escape, firingMessage, resolvedMessage } from '../lambda/alerts/sinks/slack';
 import { eventFor } from '../lambda/alerts/sinks/incidentio';
 import { parseAlert } from '../lambda/alerts/alerts-ingest';
 import { AlertEvent, Delivery } from '../lambda/alerts/model';
@@ -78,18 +78,45 @@ describe('CloudWatch alarms', () => {
 });
 
 describe('sinks', () => {
+  const target = { controllerUrl: 'https://controller', stage: 'prod' };
+
   it('escapes Slack markup so nothing a strategy writes can ping the channel', () => {
     expect(escape('<!channel> a & b > c')).toBe('&lt;!channel&gt; a &amp; b &gt; c');
-    const text = JSON.stringify(messageFor(delivery(), 'https://controller', false));
-    expect(text).not.toContain('<!channel>');
-    expect(text).toContain('Check the venue.');
-    expect(text).toContain('https://controller/sessions/s1');
+    expect(JSON.stringify(firingMessage(delivery(), target))).not.toContain('<!channel>');
   });
 
-  it('resolving drops the first steps and turns the message green', () => {
-    const resolved = messageFor(delivery({ status: 'RESOLVED' }), 'https://controller', true);
-    expect(resolved.attachments[0].color).toBe('#2e7d32');
-    expect(JSON.stringify(resolved)).not.toContain('Check the venue.');
+  it('lays an alert out like a CloudWatch alarm: bar, header, reason, fields, next step, runbook', () => {
+    const message = firingMessage(delivery(), target);
+    const [attachment] = message.attachments;
+    const blocks = attachment.blocks as any[];
+    expect(attachment.color).toBe('#E01E5A');
+    expect(blocks[0].text.text).toBe(':rotating_light:  *Critical*  ·  *Session s1 died*');
+    expect(blocks[1].text.text).toBe('> NullPointerException &lt;!channel&gt;');
+    expect(blocks[2].fields.map((f: any) => f.text)).toEqual(['*Strategy*\narb', '*Mode*\nlive', '*Session*\ns1']);
+    expect(blocks[3].text.text).toBe(':point_right:  Check the venue.');
+    expect(blocks[4].elements.map((b: any) => [b.text.text, b.style])).toEqual([
+      [':book:  Runbook', 'primary'], ['Session', undefined], ['All alerts', undefined],
+    ]);
+    expect(blocks[5].elements[0].text).toBe('gnome alerts  ·  prod  ·  first seen 12:00 UTC');
+  });
+
+  it('keeps a stack trace\'s lines in a code block', () => {
+    const blocks = firingMessage(delivery({ body: 'Boom\n    at A.b(A.java:1)' }), target).attachments[0].blocks as any[];
+    expect(blocks[1].text.text).toBe('```Boom\n    at A.b(A.java:1)```');
+  });
+
+  it('colours each severity from Slack\'s palette, errors a deeper red than critical', () => {
+    expect(firingMessage(delivery({ severity: 'ERROR' }), target).attachments[0].color).toBe('#A4262C');
+    expect(firingMessage(delivery({ severity: 'WARNING' }), target).attachments[0].color).toBe('#ECB22E');
+    expect(firingMessage(delivery({ severity: 'INFO' }), target).attachments[0].color).toBe('#36C5F0');
+  });
+
+  it('resolving turns the message green and short', () => {
+    const resolved = resolvedMessage(delivery({ status: 'RESOLVED' }), target, new Date('2026-10-14T12:03:00Z'));
+    const blocks = resolved.attachments[0].blocks as any[];
+    expect(resolved.attachments[0].color).toBe('#2EB67D');
+    expect(blocks[0].text.text).toBe(':white_check_mark:  *Resolved*  ·  Session s1 died');
+    expect(blocks[1].elements[0].text).toBe('Critical  ·  after 3m  ·  gnome alerts  ·  prod');
   });
 
   it('sends incident.io the key it deduplicates on and the runbook', () => {

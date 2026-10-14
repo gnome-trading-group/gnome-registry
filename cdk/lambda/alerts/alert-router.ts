@@ -86,6 +86,7 @@ async function deliver(d: Delivery): Promise<void> {
       if (sink === 'slack') {
         slackTs = await sendToSlack(d, {
           token: await secret(process.env.SLACK_BOT_TOKEN_SECRET!), channel: process.env.SLACK_CHANNEL!, controllerUrl,
+          stage: stage(),
         });
       } else {
         const { alertSourceConfigId, token } = JSON.parse(await secret(process.env.INCIDENT_IO_SECRET!));
