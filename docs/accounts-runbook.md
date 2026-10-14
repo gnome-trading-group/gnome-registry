@@ -71,7 +71,7 @@ which key id it is, and Secrets Manager's versions and CloudTrail keep the histo
 
 Use a key of its own, never an account's trading or poller key. Kalshi's should have only the `read` scope;
 Polymarket US keys have no scopes, so its market data key can trade the account it was created on. Polymarket Intl
-needs none (public market data). **Binance** still uses `gnome/exchange-credentials/binance`.
+needs none (public market data).
 
 Running sessions and collectors keep the key they connected with; each picks up a new one when it next starts.
 

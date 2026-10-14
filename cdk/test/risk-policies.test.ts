@@ -120,6 +120,7 @@ describe('risk policy targets and validation', () => {
     [{ policyType: 'KILL_SWITCH', sessionId: "x'y", parameters: {} }],
     [{ policyType: 'MAX_NOTIONAL', parameters: { maxNotionalValue: 1 } }],
     [{ policyType: 'MAX_CONSECUTIVE_REJECTS', parameters: { maxRejects: 0 } }],
+    [{ policyType: 'MARKET_ORDER_SLIPPAGE', parameters: { maxSlippage: -1 } }],
     [{ policyType: 'KILL_SWITCH', exchangeId: 3, listingId: 500, parameters: {} }],
   ])('rejects %j with a 400 before writing', async (body) => {
     const response = await handler(event('POST', body));
@@ -134,6 +135,12 @@ describe('risk policy targets and validation', () => {
     });
     const response = await handler(event('POST', { policyType: 'KILL_SWITCH', sessionId: 'abc', strategyId: 9, parameters: {} }));
     expect(response.statusCode).toBe(400);
+  });
+
+  it('takes a market order slippage of 0, meaning at the touch', async () => {
+    const response = await handler(event('POST', { policyType: 'MARKET_ORDER_SLIPPAGE', parameters: { maxSlippage: 0 } }));
+    expect(response.statusCode).not.toBe(400);
+    expect(statements()).toContain('INSERT');
   });
 
   it('validates new parameters against the stored policy type', async () => {

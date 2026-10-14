@@ -33,7 +33,10 @@ const POLICY_PARAMETERS: Record<string, string[]> = {
   MAX_OPEN_ORDERS: ['maxOpenOrders'],
   PRICE_COLLAR: ['maxDeviation'],
   MAX_TOTAL_PNL_LOSS: ['maxLoss'],
+  MARKET_ORDER_SLIPPAGE: ['maxSlippage'],
 };
+// 0 slippage is a real setting: take at the touch, tighter than any looser row that also applies.
+const ZERO_ALLOWED = new Set(['maxSlippage']);
 
 const MAX_ID = 2147483647;
 const SESSION_ID_PATTERN = /^[A-Za-z0-9_-]+$/;
@@ -55,8 +58,9 @@ export function validateParameters(policyType: string, parameters: unknown): voi
   }
   for (const key of keys) {
     const value = (parameters as Record<string, unknown>)[key];
-    if (typeof value !== 'number' || !Number.isSafeInteger(value) || value <= 0) {
-      throw new ValidationError(`${key} must be a positive integer`);
+    const floor = ZERO_ALLOWED.has(key) ? 0 : 1;
+    if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < floor) {
+      throw new ValidationError(`${key} must be a ${floor === 0 ? 'non-negative' : 'positive'} integer`);
     }
   }
 }

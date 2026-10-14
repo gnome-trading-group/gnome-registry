@@ -299,7 +299,7 @@ export async function deleteAccountSecrets(accountId: unknown) {
 
 // Market data signs in with one key per exchange, shared by every session and collector, so it belongs to no venue
 // account. Secrets Manager is its only store: tags say who set it and which key it is, and the secret's versions and
-// CloudTrail keep its history. Binance, not a venue we trade, stays on its old secret.
+// CloudTrail keep its history.
 export const MARKET_DATA_EXCHANGES: Record<string, string> = Object.fromEntries(
   VENUES.filter(code => needsKey(code, 'marketData'))
     .map(code => [code, `gnome/market-data/${code.toLowerCase().replace(/_/g, '-')}`]),

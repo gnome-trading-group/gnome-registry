@@ -14,7 +14,8 @@ import { loadListingInfo, loadSessionStates } from './pnl-state';
 //   MAX_TOTAL_PNL_LOSS  the loss (realized + unrealized - fees, this session's own realized PnL and fees, inherited
 //                       inventory at its original cost), on the policy's listing or across the session's listings
 //   MAX_COMMITTED_CAPITAL  the dollars the positions and working orders tie up (ledger-math committedCapital)
-//   MAX_ORDER_SIZE, MAX_ORDER_NOTIONAL, PRICE_COLLAR  judge each order alone, so they have no running usage, and
+//   MAX_ORDER_SIZE, MAX_ORDER_NOTIONAL, PRICE_COLLAR, MARKET_ORDER_SLIPPAGE  apply to each order alone, so they have
+//   no running usage, and
 //   MAX_CONSECUTIVE_REJECTS counts a run of venue refusals the ledger doesn't record as a run
 // A policy on an exchange measures the session's listings on that exchange. Values and limits are scaled-integer
 // strings in each policy's own units.
@@ -23,6 +24,7 @@ const PER_ORDER: Record<string, string> = {
   MAX_ORDER_SIZE: 'maxOrderSize',
   MAX_ORDER_NOTIONAL: 'maxOrderNotional',
   PRICE_COLLAR: 'maxDeviation',
+  MARKET_ORDER_SLIPPAGE: 'maxSlippage',
   MAX_CONSECUTIVE_REJECTS: 'maxRejects',
 };
 

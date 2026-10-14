@@ -55,7 +55,7 @@ describe('venue account credentials', () => {
 
   it('refuses a missing field, naming it, and a venue it can\'t trade', () => {
     expect(() => credentialsFor('KALSHI', { privateKey: pem }, 'credentials')).toThrow('credentials needs apiKey');
-    expect(() => credentialsFor('BINANCE', {}, 'credentials')).toThrow(CreateError);
+    expect(() => credentialsFor('UNKNOWN_VENUE', {}, 'credentials')).toThrow(CreateError);
   });
 
   it('needs every venue\'s own poller key except where the venue has no use for one', () => {
