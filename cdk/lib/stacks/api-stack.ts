@@ -160,11 +160,6 @@ export class ApiStack extends cdk.Stack {
       vpcSubnets: this.props.vpc.selectSubnets({ subnetType: ec2.SubnetType.PRIVATE_ISOLATED }),
     });
     this.props.database.grantConnect(strategySessionsDbLambda);
-    // Live launches need every required risk policy and enough money behind each account's allocations. Off until
-    // the treasury has balance snapshots for every account (`cdk deploy -c liveLaunchChecks=on`), since with them on
-    // a live launch is refused without one.
-    strategySessionsDbLambda.addEnvironment(
-      'LIVE_LAUNCH_CHECKS', this.node.tryGetContext('liveLaunchChecks') === 'on' ? 'on' : 'off');
 
     const strategySessionsLauncherLambda = new lambda.NodejsFunction(this, 'strategy-session-launcher-lambda', {
       entry: join(__dirname, '..', '..', 'lambda', 'endpoints', 'strategy-session-launcher.ts'),

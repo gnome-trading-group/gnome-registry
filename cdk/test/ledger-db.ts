@@ -34,3 +34,33 @@ export async function bindAccount(client: PoolClient, sessionId: string, exchang
     [sessionId, exchangeId, accountId]);
   return accountId;
 }
+
+// What a live session needs before it may be created (launch-checks.ts): every required risk policy, here as global
+// rows generous enough never to bind, and a recent balance on each active venue account with room for the budgets.
+// Idempotent, so a test can call it before each live session it creates.
+const GENEROUS = 1_000_000_000_000_000;
+
+export async function allowLiveLaunches(client: PoolClient): Promise<void> {
+  const required: [string, Record<string, number>][] = [
+    ['MAX_COMMITTED_CAPITAL', { maxCapital: GENEROUS }],
+    ['MAX_TOTAL_PNL_LOSS', { maxLoss: GENEROUS }],
+    ['MAX_POSITION', { maxPosition: GENEROUS }],
+    ['MAX_CONSECUTIVE_REJECTS', { maxRejects: 1000 }],
+  ];
+  for (const [type, parameters] of required) {
+    await client.query(
+      `INSERT INTO risk.policy (policy_type, parameters) SELECT $1::varchar, $2::jsonb
+       WHERE NOT EXISTS (SELECT 1 FROM risk.policy WHERE policy_type = $1::varchar AND strategy_id IS NULL
+                         AND exchange_id IS NULL AND listing_id IS NULL AND session_id IS NULL)`,
+      [type, JSON.stringify(parameters)]);
+  }
+  // A minute old, so a balance a test posts itself is always the latest.
+  await client.query(
+    `INSERT INTO treasury.balance_snapshot (account_id, taken_at, source, status, cash_total, cash_available)
+     SELECT a.account_id, NOW() - INTERVAL '1 minute', 'MANUAL', 'OK', $1, $1
+     FROM account_master.venue_account a
+     WHERE a.status = 'ACTIVE' AND NOT EXISTS (
+       SELECT 1 FROM treasury.balance_snapshot b WHERE b.account_id = a.account_id AND b.status = 'OK'
+         AND b.taken_at > NOW() - INTERVAL '10 minutes')`,
+    [String(GENEROUS)]);
+}

@@ -1,5 +1,5 @@
 import { Pool, PoolClient } from 'pg';
-import { connectExclusive, LOCK_TIMEOUT_MS, release } from './ledger-db';
+import { allowLiveLaunches, connectExclusive, LOCK_TIMEOUT_MS, release } from './ledger-db';
 import { withTransaction } from '../lambda/endpoints/base';
 import { gamertag, isLabel } from '../lambda/endpoints/gamertag';
 import { bookAdjustment, parseAdjustment } from '../lambda/endpoints/ledger-adjustments';
@@ -61,6 +61,7 @@ describeDb('venue accounts, against Postgres', () => {
   }
 
   async function create(sessionId: string, listings: number[], extra: Record<string, unknown> = {}, strategyId = 1) {
+    await allowLiveLaunches(client);
     return sessions.createOne(JSON.stringify({
       sessionId, strategyId, status: 'SUBMITTED', mode: 'live', config: { listings, ...extra },
     }));
@@ -111,7 +112,7 @@ describeDb('venue accounts, against Postgres', () => {
     expect(await sessionAccounts(client, 'p')).toEqual([]);
   });
 
-  it('a pinned label wins; otherwise a strategy sticks to the account holding its positions; else the newest', async () => {
+  it('a pinned label wins; otherwise a strategy sticks to the account holding its positions; else the most free', async () => {
     await register(2, 'quiet-falcon-01');
     await register(2, 'sleepy-otter-42');
     expect((await create('a', [600])).statusCode).toBe(200);

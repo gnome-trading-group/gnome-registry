@@ -51,8 +51,7 @@ on multiple wallets before scaling up.
 
 ## Launch checks
 
-Once every account has a green snapshot, deploy the registry with `-c liveLaunchChecks=on`. From then on a live
-session is refused unless every listing it trades is covered by MAX_COMMITTED_CAPITAL, MAX_TOTAL_PNL_LOSS,
+A live session is refused unless every listing it trades is covered by MAX_COMMITTED_CAPITAL, MAX_TOTAL_PNL_LOSS,
 MAX_POSITION and MAX_CONSECUTIVE_REJECTS, the strategy has a MAX_COMMITTED_CAPITAL for each exchange, and the bound
-account's latest snapshot is fresh with room for the strategy's budget. If the poller is down, record a manual
-snapshot on the Treasury page.
+account's latest balance snapshot is fresh with room for the strategy's budget. Paper sessions are never checked. If
+the poller is down, record a manual snapshot on the Treasury page.

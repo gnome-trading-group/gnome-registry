@@ -1,6 +1,6 @@
 import { APIGatewayProxyEvent, APIGatewayProxyEventQueryStringParameters } from 'aws-lambda';
 import { ResourceHandler, withTransaction } from './base';
-import { LaunchCheckError, liveLaunchChecksEnabled } from './launch-checks';
+import { LaunchCheckError } from './launch-checks';
 import { AccountAssignmentError, bindAccounts } from './venue-account-assignment';
 
 interface ISession {
@@ -171,8 +171,7 @@ export class StrategySessionHandler extends ResourceHandler {
            SELECT $1, $2, $3, unnest($4::int[])`,
           [s.sessionId, s.strategyId, s.mode, listings]);
         if (s.mode === 'live') {
-          await bindAccounts(client, s.sessionId, s.strategyId, s.config, listings,
-            { checks: liveLaunchChecksEnabled(), now: new Date() });
+          await bindAccounts(client, s.sessionId, s.strategyId, s.config, listings, new Date());
         }
         return result.rows[0];
       });

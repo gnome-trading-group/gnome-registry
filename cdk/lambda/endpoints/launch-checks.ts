@@ -81,7 +81,3 @@ export async function requireAllocation(
   const problem = shortfall(account, budget);
   if (problem) throw new LaunchCheckError(422, problem);
 }
-
-export function liveLaunchChecksEnabled(): boolean {
-  return process.env.LIVE_LAUNCH_CHECKS === 'on';
-}

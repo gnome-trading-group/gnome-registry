@@ -7,15 +7,9 @@ import { accountTreasury } from './treasury';
 //   pinned  config.accounts.<EXCHANGE_CODE> names an ACTIVE account's label
 //   sticky  else the ACTIVE account where the strategy already holds positions there, so its next session can
 //           manage that inventory (the one holding the most, if several)
-//   picked  else, with launch checks on, the ACTIVE account with the most free capital that can carry the
-//           strategy's budget; with them off, the ACTIVE account activated most recently
-// A DRAINING account is never chosen: what it holds is left to resolve where it is. With launch checks on, the
-// session must also be covered by every required risk policy and its account must carry its budget.
-
-export interface BindOptions {
-  checks: boolean;
-  now: Date;
-}
+//   picked  else the ACTIVE account with the most free capital that can carry the strategy's budget
+// A DRAINING account is never chosen: what it holds is left to resolve where it is. The session must also be covered
+// by every required risk policy, and its account must carry its budget.
 
 // pg_advisory_xact_lock(ACCOUNT_LOCK, exchange_id): every choice of account on an exchange takes this, so two
 // sessions created at once see each other's bindings, and a status change can't slip in between.
@@ -65,7 +59,7 @@ async function pickByFreeCapital(
 }
 
 async function chooseAccount(
-  client: PoolClient, strategyId: number, exchange: ExchangeRow, pinned: unknown, options: BindOptions,
+  client: PoolClient, strategyId: number, exchange: ExchangeRow, pinned: unknown, now: Date,
 ): Promise<{ account_id: number; label: string }> {
   if (pinned !== undefined) {
     if (typeof pinned !== 'string') {
@@ -89,14 +83,7 @@ async function chooseAccount(
      ORDER BY SUM(p.total_cost) DESC, a.account_id
      LIMIT 1`,
     [exchange.exchange_id, strategyId])).rows[0];
-  const chosen = sticky ?? (options.checks
-    ? await pickByFreeCapital(client, strategyId, exchange, options.now)
-    : (await client.query(
-      `SELECT account_id, label FROM account_master.venue_account
-       WHERE exchange_id = $1 AND status = 'ACTIVE'
-       ORDER BY activated_at DESC NULLS LAST, account_id DESC
-       LIMIT 1`,
-      [exchange.exchange_id])).rows[0]);
+  const chosen = sticky ?? await pickByFreeCapital(client, strategyId, exchange, now);
   const locked = chosen && (await client.query(
     `SELECT account_id, label FROM account_master.venue_account WHERE account_id = $1 AND status = 'ACTIVE' FOR SHARE`,
     [chosen.account_id])).rows[0];
@@ -125,9 +112,9 @@ async function refuseOrdersElsewhere(
 
 export async function bindAccounts(
   client: PoolClient, sessionId: string, strategyId: number, config: Record<string, unknown>, listings: number[],
-  options: BindOptions,
+  now: Date,
 ): Promise<Binding[]> {
-  if (options.checks) await requireCoverage(client, strategyId, listings);
+  await requireCoverage(client, strategyId, listings);
   const exchanges = (await client.query<ExchangeRow>(
     `SELECT DISTINCT e.exchange_id, e.exchange_code FROM sm.listing l JOIN sm.exchange e USING (exchange_id)
      WHERE l.listing_id = ANY($1::int[]) ORDER BY e.exchange_id`,
@@ -136,12 +123,9 @@ export async function bindAccounts(
   const bindings: Binding[] = [];
   for (const exchange of exchanges) {
     await client.query('SELECT pg_advisory_xact_lock($1, $2)', [ACCOUNT_LOCK, exchange.exchange_id]);
-    const account = await chooseAccount(client, strategyId, exchange, pins[exchange.exchange_code], options);
+    const account = await chooseAccount(client, strategyId, exchange, pins[exchange.exchange_code], now);
     await refuseOrdersElsewhere(client, strategyId, exchange, account.account_id);
-    if (options.checks) {
-      await requireAllocation(client, strategyId, exchange.exchange_id, exchange.exchange_code, account.account_id,
-        options.now);
-    }
+    await requireAllocation(client, strategyId, exchange.exchange_id, exchange.exchange_code, account.account_id, now);
     await client.query(
       `INSERT INTO account_master.session_venue_account (session_id, exchange_id, account_id) VALUES ($1, $2, $3)`,
       [sessionId, exchange.exchange_id, account.account_id]);

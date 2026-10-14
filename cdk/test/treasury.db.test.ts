@@ -1,5 +1,5 @@
 import { Pool, PoolClient } from 'pg';
-import { connectExclusive, LOCK_TIMEOUT_MS, release } from './ledger-db';
+import { allowLiveLaunches, connectExclusive, LOCK_TIMEOUT_MS, release } from './ledger-db';
 import { withTransaction } from '../lambda/endpoints/base';
 import { writeBatch } from '../lambda/endpoints/ledger-batch';
 import { attention } from '../lambda/endpoints/monitoring-attention';
@@ -28,12 +28,10 @@ describeDb('treasury, against Postgres', () => {
   }, LOCK_TIMEOUT_MS);
 
   afterAll(async () => {
-    delete process.env.LIVE_LAUNCH_CHECKS;
     await release(pool, client);
   });
 
   beforeEach(async () => {
-    delete process.env.LIVE_LAUNCH_CHECKS;
     await client.query(`TRUNCATE ledger.fill, ledger.position, ledger.order, ledger.mark, strategy.session_listing,
       risk.policy, risk.policy_history, strategy.session, strategy.strategy, sm.event_contract, sm.event, sm.listing,
       sm.security, sm.exchange, account_master.venue_account, account_master.venue_account_history, treasury.transfer,
@@ -64,7 +62,9 @@ describeDb('treasury, against Postgres', () => {
     }), 'ops@example.com');
   }
 
-  async function live(sessionId: string, listings: number[], strategyId = 1) {
+  // ready: set up what a live launch needs first; false for the tests of those checks themselves.
+  async function live(sessionId: string, listings: number[], strategyId = 1, ready = true) {
+    if (ready) await allowLiveLaunches(client);
     const response = await sessions.createOne(JSON.stringify({
       sessionId, strategyId, status: 'RUNNING', mode: 'live', config: { listings },
     }));
@@ -246,12 +246,13 @@ describeDb('treasury, against Postgres', () => {
     await live('b', [601], 2);
     expect(await (await client.query(
       `SELECT array_agg(account_id ORDER BY session_id) AS a FROM account_master.session_venue_account`)).rows[0].a)
-      .toEqual([otter, otter]);
+      .toEqual([falcon, otter]);
     await trade('a', 600, 0, 10, 40, 10);
     await trade('b', 601, 0, 10, 30, 10);
-    // Both sessions went to the newest wallet: $50 less $4 and $3 spent.
-    expect((await snapshot(otter, 4300, new Date())).cashStatus).toBe('OK');
-    expect((await snapshot(falcon, 5000, new Date())).cashStatus).toBe('OK');
+    // Auto-pick spread the sessions by free capital, the first budget counting against the first wallet: each wallet
+    // holds its $50 less what its own session spent.
+    expect((await snapshot(falcon, 4600, new Date())).cashStatus).toBe('OK');
+    expect((await snapshot(otter, 4700, new Date())).cashStatus).toBe('OK');
   });
 
   it('refuses a transfer whose sign contradicts its kind', async () => {
@@ -261,27 +262,26 @@ describeDb('treasury, against Postgres', () => {
     }), 'ops@example.com')).rejects.toThrow(/wrong sign/);
   });
 
-  it('with launch checks on, a live session needs every required policy and the money behind its budget', async () => {
-    process.env.LIVE_LAUNCH_CHECKS = 'on';
+  it('a live session needs every required policy and the money behind its budget', async () => {
     const kalshi = await account(1, 'steady-heron-01');
     await open(kalshi, 100);
     await updateConfig(client, JSON.stringify({ accountId: kalshi, minBuffer: 10 * DOLLAR }), 'ops@example.com');
 
-    const uncovered = await live('a', [500]);
+    const uncovered = await live('a', [500], 1, false);
     expect(uncovered.statusCode).toBe(422);
     expect(JSON.parse(uncovered.body).message).toMatch(/MAX_COMMITTED_CAPITAL on listing 500/);
 
     await requiredPolicies(50, 1);
-    const stale = await live('a', [500]);
+    const stale = await live('a', [500], 1, false);
     expect(stale.statusCode).toBe(422);
     expect(JSON.parse(stale.body).message).toMatch(/no recent balance snapshot/);
 
     await snapshot(kalshi, 10000, new Date());
-    expect((await live('a', [500])).statusCode).toBe(200);
+    expect((await live('a', [500], 1, false)).statusCode).toBe(200);
     // $100 held, $10 kept free, $50 allocated: another $50 doesn't fit.
     await client.query(`INSERT INTO strategy.strategy (name) VALUES ('third')`);
     await requiredPolicies(50, 1, 3);
-    const full = await live('b', [501], 3);
+    const full = await live('b', [501], 3, false);
     expect(full.statusCode).toBe(422);
     expect(JSON.parse(full.body).message).toMatch(/can't take a further \$50\.00/);
 
@@ -289,8 +289,7 @@ describeDb('treasury, against Postgres', () => {
     expect(items.map(i => i.kind)).not.toContain('ALLOCATION_EXCEEDS_BALANCE');
   });
 
-  it('with launch checks on, auto-pick takes the wallet with the most free capital that fits', async () => {
-    process.env.LIVE_LAUNCH_CHECKS = 'on';
+  it('auto-pick takes the wallet with the most free capital that fits', async () => {
     const falcon = await account(2, 'quiet-falcon-01');
     const otter = await account(2, 'sleepy-otter-42');
     await open(falcon, 100);
@@ -298,7 +297,7 @@ describeDb('treasury, against Postgres', () => {
     await snapshot(falcon, 10000, new Date());
     await snapshot(otter, 3000, new Date());
     await requiredPolicies(40, 2);
-    expect((await live('a', [600])).statusCode).toBe(200);
+    expect((await live('a', [600], 1, false)).statusCode).toBe(200);
     const bound = (await client.query(`SELECT account_id FROM account_master.session_venue_account`)).rows[0];
     expect(bound.account_id).toBe(falcon);
 
