@@ -6,8 +6,8 @@ import { connectLedgerDatabase, createResponse, isPositiveInt, isSessionId, WRIT
 import { generateHaltUpsertQuery } from './risk-halts';
 import { ACCOUNT_LOCK } from './venue-account-assignment';
 
-// Venue accounts and the sessions bound to them. Registering one is the API key's (an operator's script, which also
-// put the credentials in Secrets Manager: only the secret's name comes here); reading a session's bindings is the
+// Venue accounts and the sessions bound to them. Registering one is the API key's (the account-creation Lambda, which
+// puts the credentials in Secrets Manager: only the secret's name comes here); reading a session's bindings is the
 // API key's too (a starting orchestrator); everything else, listing accounts and moving them through their
 // lifecycle, is Cognito only, so each change is attributed to a person.
 
@@ -156,6 +156,15 @@ export const handler = async (event: APIGatewayProxyEvent) => {
       const sessionId = event.queryStringParameters?.sessionId;
       if (!isSessionId(sessionId)) return createResponse(400, { message: 'sessionId must be a session id' });
       return createResponse(200, await sessionAccounts(client, sessionId));
+    }
+    // The account-creation Lambda (outside the VPC) deleting a retired account's secrets: names and status only.
+    if (resource === '/venue-accounts/secrets' && event.httpMethod === 'GET' && !isCognito(event)) {
+      const accountId = Number(event.queryStringParameters?.accountId);
+      if (!isPositiveInt(accountId)) return createResponse(400, { message: 'accountId must be a positive integer' });
+      const row = (await client.query(
+        `SELECT label, status, trading_secret_name, read_secret_name FROM account_master.venue_account
+         WHERE account_id = $1`, [accountId])).rows[0];
+      return row ? createResponse(200, row) : createResponse(404, { message: `Unknown account ${accountId}` });
     }
     if (resource === '/venue-accounts' && event.httpMethod === 'POST' && !isCognito(event)) {
       const registration = parseRegistration(event.body ?? '');

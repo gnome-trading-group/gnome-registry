@@ -132,13 +132,45 @@ export class ApiStack extends cdk.Stack {
     // API key only: the OMS halts its own strategy automatically, and the handler can only ever enable a kill.
     this.attachMethods('risk/halts', 'risk-halts.ts', ['POST']);
 
-    // Venue accounts: an operator's script registers one (API key; the credentials go to Secrets Manager, not here),
+    // Venue accounts: the account-creation Lambda registers one (API key; the credentials go to Secrets Manager, not here),
     // a starting orchestrator reads the accounts its session was bound to (API key), and listing accounts or moving
     // one through its lifecycle is a person's (Cognito).
     const venueAccounts = this.createIntegration('venue-accounts.ts');
     this.attachIntegration('venue-accounts', venueAccounts, ['POST'], ['GET']);
     this.attachIntegration('venue-accounts/status', venueAccounts, [], ['PATCH']);
     this.attachIntegration('strategy-sessions/accounts', venueAccounts, ['GET'], ['GET']);
+    this.attachIntegration('venue-accounts/secrets', venueAccounts, ['GET'], []);
+
+    // Creating an account from the controller puts its credentials in Secrets Manager, which the registry's isolated
+    // subnets can't reach, so this one runs outside the VPC and registers the account through the API. Cognito only,
+    // so each account is attributed to the person who created it; it may only touch gnome/accounts/* secrets.
+    const accountCreator = new lambda.NodejsFunction(this, 'venue-account-create-lambda', {
+      entry: join(__dirname, '..', '..', 'lambda', 'endpoints', 'venue-account-create.ts'),
+      ...this.nodeJsProps,
+      bundling: {
+        externalModules: ['pg-native', '@aws-sdk/*'],
+      },
+      environment: {
+        REGISTRY_API_URL: `https://${this.api.restApiId}.execute-api.${this.region}.${this.urlSuffix}/${ApiStack.STAGE_NAME}/`,
+        REGISTRY_API_KEY_ID: this.apiKey.keyId,
+      },
+    });
+    accountCreator.addToRolePolicy(new iam.PolicyStatement({
+      actions: [
+        'secretsmanager:CreateSecret',
+        'secretsmanager:DeleteSecret',
+        'secretsmanager:ReplicateSecretToRegions',
+        'secretsmanager:TagResource',
+      ],
+      resources: [`arn:aws:secretsmanager:*:${this.account}:secret:gnome/accounts/*`],
+    }));
+    accountCreator.addToRolePolicy(new iam.PolicyStatement({
+      actions: ['apigateway:GET'],
+      resources: [`arn:aws:apigateway:${this.region}::/apikeys/${this.apiKey.keyId}`],
+    }));
+    const accountCreation = new apigw.LambdaIntegration(accountCreator, { scopePermissionToMethod: false });
+    this.attachIntegration('venue-accounts/create', accountCreation, [], ['POST']);
+    this.attachIntegration('venue-accounts/delete-secrets', accountCreation, [], ['POST']);
 
     // The treasury: the venue poller posts what each account holds and reads which accounts to poll (API key); an
     // operator reads where the money stands and records transfers, settings and manual readings (Cognito).

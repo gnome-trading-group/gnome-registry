@@ -141,6 +141,23 @@ describe('ApiStack auth', () => {
     }
   });
 
+  it('keeps creating an account and deleting its secrets Cognito-only, and reads secret names with the API key', () => {
+    for (const path of ['venue-accounts/create', 'venue-accounts/delete-secrets']) {
+      expect(hasResource(template, path)).toBe(false);
+      expect(hasResource(template, `cognito/${path}`)).toBe(true);
+    }
+    method(template, resourceId(template, 'venue-accounts/secrets'), 'GET');
+    expect(hasResource(template, 'cognito/venue-accounts/secrets')).toBe(false);
+  });
+
+  it('lets the account creator touch only venue account secrets', () => {
+    const statements = Object.values(template.findResources('AWS::IAM::Policy'))
+      .flatMap((p: any) => p.Properties.PolicyDocument.Statement)
+      .filter((s: any) => [s.Action].flat().includes('secretsmanager:CreateSecret'));
+    expect(statements).toHaveLength(1);
+    expect(JSON.stringify(statements[0].Resource)).toContain('secret:gnome/accounts/*');
+  });
+
   it('keeps moving an account through its lifecycle Cognito-only', () => {
     expect(hasResource(template, 'venue-accounts/status')).toBe(false);
     expect(hasResource(template, 'cognito/venue-accounts/status')).toBe(true);

@@ -12,23 +12,16 @@ Lifecycle: `PROVISIONING` → `ACTIVE` → `DRAINING` → `RETIRED` (a draining 
 1. **Polymarket Intl only:** create the wallet (UI or script) without a public username, derive its L2 API keys, and
    fund it **directly from a CEX withdrawal**. Never fund it from another of our wallets, and never fund gas or
    approvals from a shared address: either links the wallets publicly.
-2. Write the credentials to a local file, exactly as the orchestrator reads them:
-   - Polymarket Intl: `apiKey`, `secret`, `passphrase`, `ethereumPrivateKey`, `signerAddress`, `funderAddress`,
-     `signatureType`
-   - Kalshi: `apiKey`, `privateKey` (and `subaccount` if trading one)
-   - Polymarket US: `apiKey`, `secret`
-3. For Kalshi and Polymarket US, write a second file with read-only credentials for the poller if the venue issues
-   them (otherwise use the same key; it is only ever used to read).
-4. Register it (from `gnome-registry/cdk`, with your own AWS profile):
-   ```
-   npx ts-node scripts/register-account.ts --stage prod --profile prod --exchange POLYMARKET_INTL \
-     --credentials ~/wallet.json [--read-credentials ~/wallet-read.json] [--note "..."]
-   ```
-   It draws a gamer-tag label (e.g. `sleepy-otter-42`), stores the secrets in every trading region and registers
-   the account as `PROVISIONING`. Delete the local files afterwards.
-5. Wait for the venue poller to post a green balance snapshot (Treasury page).
-6. Record the account's `OPENING` transfer: the cash it holds now. Reconciliation starts there.
-7. Set the account's buffer and thresholds, then **Activate** it.
+2. On the **Treasury** page, click **Register account**, pick the exchange and enter the credentials (or upload them:
+   a JSON file for Polymarket, the `.pem` key file for Kalshi). For Kalshi and Polymarket US, add read-only
+   credentials for the poller if the venue issues them.
+   The registry draws a gamer-tag label (e.g. `sleepy-otter-42`), stores the credentials in Secrets Manager as
+   `gnome/accounts/<label>/trading` (and `/read`) in every trading region, derives the public identifiers (wallet
+   addresses, Kalshi subaccount) from them, and registers the account as `PROVISIONING`. The credentials are never
+   written to the database or logged; the dialog shows where they were stored.
+3. Wait for the venue poller to post a green balance snapshot (Treasury page).
+4. Record the account's `OPENING` transfer: the cash it holds now. Reconciliation starts there.
+5. Set the account's buffer and thresholds, then **Activate** it.
 
 ## Rotate a Polymarket Intl wallet
 
@@ -40,8 +33,8 @@ Lifecycle: `PROVISIONING` → `ACTIVE` → `DRAINING` → `RETIRED` (a draining 
 4. Once the old wallet's markets resolve, redeem in the Polymarket UI and withdraw to a **fresh deposit address for
    that wallet** (or a separate CEX sub-account): CEX deposit addresses are usually fixed per user, so sending every
    retired wallet to the same one clusters them publicly. Record the `WITHDRAWAL`.
-5. When the Treasury page says it is ready, **Retire** it, then delete its secrets:
-   `npx ts-node scripts/register-account.ts --retire-secrets --label <label> --profile prod`.
+5. When the Treasury page says it is ready, **Retire** it, then choose **Delete secrets** from its menu (recoverable
+   from the Secrets Manager console for 7 days).
 
 ## Linkage hygiene
 
