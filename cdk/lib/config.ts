@@ -9,6 +9,14 @@ export interface RegistryConfig {
   slackChannel: string;
   dbInstanceType: ec2.InstanceType;
   // Where the venue poller reads each venue's accounts.
+  // Where alerts go: every alert to the Slack channel; CRITICAL ones also page through incident.io where enabled.
+  // metaEmails hear when alerting itself is broken.
+  alerting: {
+    slackChannel: string;
+    controllerUrl: string;
+    incidentIo: boolean;
+    metaEmails: string[];
+  };
   venuePoller: {
     kalshiApiUrl: string;
     polygonRpcUrl: string;
@@ -32,11 +40,23 @@ export const CONFIGS: { [stage in Stage]?: RegistryConfig } = {
   [Stage.DEV]: {
     ...defaultConfig,
     account: GnomeAccount.InfraDev,
+    alerting: {
+      slackChannel: 'C08KX2GAUE4', // #gnome-alerts-dev
+      controllerUrl: 'https://controller-dev.gnometrading.group',
+      incidentIo: false,
+      metaEmails: [],
+    },
     venuePoller: { ...defaultConfig.venuePoller, kalshiApiUrl: 'https://external-api.demo.kalshi.co' },
   },
   [Stage.PROD]: {
     ...defaultConfig,
     account: GnomeAccount.InfraProd,
+    alerting: {
+      slackChannel: 'C08KD27QZKN', // #gnome-alerts-prod
+      controllerUrl: 'https://controller.gnometrading.group',
+      incidentIo: true,
+      metaEmails: ["alerts@gnometrading.group"],
+    },
     slackChannel: 'C0B60PCAPNC', // #gnome-security-master
     dbInstanceType: ec2.InstanceType.of(ec2.InstanceClass.T4G, ec2.InstanceSize.MEDIUM),
   },

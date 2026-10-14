@@ -1,0 +1,443 @@
+{
+  "alerts": {
+    "ACCOUNT_DUE_FOR_ROTATION": {
+      "summary": "A venue account has been active longer than its rotation period.",
+      "firstSteps": [
+        "Register and activate a replacement.",
+        "Drain this one.",
+        "Relaunch the sessions bound to it."
+      ],
+      "url": "https://github.com/gnome-trading-group/gnome-registry/blob/main/docs/runbooks/alerts/ACCOUNT_DUE_FOR_ROTATION.md"
+    },
+    "ACCOUNT_READY_TO_RETIRE": {
+      "summary": "A draining account is empty and can be retired.",
+      "firstSteps": [
+        "Withdraw any dust to a fresh address.",
+        "Retire it on Treasury.",
+        "Delete its secrets."
+      ],
+      "url": "https://github.com/gnome-trading-group/gnome-registry/blob/main/docs/runbooks/alerts/ACCOUNT_READY_TO_RETIRE.md"
+    },
+    "AGENT_EXITED": {
+      "summary": "Part of a running session has stopped; the session is no longer whole.",
+      "firstSteps": [
+        "Open the session page to see which agent exited.",
+        "If live: check the venue for resting orders.",
+        "Stop and relaunch the session."
+      ],
+      "url": "https://github.com/gnome-trading-group/gnome-registry/blob/main/docs/runbooks/alerts/AGENT_EXITED.md"
+    },
+    "AGENT_STALLED": {
+      "summary": "A hot-path agent has made no progress for a while.",
+      "firstSteps": [
+        "Open the session page; check which agent and for how long.",
+        "Take a thread dump if it's still stuck.",
+        "Stop the session if it doesn't recover."
+      ],
+      "url": "https://github.com/gnome-trading-group/gnome-registry/blob/main/docs/runbooks/alerts/AGENT_STALLED.md"
+    },
+    "ALLOCATION_EXCEEDS_BALANCE": {
+      "summary": "A venue account's live budgets add up to more than it holds.",
+      "firstSteps": [
+        "Check allocations on Treasury.",
+        "Fund the account or lower budgets.",
+        "Confirm the alert resolves."
+      ],
+      "url": "https://github.com/gnome-trading-group/gnome-registry/blob/main/docs/runbooks/alerts/ALLOCATION_EXCEEDS_BALANCE.md"
+    },
+    "BALANCE_LOW": {
+      "summary": "A venue account is low on available cash.",
+      "firstSteps": [
+        "Check the account on Treasury.",
+        "Deposit, or move budget to another account.",
+        "Record the transfer."
+      ],
+      "url": "https://github.com/gnome-trading-group/gnome-registry/blob/main/docs/runbooks/alerts/BALANCE_LOW.md"
+    },
+    "BOOK_RESYNCS": {
+      "summary": "A gateway keeps finding its order book inconsistent and resyncing.",
+      "firstSteps": [
+        "Check the session's logs for MARKET_DATA_GAP.",
+        "Check the venue's status.",
+        "Stop the session if it keeps happening."
+      ],
+      "url": "https://github.com/gnome-trading-group/gnome-registry/blob/main/docs/runbooks/alerts/BOOK_RESYNCS.md"
+    },
+    "CLOUDWATCH_ALARM": {
+      "summary": "A CloudWatch alarm fired.",
+      "firstSteps": [
+        "Open the alarm from the alert.",
+        "Read the service's runbook.",
+        "It resolves when the alarm returns to OK."
+      ],
+      "url": "https://github.com/gnome-trading-group/gnome-registry/blob/main/docs/runbooks/alerts/CLOUDWATCH_ALARM.md"
+    },
+    "CUSTOM": {
+      "summary": "A strategy or service raised its own alert.",
+      "firstSteps": [
+        "Read the alert's text: the producer says what's wrong.",
+        "Check the session page if it names one.",
+        "Ask the strategy's owner if unclear."
+      ],
+      "url": "https://github.com/gnome-trading-group/gnome-registry/blob/main/docs/runbooks/alerts/CUSTOM.md"
+    },
+    "DRAINING_EXPOSURE": {
+      "summary": "A strategy holds a listing on a draining account while trading it on another.",
+      "firstSteps": [
+        "Check the strategy's positions per account on Treasury.",
+        "Decide whether to unwind the old position.",
+        "Retire the old account once flat."
+      ],
+      "url": "https://github.com/gnome-trading-group/gnome-registry/blob/main/docs/runbooks/alerts/DRAINING_EXPOSURE.md"
+    },
+    "EXCHANGE_HALT": {
+      "summary": "All trading on one exchange is halted.",
+      "firstSteps": [
+        "Check the reason and who turned it on (By:).",
+        "If automatic: confirm the venue has no orders left resting for this scope.",
+        "Fix the cause, then disable the kill switch on Risk Policies."
+      ],
+      "url": "https://github.com/gnome-trading-group/gnome-registry/blob/main/docs/runbooks/alerts/EXCHANGE_HALT.md"
+    },
+    "FAILED": {
+      "summary": "A session died without a stop request.",
+      "firstSteps": [
+        "Read the failure reason on the alert or session page.",
+        "If live: check the venue for resting orders.",
+        "Fix the cause before relaunching."
+      ],
+      "url": "https://github.com/gnome-trading-group/gnome-registry/blob/main/docs/runbooks/alerts/FAILED.md"
+    },
+    "FATAL_ERROR": {
+      "summary": "A session hit an unrecoverable error and is exiting.",
+      "firstSteps": [
+        "Read the error in the alert.",
+        "If live: check the venue for resting orders.",
+        "Fix the cause before relaunching."
+      ],
+      "url": "https://github.com/gnome-trading-group/gnome-registry/blob/main/docs/runbooks/alerts/FATAL_ERROR.md"
+    },
+    "GLOBAL_HALT": {
+      "summary": "All trading is halted by a global kill switch.",
+      "firstSteps": [
+        "Check the reason and who turned it on (By:).",
+        "If automatic: confirm the venue has no orders left resting for this scope.",
+        "Fix the cause, then disable the kill switch on Risk Policies."
+      ],
+      "url": "https://github.com/gnome-trading-group/gnome-registry/blob/main/docs/runbooks/alerts/GLOBAL_HALT.md"
+    },
+    "LATCHES_DROPPED": {
+      "summary": "The OMS halted something it couldn't record in the registry.",
+      "firstSteps": [
+        "Open the session logs; look for STRATEGY_LATCHED lines.",
+        "Turn on matching kill switches by hand.",
+        "Stop the session if you can't tell what was halted."
+      ],
+      "url": "https://github.com/gnome-trading-group/gnome-registry/blob/main/docs/runbooks/alerts/LATCHES_DROPPED.md"
+    },
+    "LAUNCH_FAILED": {
+      "summary": "The launcher couldn't launch a session.",
+      "firstSteps": [
+        "Read the refusal reason in the alert.",
+        "Fix it (policies, balances, accounts).",
+        "Re-trigger the rule if the window hasn't passed."
+      ],
+      "url": "https://github.com/gnome-trading-group/gnome-registry/blob/main/docs/runbooks/alerts/LAUNCH_FAILED.md"
+    },
+    "LAUNCH_SUCCEEDED": {
+      "summary": "The launcher launched a session.",
+      "firstSteps": [
+        "Nothing to do; this is a record."
+      ],
+      "url": "https://github.com/gnome-trading-group/gnome-registry/blob/main/docs/runbooks/alerts/LAUNCH_SUCCEEDED.md"
+    },
+    "LEDGER_FAILING": {
+      "summary": "The session's ledger writes are failing; the OMS halts every strategy in it.",
+      "firstSteps": [
+        "Open the session page; check the ledger health and logs.",
+        "Check the registry API and database (/system).",
+        "If live: check the venue for resting orders."
+      ],
+      "url": "https://github.com/gnome-trading-group/gnome-registry/blob/main/docs/runbooks/alerts/LEDGER_FAILING.md"
+    },
+    "LEDGER_FENCED": {
+      "summary": "The ledger refuses this session's writes; the OMS halts every strategy in it.",
+      "firstSteps": [
+        "Open the session page; check the ledger health and logs.",
+        "Check the registry API and database (/system).",
+        "If live: check the venue for resting orders."
+      ],
+      "url": "https://github.com/gnome-trading-group/gnome-registry/blob/main/docs/runbooks/alerts/LEDGER_FENCED.md"
+    },
+    "LISTING_HALT": {
+      "summary": "A listing is halted by a kill switch.",
+      "firstSteps": [
+        "Check the reason and who turned it on (By:).",
+        "If automatic: confirm the venue has no orders left resting for this scope.",
+        "Fix the cause, then disable the kill switch on Risk Policies."
+      ],
+      "url": "https://github.com/gnome-trading-group/gnome-registry/blob/main/docs/runbooks/alerts/LISTING_HALT.md"
+    },
+    "NEEDS_REVIEW": {
+      "summary": "A position lost ledger events; recovery refuses to trade it until it's adjusted.",
+      "firstSteps": [
+        "Compare the position with the venue.",
+        "Adjust it on the controller (ledger adjustments).",
+        "Confirm the alert resolves."
+      ],
+      "url": "https://github.com/gnome-trading-group/gnome-registry/blob/main/docs/runbooks/alerts/NEEDS_REVIEW.md"
+    },
+    "NO_PRICE": {
+      "summary": "A held position has had no price for over an hour.",
+      "firstSteps": [
+        "Check whether the market is simply quiet.",
+        "Check the collector for that venue.",
+        "Nothing to do if the market is quiet."
+      ],
+      "url": "https://github.com/gnome-trading-group/gnome-registry/blob/main/docs/runbooks/alerts/NO_PRICE.md"
+    },
+    "PIPELINE_FAILED": {
+      "summary": "A data or research pipeline run failed.",
+      "firstSteps": [
+        "Open the run on the controller's Research → Pipelines page.",
+        "Read its logs.",
+        "Re-run it once fixed if trading depends on it."
+      ],
+      "url": "https://github.com/gnome-trading-group/gnome-registry/blob/main/docs/runbooks/alerts/PIPELINE_FAILED.md"
+    },
+    "POLICY_UNBUILDABLE": {
+      "summary": "A risk policy can't be applied, so the session has killed its target in memory.",
+      "firstSteps": [
+        "Find the policy in the session logs (\"can't be applied\").",
+        "Fix its parameters on Risk Policies.",
+        "Confirm the alert resolves."
+      ],
+      "url": "https://github.com/gnome-trading-group/gnome-registry/blob/main/docs/runbooks/alerts/POLICY_UNBUILDABLE.md"
+    },
+    "RATE_LIMIT_THROTTLING": {
+      "summary": "A venue account is being rate limited; orders are being refused locally.",
+      "firstSteps": [
+        "Check which account on the session page.",
+        "Look for VENUE_RATE_LIMITED in the logs.",
+        "Reduce the strategy's order rate or split it across accounts."
+      ],
+      "url": "https://github.com/gnome-trading-group/gnome-registry/blob/main/docs/runbooks/alerts/RATE_LIMIT_THROTTLING.md"
+    },
+    "RECONNECTING": {
+      "summary": "A gateway has been reconnecting for over a minute.",
+      "firstSteps": [
+        "Check the venue's status page.",
+        "Open the session's logs for SOCKET_ lines.",
+        "Stop the session if the venue is down for long."
+      ],
+      "url": "https://github.com/gnome-trading-group/gnome-registry/blob/main/docs/runbooks/alerts/RECONNECTING.md"
+    },
+    "RECON_MISMATCH": {
+      "summary": "A venue account's cash or a position disagrees with the ledger.",
+      "firstSteps": [
+        "Open Treasury → reconciliation for the account.",
+        "Compare the venue's balance and positions with the ledger.",
+        "Stop strategies on the account if the gap is unexplained."
+      ],
+      "url": "https://github.com/gnome-trading-group/gnome-registry/blob/main/docs/runbooks/alerts/RECON_MISMATCH.md"
+    },
+    "RECON_STALE": {
+      "summary": "A venue account's balances can't be read; live launches on it are refused.",
+      "firstSteps": [
+        "Read the error on Treasury for the account.",
+        "Check its read-only credentials.",
+        "Record a manual snapshot if the poller is down."
+      ],
+      "url": "https://github.com/gnome-trading-group/gnome-registry/blob/main/docs/runbooks/alerts/RECON_STALE.md"
+    },
+    "RISK_STALE": {
+      "summary": "The session can't refresh its risk policies; it refuses new orders.",
+      "firstSteps": [
+        "Check the registry API and database (/system).",
+        "Open the session page and its logs.",
+        "If it persists, stop the session."
+      ],
+      "url": "https://github.com/gnome-trading-group/gnome-registry/blob/main/docs/runbooks/alerts/RISK_STALE.md"
+    },
+    "RISK_UNGUARDED": {
+      "summary": "A live session is missing a required risk policy; it refuses every order.",
+      "firstSteps": [
+        "Open Risk Policies and check this strategy's coverage.",
+        "Add the missing policy for each traded listing.",
+        "Confirm the alert resolves."
+      ],
+      "url": "https://github.com/gnome-trading-group/gnome-registry/blob/main/docs/runbooks/alerts/RISK_UNGUARDED.md"
+    },
+    "SESSIONS_SILENT_MULTIPLE": {
+      "summary": "Several sessions went silent at once; the registry or the heartbeat path is the likely cause.",
+      "firstSteps": [
+        "Check /system → Databases and Services for the registry.",
+        "Check the registry API's 5xx rate and RDS status in AWS.",
+        "If live sessions are affected, check the venues."
+      ],
+      "url": "https://github.com/gnome-trading-group/gnome-registry/blob/main/docs/runbooks/alerts/SESSIONS_SILENT_MULTIPLE.md"
+    },
+    "SESSION_HALT": {
+      "summary": "A running session is halted by a kill switch.",
+      "firstSteps": [
+        "Check the reason and who turned it on (By:).",
+        "If automatic: confirm the venue has no orders left resting for this scope.",
+        "Fix the cause, then disable the kill switch on Risk Policies."
+      ],
+      "url": "https://github.com/gnome-trading-group/gnome-registry/blob/main/docs/runbooks/alerts/SESSION_HALT.md"
+    },
+    "SESSION_STOPPED_AUTO": {
+      "summary": "The launcher stopped a session.",
+      "firstSteps": [
+        "Nothing to do; this is a record."
+      ],
+      "url": "https://github.com/gnome-trading-group/gnome-registry/blob/main/docs/runbooks/alerts/SESSION_STOPPED_AUTO.md"
+    },
+    "SETTLEMENT_BLOCKED": {
+      "summary": "A settled market still has an open position.",
+      "firstSteps": [
+        "Read the detail: needs review, held by a session, or not booked.",
+        "Act on that cause.",
+        "Confirm the sweeper books it."
+      ],
+      "url": "https://github.com/gnome-trading-group/gnome-registry/blob/main/docs/runbooks/alerts/SETTLEMENT_BLOCKED.md"
+    },
+    "SETTLEMENT_PENDING": {
+      "summary": "A finished market's result was never recorded, so its position can't settle.",
+      "firstSteps": [
+        "Check the event on the venue for its result.",
+        "Check the classifier's settlement loop.",
+        "Record the settlement once known."
+      ],
+      "url": "https://github.com/gnome-trading-group/gnome-registry/blob/main/docs/runbooks/alerts/SETTLEMENT_PENDING.md"
+    },
+    "SHARD_BALANCE_LOW": {
+      "summary": "A Kalshi exchange shard is low on cash.",
+      "firstSteps": [
+        "Check the account's shard balances on Treasury.",
+        "Move cash onto that shard on Kalshi.",
+        "Confirm the alert resolves."
+      ],
+      "url": "https://github.com/gnome-trading-group/gnome-registry/blob/main/docs/runbooks/alerts/SHARD_BALANCE_LOW.md"
+    },
+    "SHUTDOWN_FAILED": {
+      "summary": "The launcher couldn't stop a session it meant to stop.",
+      "firstSteps": [
+        "Stop the session from the controller.",
+        "If that fails, terminate its instance in EC2.",
+        "If live: check the venue."
+      ],
+      "url": "https://github.com/gnome-trading-group/gnome-registry/blob/main/docs/runbooks/alerts/SHUTDOWN_FAILED.md"
+    },
+    "SILENT": {
+      "summary": "A running session stopped sending heartbeats; its process may be dead or hung.",
+      "firstSteps": [
+        "Open the session page; check its instance on /system → Trading fleet.",
+        "If live: check the venue for resting orders.",
+        "Pull the logs before the instance terminates."
+      ],
+      "url": "https://github.com/gnome-trading-group/gnome-registry/blob/main/docs/runbooks/alerts/SILENT.md"
+    },
+    "START_STUCK": {
+      "summary": "A session has been launching for 15 minutes without starting.",
+      "firstSteps": [
+        "Open the session page and its instance on /system.",
+        "Read the logs for where startup stopped.",
+        "Stop it and relaunch."
+      ],
+      "url": "https://github.com/gnome-trading-group/gnome-registry/blob/main/docs/runbooks/alerts/START_STUCK.md"
+    },
+    "STOP_STUCK": {
+      "summary": "A session has been stopping for 10 minutes and hasn't finished.",
+      "firstSteps": [
+        "Check its instance on /system → Trading fleet.",
+        "Terminate the instance from the EC2 console if it's still running.",
+        "If live: check the venue."
+      ],
+      "url": "https://github.com/gnome-trading-group/gnome-registry/blob/main/docs/runbooks/alerts/STOP_STUCK.md"
+    },
+    "STOP_WITHOUT_KILL": {
+      "summary": "A session was stopped but its kill switch couldn't be set.",
+      "firstSteps": [
+        "Check the venue for orders the session left.",
+        "Cancel anything left resting.",
+        "Check the registry's /risk/halts endpoint."
+      ],
+      "url": "https://github.com/gnome-trading-group/gnome-registry/blob/main/docs/runbooks/alerts/STOP_WITHOUT_KILL.md"
+    },
+    "STRATEGY_EXCHANGE_HALT": {
+      "summary": "A strategy is halted on one exchange.",
+      "firstSteps": [
+        "Check the reason and who turned it on (By:).",
+        "If automatic: confirm the venue has no orders left resting for this scope.",
+        "Fix the cause, then disable the kill switch on Risk Policies."
+      ],
+      "url": "https://github.com/gnome-trading-group/gnome-registry/blob/main/docs/runbooks/alerts/STRATEGY_EXCHANGE_HALT.md"
+    },
+    "STRATEGY_HALT": {
+      "summary": "A strategy is halted by a kill switch.",
+      "firstSteps": [
+        "Check the reason and who turned it on (By:).",
+        "If automatic: confirm the venue has no orders left resting for this scope.",
+        "Fix the cause, then disable the kill switch on Risk Policies."
+      ],
+      "url": "https://github.com/gnome-trading-group/gnome-registry/blob/main/docs/runbooks/alerts/STRATEGY_HALT.md"
+    }
+  },
+  "cloudwatch": {
+    "AlertingMeta": {
+      "summary": "Alerting itself is broken; other alerts may not be reaching anyone.",
+      "firstSteps": [
+        "Open /system → Services and Scheduled jobs for the alerting functions.",
+        "Read the alert router and store logs.",
+        "Watch trading by hand (the controller overview) until it's fixed."
+      ],
+      "url": "https://github.com/gnome-trading-group/gnome-registry/blob/main/docs/runbooks/cloudwatch/AlertingMeta.md"
+    },
+    "Classifier": {
+      "summary": "A classifier alarm fired: a queue backing up, a worker unhealthy, or a venue feed gap.",
+      "firstSteps": [
+        "Open the alarm to see which part.",
+        "Check /system → Queues and the worker's ECS logs.",
+        "Redrive any DLQ messages once fixed."
+      ],
+      "url": "https://github.com/gnome-trading-group/gnome-registry/blob/main/docs/runbooks/cloudwatch/Classifier.md"
+    },
+    "Controller": {
+      "summary": "A controller backend alarm fired.",
+      "firstSteps": [
+        "Open the alarm to see which part.",
+        "Read the function's logs.",
+        "Check the controller still loads."
+      ],
+      "url": "https://github.com/gnome-trading-group/gnome-registry/blob/main/docs/runbooks/cloudwatch/Controller.md"
+    },
+    "Launcher": {
+      "summary": "A launcher alarm fired: a trigger, launch or shutdown may not have happened.",
+      "firstSteps": [
+        "Open the alarm to see which queue or function.",
+        "If it's the Shutdown DLQ: find the session and stop it by hand.",
+        "Read the function's logs, then redrive the DLQ."
+      ],
+      "url": "https://github.com/gnome-trading-group/gnome-registry/blob/main/docs/runbooks/cloudwatch/Launcher.md"
+    },
+    "MarketData": {
+      "summary": "A market-data pipeline Lambda failed.",
+      "firstSteps": [
+        "Open the alarm to see which function.",
+        "Read its CloudWatch logs.",
+        "Check Market Data → Gaps / Transform Jobs in the controller."
+      ],
+      "url": "https://github.com/gnome-trading-group/gnome-registry/blob/main/docs/runbooks/cloudwatch/MarketData.md"
+    },
+    "Registry": {
+      "summary": "A registry alarm fired: its API, database, or a scheduled job.",
+      "firstSteps": [
+        "Open the alarm and see which part it names.",
+        "Check /system → Services, Databases and Scheduled jobs.",
+        "Read that function's logs in CloudWatch."
+      ],
+      "url": "https://github.com/gnome-trading-group/gnome-registry/blob/main/docs/runbooks/cloudwatch/Registry.md"
+    }
+  }
+}

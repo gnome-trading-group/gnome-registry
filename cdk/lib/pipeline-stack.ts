@@ -10,6 +10,7 @@ import { StrategySessionMonitorStack } from "./stacks/strategy-session-monitor-s
 import { SettlementSweeperStack } from "./stacks/settlement-sweeper-stack";
 import { VenuePollerStack } from "./stacks/venue-poller-stack";
 import { MonitoringStack } from "./stacks/monitoring-stack";
+import { AlertingStack } from "./stacks/alerting-stack";
 import { GITHUB_REPO, GITHUB_BRANCH, CONFIGS, RegistryConfig } from "./config";
 
 class AppStage extends cdk.Stage {
@@ -34,7 +35,7 @@ class AppStage extends cdk.Stage {
       slackChannel: config.slackChannel,
     });
 
-    new StrategySessionMonitorStack(this, "StrategySessionMonitorStack", {
+    const sessionMonitorStack = new StrategySessionMonitorStack(this, "StrategySessionMonitorStack", {
       database: databaseStack.database,
       vpc: databaseStack.vpc,
       rootUserSecret: databaseStack.rootUserSecret,
@@ -57,7 +58,17 @@ class AppStage extends cdk.Stage {
       syncLambda: exchangeSyncStack.syncLambda,
       settlementSweeperLambda: settlementSweeperStack.sweeperLambda,
       venuePollerLambda: venuePollerStack.pollerLambda,
+      sessionMonitorLambda: sessionMonitorStack.monitorLambda,
       database: databaseStack.database,
+    });
+
+    new AlertingStack(this, "AlertingStack", {
+      database: databaseStack.database,
+      vpc: databaseStack.vpc,
+      rootUserSecret: databaseStack.rootUserSecret,
+      apiKey: apiStack.apiKey,
+      stage: config.account.stage,
+      alerting: config.alerting,
     });
   }
 }

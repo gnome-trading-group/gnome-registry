@@ -16,10 +16,12 @@ interface Props extends cdk.StackProps {
 }
 
 export class StrategySessionMonitorStack extends cdk.Stack {
+  public readonly monitorLambda: lambda.NodejsFunction;
+
   constructor(scope: Construct, id: string, props: Props) {
     super(scope, id, props);
 
-    const monitorLambda = new lambda.NodejsFunction(this, 'strategy-session-monitor-lambda', {
+    const monitorLambda = this.monitorLambda = new lambda.NodejsFunction(this, 'strategy-session-monitor-lambda', {
       entry: join(__dirname, '..', '..', 'lambda', 'sync', 'strategy-session-monitor.ts'),
       runtime: Runtime.NODEJS_20_X,
       timeout: cdk.Duration.seconds(30),

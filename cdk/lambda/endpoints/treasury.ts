@@ -352,7 +352,6 @@ export async function recordSnapshot(client: PoolClient, input: SnapshotInput, n
      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
     [input.accountId, snapshot.snapshot_id, now, cash.expected?.toString() ?? null, venueCash.toString(),
       cash.diff?.toString() ?? null, cash.status, fp, positions.checked, positions.breaks]);
-  // TODO(generic-alerting): push a RECON_MISMATCH alert when the cash or a position first turns BREAK.
   return {
     snapshotId: snapshot.snapshot_id, cashStatus: cash.status, cashDiff: cash.diff?.toString() ?? null,
     positionsChecked: positions.checked, positionBreaks: positions.breaks,

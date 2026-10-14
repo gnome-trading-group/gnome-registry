@@ -9,11 +9,14 @@
     "watch": "tsc -w",
     "test": "jest",
     "cdk": "cdk",
-    "diff-substacks": "npx cdk diff '**' -a 'npx ts-node ./bin/cdk.ts'"
+    "diff-substacks": "npx cdk diff '**' -a 'npx ts-node ./bin/cdk.ts'",
+    "runbooks": "ts-node scripts/runbooks.ts"
   },
   "devDependencies": {
     "@aws-sdk/client-api-gateway": "^3.1045.0",
     "@aws-sdk/client-ec2": "^3.1045.0",
+    "@aws-sdk/client-eventbridge": "^3.1152.0",
+    "@aws-sdk/client-lambda": "^3.1152.0",
     "@aws-sdk/client-secrets-manager": "^3.1051.0",
     "@aws-sdk/client-ssm": "^3.1146.0",
     "@gnome-trading-group/gnome-shared-cdk": "^1.0.7",

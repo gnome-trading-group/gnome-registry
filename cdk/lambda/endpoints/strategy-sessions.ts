@@ -1,4 +1,5 @@
 import { APIGatewayProxyEvent, APIGatewayProxyEventQueryStringParameters } from 'aws-lambda';
+import { PoolClient } from 'pg';
 import { ResourceHandler, withTransaction } from './base';
 import { LaunchCheckError } from './launch-checks';
 import { AccountAssignmentError, bindAccounts } from './venue-account-assignment';
@@ -39,6 +40,24 @@ export function parseStatuses(status: string | string[] | undefined): string[] {
   if (status == null) return [];
   const list = Array.isArray(status) ? status : status.split(',');
   return list.map(s => s.trim()).filter(s => s.length > 0);
+}
+
+export const NO_INSTANCE_RELEASE_AUDIT = { actor: 'system', reason: 'stopped before launch' };
+
+// A session stopped before it ever got an instance goes straight to STOPPED, and the instance monitor, which
+// releases a stopped session's kill once its instance is gone, never hears about it. Nothing can trade on such a
+// session, so its kill is released as it stops.
+export function generateNoInstanceKillReleaseQuery(sessionId: string): string {
+  return `
+    UPDATE risk.policy SET enabled=false, date_modified=NOW()
+    WHERE policy_type='KILL_SWITCH' AND enabled AND session_id='${sessionId}'
+  `;
+}
+
+async function withStopAudit<T>(client: PoolClient, fn: () => Promise<T>): Promise<T> {
+  await client.query("SELECT set_config('gnome.actor', $1, true), set_config('gnome.reason', $2, true)",
+    [NO_INSTANCE_RELEASE_AUDIT.actor, NO_INSTANCE_RELEASE_AUDIT.reason]);
+  return fn();
 }
 
 export class StrategySessionHandler extends ResourceHandler {
@@ -110,7 +129,14 @@ export class StrategySessionHandler extends ResourceHandler {
     }
     const current = selected.rows[0];
 
-    const result = await this.client.query(this.generateModifyQuery(current, body));
+    const result = await withTransaction(this.client, async (client) => {
+      const updated = await client.query(this.generateModifyQuery(current, body));
+      const row = updated.rows[0];
+      if (updated.rowCount === 1 && row.status === 'STOPPED' && row.instance_id === null) {
+        await withStopAudit(client, () => client.query(generateNoInstanceKillReleaseQuery(row.session_id)));
+      }
+      return updated;
+    });
     if (result.rowCount !== 1) {
       const expected = parseStatuses((JSON.parse(body) as IUpdateSession).expectedStatus);
       if (expected.length > 0) {

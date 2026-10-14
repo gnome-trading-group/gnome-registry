@@ -47,6 +47,15 @@ jest.mock('@aws-sdk/client-api-gateway', () => ({
   APIGatewayClient: jest.fn().mockImplementation(() => ({ send: async () => ({ value: 'test-key' }) })),
   GetApiKeyCommand: jest.fn(),
 }));
+jest.mock('@aws-sdk/client-eventbridge', () => ({
+  EventBridgeClient: jest.fn().mockImplementation(() => ({
+    send: async (cmd: any) => {
+      for (const entry of cmd.input.Entries) events.push(`PutEvents ${JSON.parse(entry.Detail).type}`);
+      return { FailedEntryCount: 0 };
+    },
+  })),
+  PutEventsCommand: jest.fn().mockImplementation((input) => ({ input })),
+}));
 // Not installed locally (only provided by the Lambda runtime), so it must be virtual.
 jest.mock('@aws-sdk/client-cloudwatch-logs', () => ({
   CloudWatchLogsClient: jest.fn(),
@@ -171,6 +180,8 @@ describe('POST /strategy-sessions/launch', () => {
       'SSM /gnome/orchestrator/latest-version',
       'PyPI',
       'SSM /gnome/orchestrator/ami/16core',
+      // Read once per container.
+      'SSM /gnome/alerting/api-url',
       'POST /strategy-sessions',
       'RunInstances',
       'PATCH /strategy-sessions',
@@ -382,7 +393,7 @@ describe('POST /strategy-sessions/stop', () => {
     expect(sleeps).toEqual([expected]);
   });
 
-  it('still terminates when the kill upsert fails', async () => {
+  it('still terminates when the kill upsert fails, and raises an alert that orders may be left resting', async () => {
     haltFails = true;
     jest.spyOn(console, 'error').mockImplementation(() => undefined);
 
@@ -390,7 +401,8 @@ describe('POST /strategy-sessions/stop', () => {
 
     expect(response.statusCode).toBe(200);
     expect(events).toEqual([
-      'GET /strategy-sessions', 'PATCH /strategy-sessions', 'POST /risk/halts', 'TerminateInstances',
+      'GET /strategy-sessions', 'PATCH /strategy-sessions', 'POST /risk/halts', 'PutEvents STOP_WITHOUT_KILL',
+      'TerminateInstances',
     ]);
   });
 
@@ -479,6 +491,17 @@ describe('orchestrator overrides', () => {
     );
     expect(env.JOURNAL_ENABLED).toBe('true');
     expect(env.OVERRIDES_JOURNAL_ENABLED).toBeUndefined();
+  });
+
+  it('tells the session where to report a fatal error, out of reach of overrides', () => {
+    const env = launcher.buildSessionEnvironment(
+      { ...launchBody({}, { 'overrides.alerts.api.url': 'https://elsewhere' }) } as any,
+      { orchestratorVersion: '1.12.2', gnomepyVersion: '2.24.0' },
+      'https://alerts.test/api/',
+    );
+    expect(env.ALERTS_API_URL).toBe('https://alerts.test/api/');
+    expect(launcher.buildSessionEnvironment(launchBody({}) as any, { orchestratorVersion: '1', gnomepyVersion: '2' })
+      .ALERTS_API_URL).toBeUndefined();
   });
 
   it('never lets an override replace the session identity', () => {

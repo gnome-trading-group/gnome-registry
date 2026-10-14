@@ -9,6 +9,8 @@ import {
 import { SSMClient, GetParameterCommand } from '@aws-sdk/client-ssm';
 import { APIGatewayClient, GetApiKeyCommand } from '@aws-sdk/client-api-gateway';
 import { CloudWatchLogsClient, GetLogEventsCommand } from '@aws-sdk/client-cloudwatch-logs';
+import { EventBridgeClient, PutEventsCommand } from '@aws-sdk/client-eventbridge';
+import { ALERT_BUS_NAME, ALERT_DETAIL_TYPE, ALERT_EVENT_SOURCE, AlertEvent } from '../alerts/model';
 
 const REGISTRY_API_URL = (process.env.REGISTRY_API_URL ?? '').replace(/\/$/, '');
 const REGISTRY_API_KEY_ID = process.env.REGISTRY_API_KEY_ID ?? '';
@@ -164,6 +166,19 @@ export function amiParameterName(profile: string, instanceType: string): string 
   return `${AMI_PARAMETER_PREFIX}/${INSTANCE_VCPUS[instanceType]}core`;
 }
 
+// Where a session reports a fatal error (published by the alerting stack). Read once per container, and optional:
+// a session launched before alerting is deployed simply has nowhere to report and records its failure reason only.
+const ALERTS_API_URL_PARAMETER = '/gnome/alerting/api-url';
+let alertsApiUrl: Promise<string | undefined> | undefined;
+
+function resolveAlertsApiUrl(): Promise<string | undefined> {
+  alertsApiUrl ??= getParameter(VERSION_PARAMETER_REGION, ALERTS_API_URL_PARAMETER).catch((error) => {
+    console.warn('No alerts API URL; sessions will not report fatal errors as alerts', error);
+    return undefined;
+  });
+  return alertsApiUrl;
+}
+
 async function resolveLatestOrchestratorVersion(): Promise<string> {
   return getParameter(VERSION_PARAMETER_REGION, LATEST_ORCHESTRATOR_PARAMETER);
 }
@@ -237,6 +252,7 @@ export function overrideKeys(config: Record<string, unknown>): string[] {
 export function buildSessionEnvironment(
   s: ICreateSession,
   versions: { orchestratorVersion: string; gnomepyVersion: string },
+  alertsUrl?: string,
 ): Record<string, string> {
   const env: Record<string, string> = {};
   const args: Record<string, unknown> = {};
@@ -265,6 +281,7 @@ export function buildSessionEnvironment(
   env.REGISTRY_API_KEY_ID = REGISTRY_API_KEY_ID;
   env.ORCHESTRATOR_VERSION = versions.orchestratorVersion;
   env.GNOMEPY_VERSION = versions.gnomepyVersion;
+  if (alertsUrl) env.ALERTS_API_URL = alertsUrl;
   if (s.researchCommit) env.RESEARCH_COMMIT = s.researchCommit;
   return env;
 }
@@ -370,7 +387,8 @@ async function handleLaunch(body: string | null) {
   const gnomepyVersion = s.gnomepyVersion || await resolveLatestGnomepyVersion();
   const imageId = await getParameter(region, amiParameterName(profile, instanceType));
 
-  const userData = buildUserData(buildSessionEnvironment(s, { orchestratorVersion, gnomepyVersion }));
+  const userData = buildUserData(
+    buildSessionEnvironment(s, { orchestratorVersion, gnomepyVersion }, await resolveAlertsApiUrl()));
   if (Buffer.byteLength(userData) > MAX_USER_DATA_BYTES) {
     return createResponse(400, { message: `Session config too large for EC2 user data (${Buffer.byteLength(userData)} bytes)` });
   }
@@ -455,6 +473,25 @@ function sleep(ms: number): Promise<void> {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
+const eventBridge = new EventBridgeClient({});
+
+async function alertStopWithoutKill(session: any, actor: string, error: string): Promise<void> {
+  const alert: AlertEvent = {
+    action: 'FIRING', key: `STOP_WITHOUT_KILL:${session.session_id}`, type: 'STOP_WITHOUT_KILL', source: 'ingest',
+    title: `Session ${session.session_id} stopped without its kill switch`,
+    body: `The halt failed (${error}), so orders it had resting may still be on the venue`,
+    actor, sessionId: session.session_id, strategyId: session.strategy_id, mode: session.mode,
+    stateAt: new Date().toISOString(),
+  };
+  try {
+    await eventBridge.send(new PutEventsCommand({ Entries: [{
+      EventBusName: ALERT_BUS_NAME, Source: ALERT_EVENT_SOURCE, DetailType: ALERT_DETAIL_TYPE, Detail: JSON.stringify(alert),
+    }] }));
+  } catch (alertError) {
+    console.error(`Couldn't raise STOP_WITHOUT_KILL for ${session.session_id}`, alertError);
+  }
+}
+
 async function handleStop(event: APIGatewayProxyEvent) {
   const body = event.body;
   if (!body) return createResponse(400, { message: 'Missing body' });
@@ -509,6 +546,8 @@ async function handleStop(event: APIGatewayProxyEvent) {
     // A stop must never get stuck behind the kill, so the instance is terminated regardless.
     const message = error instanceof Error ? error.message : String(error);
     console.error(`Kill switch upsert failed for session ${sessionId}, terminating anyway:`, message);
+    // Terminating without the kill leaves whatever the session had resting on the venue to its own shutdown.
+    if (session.instance_id) await alertStopWithoutKill(session, actor, message);
   }
 
   if (killed && session.instance_id) {

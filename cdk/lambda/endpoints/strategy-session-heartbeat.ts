@@ -4,7 +4,8 @@ import { connectLedgerDatabase, createResponse, isSessionId, WRITABLE_SESSION_ST
 
 // A running session says it is alive, with the health of its parts (see the orchestrator's SessionHeartbeatAgent).
 // Only the latest is kept. A session that has ended gets 409 and stops sending, so a stray heartbeat can never make
-// a stopped session look alive.
+// a stopped session look alive. A heartbeat also proves the session is running: the orchestrator reports RUNNING
+// itself, but gives up after a few tries, and a session left STARTING would never be checked for going silent.
 const MAX_BODY_BYTES = 16 * 1024;
 
 /** @return the HTTP status: 200 stored, 404 unknown session, 409 the session has ended */
@@ -13,7 +14,12 @@ export async function recordHeartbeat(client: PoolClient, sessionId: string, bod
     UPDATE strategy.session SET last_heartbeat_at = NOW(), health = $2::jsonb - 'sessionId'
     WHERE session_id = $1 AND status = ANY($3::text[])`,
   [sessionId, body, WRITABLE_SESSION_STATUSES]);
-  if (updated.rowCount === 1) return 200;
+  if (updated.rowCount === 1) {
+    await client.query(`
+      UPDATE strategy.session SET status = 'RUNNING', date_modified = NOW()
+      WHERE session_id = $1 AND status IN ('SUBMITTED', 'STARTING')`, [sessionId]);
+    return 200;
+  }
   const exists = await client.query('SELECT 1 FROM strategy.session WHERE session_id = $1', [sessionId]);
   return exists.rowCount === 0 ? 404 : 409;
 }

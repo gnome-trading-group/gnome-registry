@@ -66,7 +66,8 @@ export const handler = async (event: Ec2StateChangeEvent) => {
       const updates = [`status='${transition.status}'`, `date_modified=NOW()`];
       if (transition.status === 'FAILED') {
         updates.push(`stopped_at=NOW()`);
-        updates.push(`failure_reason='Instance ${state} without a stop request'`);
+        // A session that died of its own error reported why before exiting; that says more than the instance going.
+        updates.push(`failure_reason=COALESCE(failure_reason, 'Instance ${state} without a stop request')`);
       } else if (transition.status === 'STOPPED') {
         updates.push(`stopped_at=NOW()`);
       }

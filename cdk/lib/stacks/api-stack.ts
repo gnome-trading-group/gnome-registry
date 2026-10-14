@@ -12,6 +12,7 @@ import { join } from 'path';
 import { Runtime } from 'aws-cdk-lib/aws-lambda';
 import { Stage } from '@gnome-trading-group/gnome-shared-cdk';
 import { CONTROLLER_READ_PATHS } from '../../lambda/endpoints/controller-read-paths';
+import { ALERT_BUS_NAME } from '../../lambda/alerts/model';
 
 interface Props extends cdk.StackProps {
   database: rds.DatabaseInstance;
@@ -118,6 +119,10 @@ export class ApiStack extends cdk.Stack {
     for (const path of CONTROLLER_READ_PATHS) {
       this.attachIntegration(path, controllerReads, [], ['GET']);
     }
+
+    // Alerts for the controller: what's open and what fired before, and closing one (people only). Alerts arrive
+    // through the alerting stack's own ingest API.
+    this.attachMethods('alerts', 'alerts.ts', [], ['GET', 'PATCH']);
 
     // The trading ledger. Running sessions write with the API key; an operator's position adjustments are Cognito
     // only, so each one is attributed to a person.
@@ -234,6 +239,7 @@ export class ApiStack extends cdk.Stack {
         'arn:aws:ssm:*:*:parameter/gnome/orchestrator/ami/*',
         'arn:aws:ssm:*:*:parameter/gnome/orchestrator/latest-version',
         'arn:aws:ssm:*:*:parameter/gnome/orchestrator/properties/*',
+        'arn:aws:ssm:*:*:parameter/gnome/alerting/api-url',
       ],
     }));
     strategySessionsLauncherLambda.addToRolePolicy(new iam.PolicyStatement({
@@ -247,6 +253,12 @@ export class ApiStack extends cdk.Stack {
     strategySessionsLauncherLambda.addToRolePolicy(new iam.PolicyStatement({
       actions: ['logs:GetLogEvents'],
       resources: ['arn:aws:logs:*:*:log-group:/gnome/orchestrator/*'],
+    }));
+    // A stop whose kill switch fails raises an alert. The bus is named, not referenced, so this stack doesn't depend on
+    // the alerting stack (which depends on this one's API key).
+    strategySessionsLauncherLambda.addToRolePolicy(new iam.PolicyStatement({
+      actions: ['events:PutEvents'],
+      resources: [`arn:aws:events:${this.region}:${this.account}:event-bus/${ALERT_BUS_NAME}`],
     }));
 
     const sessionsDbIntegration = new apigw.LambdaIntegration(strategySessionsDbLambda, { scopePermissionToMethod: false });
