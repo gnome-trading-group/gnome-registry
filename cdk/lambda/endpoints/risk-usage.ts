@@ -1,7 +1,7 @@
 import { APIGatewayProxyEvent } from 'aws-lambda';
 import { PoolClient } from 'pg';
 import { connectLedgerDatabase, createResponse, isSessionId } from './ledger-common';
-import { pnl, toBigInt } from './ledger-math';
+import { committedCapital, pnl, toBigInt } from './ledger-math';
 import { loadListingInfo, loadSessionStates } from './pnl-state';
 
 // How close a running session is to each risk limit that applies to it, measured as its OMS measures it (see the
@@ -13,19 +13,32 @@ import { loadListingInfo, loadSessionStates } from './pnl-state';
 //   MAX_OPEN_ORDERS     open orders on the policy's listing, or across the session's listings
 //   MAX_TOTAL_PNL_LOSS  the loss (realized + unrealized - fees, this session's own realized PnL and fees, inherited
 //                       inventory at its original cost), on the policy's listing or across the session's listings
-//   MAX_ORDER_SIZE, MAX_NOTIONAL, PRICE_COLLAR  judge each order alone, so they have no running usage
-// Values and limits are scaled-integer strings in each policy's own units.
+//   MAX_COMMITTED_CAPITAL  the dollars the positions and working orders tie up (ledger-math committedCapital)
+//   MAX_ORDER_SIZE, MAX_ORDER_NOTIONAL, PRICE_COLLAR  judge each order alone, so they have no running usage, and
+//   MAX_CONSECUTIVE_REJECTS counts a run of venue refusals the ledger doesn't record as a run
+// A policy on an exchange measures the session's listings on that exchange. Values and limits are scaled-integer
+// strings in each policy's own units.
 
 const PER_ORDER: Record<string, string> = {
   MAX_ORDER_SIZE: 'maxOrderSize',
-  MAX_NOTIONAL: 'maxNotionalValue',
+  MAX_ORDER_NOTIONAL: 'maxOrderNotional',
   PRICE_COLLAR: 'maxDeviation',
+  MAX_CONSECUTIVE_REJECTS: 'maxRejects',
 };
 
+const EVENT_CONTRACT = 4;
+const BINARY = 7;
+const MULTI_OUTCOME = 8;
+
 interface ListingState {
+  exchangeId: number | null;
+  binary: boolean;
   net: bigint;
+  totalCost: bigint;
   leavesBuy: bigint;
   leavesSell: bigint;
+  leavesBuyNotional: bigint;
+  leavesSellNotional: bigint;
   openOrders: number;
   pnl: bigint;
 }
@@ -33,7 +46,7 @@ interface ListingState {
 export interface PolicyUsage {
   policyId: number;
   policyType: string;
-  level: 'session' | 'strategy' | 'listing' | 'global';
+  level: 'session' | 'strategy' | 'strategy-exchange' | 'exchange' | 'listing' | 'global';
   listingId: number | null;
   limit: string;
   value: string | null;
@@ -45,9 +58,12 @@ export interface PolicyUsage {
   bindingSymbol: string | null;
 }
 
-function level(row: { session_id: string | null; strategy_id: number | null; listing_id: number | null }): PolicyUsage['level'] {
+function level(row: {
+  session_id: string | null; strategy_id: number | null; exchange_id: number | null; listing_id: number | null;
+}): PolicyUsage['level'] {
   if (row.session_id !== null) return 'session';
-  if (row.strategy_id !== null) return 'strategy';
+  if (row.strategy_id !== null) return row.exchange_id !== null ? 'strategy-exchange' : 'strategy';
+  if (row.exchange_id !== null) return 'exchange';
   return row.listing_id !== null ? 'listing' : 'global';
 }
 
@@ -67,7 +83,9 @@ export async function riskUsage(client: PoolClient, sessionId: string, now: Date
   // Working orders and what is left of each; an order counts from when it was sent until it closes, as in the OMS.
   const open = (await client.query(`
     SELECT o.listing_id, o.side, count(*)::int AS orders,
-      SUM(GREATEST(COALESCE(o.size, 0) - COALESCE(f.filled, 0), 0)) AS leaves
+      SUM(GREATEST(COALESCE(o.size, 0) - COALESCE(f.filled, 0), 0)) AS leaves,
+      SUM(TRUNC(COALESCE(o.price, 0)::numeric * GREATEST(COALESCE(o.size, 0) - COALESCE(f.filled, 0), 0)
+        / 1000000))::bigint AS leaves_notional
     FROM ledger.order o
     LEFT JOIN LATERAL (
       SELECT MAX(cum_qty_after) AS filled FROM ledger.fill
@@ -76,20 +94,32 @@ export async function riskUsage(client: PoolClient, sessionId: string, now: Date
     WHERE o.session_id = $1 AND o.status = 'OPEN'
     GROUP BY o.listing_id, o.side`, [sessionId])).rows;
 
+  const kinds = new Map((await client.query(`
+    SELECT l.listing_id, (s.type = $2 AND s.contract_type = ANY($3::smallint[])) AS binary
+    FROM sm.listing l JOIN sm.security s USING (security_id) WHERE l.listing_id = ANY($1::int[])`,
+  [listingIds, EVENT_CONTRACT, [BINARY, MULTI_OUTCOME]])).rows.map(r => [r.listing_id as number, r.binary as boolean]));
+
   const byListing = new Map<number, ListingState>();
   for (const s of states) {
     byListing.set(s.listingId, {
-      net: s.current.netQuantity, leavesBuy: 0n, leavesSell: 0n, openOrders: 0,
-      pnl: pnl(s.current, s.mark).totalPnl,
+      exchangeId: info.get(s.listingId)?.exchangeId ?? null, binary: kinds.get(s.listingId) ?? false,
+      net: s.current.netQuantity, totalCost: s.current.totalCost, leavesBuy: 0n, leavesSell: 0n,
+      leavesBuyNotional: 0n, leavesSellNotional: 0n, openOrders: 0, pnl: pnl(s.current, s.mark).totalPnl,
     });
   }
   for (const o of open) {
     const state = byListing.get(o.listing_id);
     if (!state) continue;
     state.openOrders += o.orders;
-    if (o.side === 0) state.leavesBuy += toBigInt(o.leaves);
-    else state.leavesSell += toBigInt(o.leaves);
+    if (o.side === 0) {
+      state.leavesBuy += toBigInt(o.leaves);
+      state.leavesBuyNotional += toBigInt(o.leaves_notional);
+    } else {
+      state.leavesSell += toBigInt(o.leaves);
+      state.leavesSellNotional += toBigInt(o.leaves_notional);
+    }
   }
+  const exchangeIds = [...new Set([...byListing.values()].map(s => s.exchangeId).filter(id => id !== null))];
   const worstCase = (s: ListingState) => {
     const buys = s.net + s.leavesBuy;
     const sells = s.net - s.leavesSell;
@@ -98,12 +128,13 @@ export async function riskUsage(client: PoolClient, sessionId: string, now: Date
   };
 
   const policies = (await client.query(`
-    SELECT policy_id, policy_type, session_id, strategy_id, listing_id, parameters FROM risk.policy
+    SELECT policy_id, policy_type, session_id, strategy_id, exchange_id, listing_id, parameters FROM risk.policy
     WHERE enabled AND policy_type <> 'KILL_SWITCH'
       AND (session_id IS NULL OR session_id = $1)
       AND (strategy_id IS NULL OR strategy_id = $2)
       AND (listing_id IS NULL OR listing_id = ANY($3::int[]))
-    ORDER BY policy_id`, [sessionId, session.strategy_id, listingIds])).rows;
+      AND (exchange_id IS NULL OR exchange_id = ANY($4::int[]))
+    ORDER BY policy_id`, [sessionId, session.strategy_id, listingIds, exchangeIds])).rows;
   const refused = (await client.query(`
     SELECT COALESCE(SUM(count), 0)::bigint AS refused FROM ledger.reject_count
     WHERE session_id = $1 AND reason = 'RISK_LIMIT_EXCEEDED'`, [sessionId])).rows[0].refused;
@@ -118,7 +149,9 @@ export async function riskUsage(client: PoolClient, sessionId: string, now: Date
       usages.push({ ...base, limit: String(p.parameters[PER_ORDER[p.policy_type]] ?? 0), value: null, usage: null, perOrder: true });
       continue;
     }
-    const scope = p.listing_id !== null ? [p.listing_id] : listingIds;
+    const scope = p.listing_id !== null ? [p.listing_id]
+      : p.exchange_id !== null ? listingIds.filter(id => byListing.get(id)?.exchangeId === p.exchange_id)
+      : listingIds;
     const states = scope.map(id => [id, byListing.get(id)] as const).filter((e): e is readonly [number, ListingState] => !!e[1]);
     let limit: bigint;
     let value = 0n;
@@ -135,6 +168,13 @@ export async function riskUsage(client: PoolClient, sessionId: string, now: Date
     } else if (p.policy_type === 'MAX_OPEN_ORDERS') {
       limit = toBigInt(p.parameters.maxOpenOrders);
       value = BigInt(states.reduce((sum, [, s]) => sum + s.openOrders, 0));
+    } else if (p.policy_type === 'MAX_COMMITTED_CAPITAL') {
+      limit = toBigInt(p.parameters.maxCapital);
+      value = states.reduce((sum, [, s]) => sum + committedCapital({
+        binary: s.binary, netQuantity: s.net, totalCost: s.totalCost,
+        leavesBuyQty: s.leavesBuy, leavesBuyNotional: s.leavesBuyNotional,
+        leavesSellQty: s.leavesSell, leavesSellNotional: s.leavesSellNotional,
+      }), 0n);
     } else if (p.policy_type === 'MAX_TOTAL_PNL_LOSS') {
       limit = toBigInt(p.parameters.maxLoss);
       const total = states.reduce((sum, [, s]) => sum + s.pnl, 0n);

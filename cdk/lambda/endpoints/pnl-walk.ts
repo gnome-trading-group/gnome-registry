@@ -20,6 +20,7 @@ export interface FillRow {
   session_id: string | null;
   strategy_id: number;
   listing_id: number;
+  account_id: number | null;
   recorded_at: Date;
   net_quantity_after: string;
   total_cost_after: string;
@@ -113,16 +114,26 @@ export async function walkLifetime(client: PoolClient, options: LifetimeWalkOpti
       AND recorded_at > $3 AND recorded_at <= $4
     ORDER BY fill_id`, [mode, strategyId, from, new Date(toMs), options.listingId ?? null])).rows as FillRow[];
 
+  // A strategy's listing is one key of the walk, held as one position per venue account (each valued on its own
+  // and summed, since an account's cost basis can't be merged with another's).
   const keyOf = (s: number, l: number) => `${s}/${l}`;
+  const positionKeyOf = (s: number, l: number, a: number | null) => `${s}/${l}/${a ?? ''}`;
   const keyed = new Map<string, { strategyId: number; listingId: number }>();
-  for (const l of state.listings) keyed.set(keyOf(l.strategyId, l.listingId), { strategyId: l.strategyId, listingId: l.listingId });
-  for (const f of fills) keyed.set(keyOf(f.strategy_id, f.listing_id), { strategyId: f.strategy_id, listingId: f.listing_id });
+  const accountsOf = new Map<string, Set<string>>();
+  const hold = (s: number, l: number, a: number | null) => {
+    keyed.set(keyOf(s, l), { strategyId: s, listingId: l });
+    const held = accountsOf.get(keyOf(s, l)) ?? new Set<string>();
+    held.add(positionKeyOf(s, l, a));
+    accountsOf.set(keyOf(s, l), held);
+  };
+  for (const l of state.listings) hold(l.strategyId, l.listingId, l.accountId);
+  for (const f of fills) hold(f.strategy_id, f.listing_id, f.account_id);
   const keys = [...keyed.values()].sort((a, b) => a.strategyId - b.strategyId || a.listingId - b.listingId);
 
   const position = new Map<string, PositionState>();
   const sessionTotals = new Map<string, { realized: bigint; fees: bigint }>();
   const mark = new Map<number, MarkInputs | null>();
-  for (const l of state.listings) position.set(keyOf(l.strategyId, l.listingId), { ...l.position });
+  for (const l of state.listings) position.set(positionKeyOf(l.strategyId, l.listingId, l.accountId), { ...l.position });
   for (const s of state.sessions) sessionTotals.set(`${s.sessionId}/${s.listingId}`, { realized: s.realized, fees: s.fees });
 
   const walk: LifetimeWalk = {
@@ -148,8 +159,19 @@ export async function walkLifetime(client: PoolClient, options: LifetimeWalkOpti
     }
   }
 
-  const valued = (key: { strategyId: number; listingId: number }) =>
-    lifetimePnl(position.get(keyOf(key.strategyId, key.listingId)) ?? FLAT, mark.get(key.listingId) ?? null);
+  const valued = (key: { strategyId: number; listingId: number }) => {
+    const sum = { total: 0n, realized: 0n, unrealized: 0n, fees: 0n };
+    for (const held of accountsOf.get(keyOf(key.strategyId, key.listingId)) ?? []) {
+      const p = lifetimePnl(position.get(held) ?? FLAT, mark.get(key.listingId) ?? null);
+      sum.total += p.total;
+      sum.realized += p.realized;
+      sum.unrealized += p.unrealized;
+      sum.fees += p.fees;
+    }
+    return sum;
+  };
+  const netOf = (key: { strategyId: number; listingId: number }) => [...accountsOf.get(keyOf(key.strategyId, key.listingId)) ?? []]
+    .reduce((net, held) => net + (position.get(held) ?? FLAT).netQuantity, 0n);
 
   const listingIds = [...new Set(keys.map(k => k.listingId))];
   const changes = inOrder([
@@ -173,8 +195,9 @@ export async function walkLifetime(client: PoolClient, options: LifetimeWalkOpti
         continue;
       }
       const key = { strategyId: fill.strategy_id, listingId: fill.listing_id };
+      const heldKey = positionKeyOf(fill.strategy_id, fill.listing_id, fill.account_id);
       const before = valued(key).total;
-      const held = position.get(keyOf(key.strategyId, key.listingId)) ?? FLAT;
+      const held = position.get(heldKey) ?? FLAT;
       let realized = held.realizedPnl;
       let fees = held.totalFees;
       if (fill.session_id !== null) {
@@ -188,7 +211,7 @@ export async function walkLifetime(client: PoolClient, options: LifetimeWalkOpti
         realized += toBigInt(fill.realized_pnl_after);
         fees += toBigInt(fill.fees_after);
       }
-      position.set(keyOf(key.strategyId, key.listingId), fillPosition(fill, realized, fees));
+      position.set(heldKey, fillPosition(fill, realized, fees));
       if (fill.source === 'RESET' || fill.source === 'ADJUSTMENT' || fill.source === 'MANUAL'
         || fill.source === 'SETTLEMENT') {
         walk.events.push({
@@ -209,7 +232,7 @@ export async function walkLifetime(client: PoolClient, options: LifetimeWalkOpti
       unrealized += p.unrealized;
       fees += p.fees;
       walk.keyTotal[i].push(p.total);
-      walk.keyNet[i].push((position.get(keyOf(key.strategyId, key.listingId)) ?? FLAT).netQuantity);
+      walk.keyNet[i].push(netOf(key));
     });
     walk.t.push(t);
     walk.total.push(total);

@@ -1,4 +1,3 @@
-import { APIGatewayClient, GetApiKeyCommand } from '@aws-sdk/client-api-gateway';
 import { SecretsManagerClient, GetSecretValueCommand } from '@aws-sdk/client-secrets-manager';
 import {
   CurrencyResponse,
@@ -9,26 +8,10 @@ import {
   SecurityResponse,
 } from './exchanges/types';
 import { getAdapter } from './exchanges/index';
+import { registryFetch, resolveApiKey } from './registry-client';
 
-const apiGwClient = new APIGatewayClient({});
 const smClient = new SecretsManagerClient({});
-let cachedApiKey: string | undefined;
 let cachedSlackToken: string | undefined;
-
-async function resolveApiKey(): Promise<string> {
-  if (!cachedApiKey) {
-    if (process.env.REGISTRY_API_KEY) {
-      cachedApiKey = process.env.REGISTRY_API_KEY;
-    } else {
-      const res = await apiGwClient.send(new GetApiKeyCommand({
-        apiKey: process.env.REGISTRY_API_KEY_ID!,
-        includeValue: true,
-      }));
-      cachedApiKey = res.value!;
-    }
-  }
-  return cachedApiKey!;
-}
 
 async function resolveSlackToken(): Promise<string | undefined> {
   const secretName = process.env.SLACK_BOT_TOKEN_SECRET;
@@ -55,19 +38,6 @@ async function registryFetchAll<T>(path: string, apiKey: string): Promise<T[]> {
     offset += PAGE_SIZE;
   }
   return items;
-}
-
-async function registryFetch<T>(path: string, method: string, apiKey: string, body?: unknown): Promise<T> {
-  const baseUrl = process.env.REGISTRY_API_URL!.replace(/\/$/, '');
-  const res = await fetch(`${baseUrl}${path}`, {
-    method,
-    headers: { 'x-api-key': apiKey, 'Content-Type': 'application/json' },
-    body: body !== undefined ? JSON.stringify(body) : undefined,
-  });
-  if (!res.ok) {
-    throw new Error(`Registry API ${method} ${path} failed: ${res.status} ${await res.text()}`);
-  }
-  return res.json() as Promise<T>;
 }
 
 async function batchExecute<T>(items: T[], batchSize: number, fn: (item: T) => Promise<void>): Promise<void> {

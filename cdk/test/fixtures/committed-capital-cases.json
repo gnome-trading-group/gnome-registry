@@ -1,0 +1,159 @@
+{
+  "description": "Cases for CommittedCapital.of (gnome-oms) and committedCapital() in ledger-math.ts (gnome-registry); both must return expected for every case. Quantities are in size units (1e6 per unit), money in price units (1e9 per dollar). Numbers are strings so JavaScript can read them exactly as BigInt.",
+  "cases": [
+    {
+      "name": "flat with nothing working",
+      "binary": true,
+      "netQuantity": "0",
+      "totalCost": "0",
+      "leavesBuyQty": "0",
+      "leavesBuyNotional": "0",
+      "leavesSellQty": "0",
+      "leavesSellNotional": "0",
+      "expected": "0"
+    },
+    {
+      "name": "non-binary long counts its cost and every working order gross",
+      "binary": false,
+      "netQuantity": "10000000",
+      "totalCost": "1000000000000",
+      "leavesBuyQty": "5000000",
+      "leavesBuyNotional": "400000000000",
+      "leavesSellQty": "2000000",
+      "leavesSellNotional": "220000000000",
+      "expected": "1620000000000"
+    },
+    {
+      "name": "non-binary short counts its cost",
+      "binary": false,
+      "netQuantity": "-10000000",
+      "totalCost": "1000000000000",
+      "leavesBuyQty": "0",
+      "leavesBuyNotional": "0",
+      "leavesSellQty": "0",
+      "leavesSellNotional": "0",
+      "expected": "1000000000000"
+    },
+    {
+      "name": "binary long 100 at 0.40 can lose its cost",
+      "binary": true,
+      "netQuantity": "100000000",
+      "totalCost": "40000000000",
+      "leavesBuyQty": "0",
+      "leavesBuyNotional": "0",
+      "leavesSellQty": "0",
+      "leavesSellNotional": "0",
+      "expected": "40000000000"
+    },
+    {
+      "name": "binary short 100 at 0.40 can lose 1 less the price",
+      "binary": true,
+      "netQuantity": "-100000000",
+      "totalCost": "40000000000",
+      "leavesBuyQty": "0",
+      "leavesBuyNotional": "0",
+      "leavesSellQty": "0",
+      "leavesSellNotional": "0",
+      "expected": "60000000000"
+    },
+    {
+      "name": "binary flat buying 50 at 0.30",
+      "binary": true,
+      "netQuantity": "0",
+      "totalCost": "0",
+      "leavesBuyQty": "50000000",
+      "leavesBuyNotional": "15000000000",
+      "leavesSellQty": "0",
+      "leavesSellNotional": "0",
+      "expected": "15000000000"
+    },
+    {
+      "name": "binary flat selling 50 at 0.30 commits 1 less the price",
+      "binary": true,
+      "netQuantity": "0",
+      "totalCost": "0",
+      "leavesBuyQty": "0",
+      "leavesBuyNotional": "0",
+      "leavesSellQty": "50000000",
+      "leavesSellNotional": "15000000000",
+      "expected": "35000000000"
+    },
+    {
+      "name": "binary long 100 selling 60 only closes, committing nothing more",
+      "binary": true,
+      "netQuantity": "100000000",
+      "totalCost": "40000000000",
+      "leavesBuyQty": "0",
+      "leavesBuyNotional": "0",
+      "leavesSellQty": "60000000",
+      "leavesSellNotional": "30000000000",
+      "expected": "40000000000"
+    },
+    {
+      "name": "binary long 40 selling 100 at 0.50 commits the 60 that would open a short",
+      "binary": true,
+      "netQuantity": "40000000",
+      "totalCost": "16000000000",
+      "leavesBuyQty": "0",
+      "leavesBuyNotional": "0",
+      "leavesSellQty": "100000000",
+      "leavesSellNotional": "50000000000",
+      "expected": "46000000000"
+    },
+    {
+      "name": "binary short 30 buying 50 at 0.60 commits the 20 that would open a long",
+      "binary": true,
+      "netQuantity": "-30000000",
+      "totalCost": "12000000000",
+      "leavesBuyQty": "50000000",
+      "leavesBuyNotional": "30000000000",
+      "leavesSellQty": "0",
+      "leavesSellNotional": "0",
+      "expected": "30000000000"
+    },
+    {
+      "name": "binary long with orders on both sides",
+      "binary": true,
+      "netQuantity": "10000000",
+      "totalCost": "5000000000",
+      "leavesBuyQty": "20000000",
+      "leavesBuyNotional": "5000000000",
+      "leavesSellQty": "5000000",
+      "leavesSellNotional": "4500000000",
+      "expected": "10000000000"
+    },
+    {
+      "name": "proportional terms truncate toward zero",
+      "binary": true,
+      "netQuantity": "-1000000",
+      "totalCost": "400000000",
+      "leavesBuyQty": "3000000",
+      "leavesBuyNotional": "10",
+      "leavesSellQty": "0",
+      "leavesSellNotional": "0",
+      "expected": "600000006"
+    },
+    {
+      "name": "proportional terms are exact past 64-bit products",
+      "binary": true,
+      "netQuantity": "-1000000000000000",
+      "totalCost": "0",
+      "leavesBuyQty": "9000000000000000",
+      "leavesBuyNotional": "9000000000000000000",
+      "leavesSellQty": "0",
+      "leavesSellNotional": "0",
+      "expected": "9000000000000000000"
+    },
+    {
+      "name": "a sum past the long range saturates",
+      "binary": false,
+      "netQuantity": "1000000",
+      "totalCost": "9223372036854775000",
+      "leavesBuyQty": "1000000",
+      "leavesBuyNotional": "1000",
+      "leavesSellQty": "0",
+      "leavesSellNotional": "0",
+      "expected": "9223372036854775807"
+    }
+  ]
+}

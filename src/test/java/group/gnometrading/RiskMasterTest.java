@@ -122,6 +122,32 @@ class RiskMasterTest {
     }
 
     @Test
+    void testListingAndExchangeFiltersNarrowTheFetch() {
+        RiskMaster scoped = new RiskMaster(registryConnection, 7, "abc", new int[] {500, 501}, new int[] {3});
+        when(registryConnection.get(any())).thenReturn(ByteBuffer.wrap("[]".getBytes()));
+        scoped.refresh();
+        verify(registryConnection)
+                .get(new ViewString("/api/risk/policies?enabled=true&forStrategy=7&forSession=abc"
+                        + "&forListings=500,501&forExchanges=3"));
+    }
+
+    @Test
+    void testAnExchangeScopedRecordCarriesItsExchange() {
+        when(registryConnection.get(new ViewString(POLICIES_PATH)))
+                .thenReturn(ByteBuffer.wrap(("[{\"policy_id\": 4, \"policy_type\": \"MAX_COMMITTED_CAPITAL\","
+                                + " \"strategy_id\": 10, \"exchange_id\": 3, \"listing_id\": null,"
+                                + " \"parameters\": {\"maxCapital\": 1}, \"enabled\": true}]")
+                        .getBytes()))
+                .thenReturn(ByteBuffer.wrap(MIXED_POLICIES.getBytes()));
+        riskMaster.refresh();
+        assertEquals(3, riskMaster.getRecord(0).exchangeId);
+        assertEquals(10, riskMaster.getRecord(0).strategyId);
+
+        riskMaster.refresh();
+        assertEquals(0, riskMaster.getRecord(0).exchangeId);
+    }
+
+    @Test
     void testDisabledPolicyWithRawObjectParameters() {
         when(registryConnection.get(new ViewString(POLICIES_PATH)))
                 .thenReturn(ByteBuffer.wrap(KILL_SWITCH_DISABLED.getBytes()));
@@ -161,20 +187,22 @@ class RiskMasterTest {
     @Test
     void testRefreshAcceptsExactlyMaxPolicies() {
         when(registryConnection.get(new ViewString(POLICIES_PATH)))
-                .thenReturn(ByteBuffer.wrap(policiesJson(64).getBytes()));
+                .thenReturn(
+                        ByteBuffer.wrap(policiesJson(RiskMaster.MAX_POLICIES).getBytes()));
         riskMaster.refresh();
-        assertEquals(64, riskMaster.getPolicyCount());
+        assertEquals(RiskMaster.MAX_POLICIES, riskMaster.getPolicyCount());
     }
 
     @Test
     void testRefreshThrowsWhenResponseExceedsMaxPolicies() {
         when(registryConnection.get(new ViewString(POLICIES_PATH)))
                 .thenReturn(ByteBuffer.wrap(KILL_SWITCH_ENABLED.getBytes()))
-                .thenReturn(ByteBuffer.wrap(policiesJson(65).getBytes()));
+                .thenReturn(ByteBuffer.wrap(
+                        policiesJson(RiskMaster.MAX_POLICIES + 1).getBytes()));
         riskMaster.refresh();
 
         IllegalStateException e = assertThrows(IllegalStateException.class, riskMaster::refresh);
-        assertTrue(e.getMessage().contains("64"));
+        assertTrue(e.getMessage().contains(String.valueOf(RiskMaster.MAX_POLICIES)));
         assertEquals(1, riskMaster.getPolicyCount());
     }
 
@@ -190,6 +218,14 @@ class RiskMasterTest {
     void testRequestHaltPostsStrategyAndReason() {
         riskMaster.requestHalt(7, "max loss breached");
         assertEquals("{\"strategyId\":7,\"reason\":\"max loss breached\"}", capturePostedHalt());
+    }
+
+    @Test
+    void testRequestHaltNarrowsToAnExchangeOrAListing() {
+        riskMaster.requestHalt(7, 3, 0, "venue rejects");
+        assertEquals("{\"strategyId\":7,\"exchangeId\":3,\"reason\":\"venue rejects\"}", capturePostedHalt());
+        riskMaster.requestHalt(7, 0, 500, "venue rejects");
+        assertEquals("{\"strategyId\":7,\"listingId\":500,\"reason\":\"venue rejects\"}", capturePostedHalt());
     }
 
     @Test

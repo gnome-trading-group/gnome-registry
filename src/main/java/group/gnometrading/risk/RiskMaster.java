@@ -14,9 +14,9 @@ public final class RiskMaster {
 
     private static final String RISK_POLICIES_ENDPOINT = "/api/risk/policies?enabled=true&forStrategy=";
     private static final String RISK_HALTS_ENDPOINT = "/api/risk/halts";
-    // {"strategyId":<int>,"reason":"..."}; reasons are short fixed strings.
+    // {"strategyId":<int>,"exchangeId":<int>,"listingId":<int>,"reason":"..."}; reasons are short fixed strings.
     private static final int HALT_BODY_CAPACITY = 1024;
-    static final int MAX_POLICIES = 64;
+    public static final int MAX_POLICIES = 128;
 
     private final JsonDecoder jsonDecoder;
     private final JsonEncoder jsonEncoder;
@@ -36,13 +36,31 @@ public final class RiskMaster {
      * for no session or this one. {@code sessionId} is null when the strategy runs outside a session.
      */
     public RiskMaster(final RegistryConnection registryConnection, final int strategyId, final String sessionId) {
+        this(registryConnection, strategyId, sessionId, null, null);
+    }
+
+    /**
+     * As above, and further only the policies for no listing or one of {@code listingIds}, and for no exchange or
+     * one of {@code exchangeIds}: every session loads the rows that name no strategy, so without these filters the
+     * whole firm's listing and exchange rows would count against {@link #MAX_POLICIES}. Null means no filter.
+     */
+    public RiskMaster(
+            final RegistryConnection registryConnection,
+            final int strategyId,
+            final String sessionId,
+            final int[] listingIds,
+            final int[] exchangeIds) {
         this.registryConnection = registryConnection;
         this.sessionId = sessionId;
         this.jsonDecoder = new JsonDecoder();
         this.jsonEncoder = new JsonEncoder();
         this.haltBody = ByteBuffer.allocate(HALT_BODY_CAPACITY);
-        this.riskPoliciesPath = new ExpandingMutableString(
-                RISK_POLICIES_ENDPOINT + strategyId + "&forSession=" + (sessionId == null ? "none" : sessionId));
+        this.riskPoliciesPath = new ExpandingMutableString(RISK_POLICIES_ENDPOINT
+                + strategyId
+                + "&forSession="
+                + (sessionId == null ? "none" : sessionId)
+                + idFilter("&forListings=", listingIds)
+                + idFilter("&forExchanges=", exchangeIds));
         this.riskHaltsPath = new ExpandingMutableString(RISK_HALTS_ENDPOINT);
 
         this.records = new RiskPolicyRecord[MAX_POLICIES];
@@ -64,6 +82,20 @@ public final class RiskMaster {
         return this.records[index];
     }
 
+    private static String idFilter(final String key, final int[] ids) {
+        if (ids == null) {
+            return "";
+        }
+        final StringBuilder filter = new StringBuilder(key);
+        for (int i = 0; i < ids.length; i++) {
+            if (i > 0) {
+                filter.append(',');
+            }
+            filter.append(ids[i]);
+        }
+        return filter.toString();
+    }
+
     /**
      * Asks the registry to enable this strategy's kill switch. The registry endpoint can only ever enable, so this
      * is safe to retry. Allocates; it is an emergency path, not part of the trading hot path.
@@ -71,12 +103,27 @@ public final class RiskMaster {
      * @throws RuntimeException if the registry does not accept the request
      */
     public void requestHalt(final int strategyId, final String reason) {
+        requestHalt(strategyId, 0, 0, reason);
+    }
+
+    /**
+     * As {@link #requestHalt(int, String)}, narrowed to the strategy on one exchange or on one listing; 0 leaves
+     * that id out. At most one of the two may be set.
+     */
+    public void requestHalt(final int strategyId, final int exchangeId, final int listingId, final String reason) {
         this.haltBody.clear();
         this.jsonEncoder.wrap(this.haltBody);
         this.jsonEncoder
                 .writeObjectStart()
                 .writeObjectEntry("strategyId", strategyId)
-                .writeComma()
+                .writeComma();
+        if (exchangeId != 0) {
+            this.jsonEncoder.writeObjectEntry("exchangeId", exchangeId).writeComma();
+        }
+        if (listingId != 0) {
+            this.jsonEncoder.writeObjectEntry("listingId", listingId).writeComma();
+        }
+        this.jsonEncoder
                 .writeObjectEntry("reason", reason == null ? "" : reason)
                 .writeObjectEnd();
         this.registryConnection.post(this.riskHaltsPath, this.haltBody.array(), this.haltBody.position());
@@ -115,6 +162,7 @@ public final class RiskMaster {
         record.policyType.setLength(0);
         record.sessionId.setLength(0);
         record.strategyId = 0;
+        record.exchangeId = 0;
         record.listingId = 0;
         record.parametersJson.setLength(0);
         record.enabled = false;
@@ -129,21 +177,29 @@ public final class RiskMaster {
                         record.policyId = key.asInt();
                     } else if (key.getName().equals("policy_type")) {
                         record.policyType.copy(key.asString());
-                    } else if (key.getName().equals("session_id")) {
-                        if (!key.isNull()) {
-                            record.sessionId.copy(key.asString());
-                        }
-                    } else if (key.getName().equals("strategy_id")) {
-                        record.strategyId = key.asInt();
-                    } else if (key.getName().equals("listing_id")) {
-                        record.listingId = key.asInt();
                     } else if (key.getName().equals("parameters")) {
                         record.parametersJson.copy(key.asRawJson());
                     } else if (key.getName().equals("enabled")) {
                         record.enabled = key.asBoolean();
+                    } else {
+                        parseTarget(key, record);
                     }
                 }
             }
+        }
+    }
+
+    private static void parseTarget(final JsonDecoder.JsonNode key, final RiskPolicyRecord record) {
+        if (key.getName().equals("session_id")) {
+            if (!key.isNull()) {
+                record.sessionId.copy(key.asString());
+            }
+        } else if (key.getName().equals("strategy_id")) {
+            record.strategyId = key.asInt();
+        } else if (key.getName().equals("exchange_id")) {
+            record.exchangeId = key.asInt();
+        } else if (key.getName().equals("listing_id")) {
+            record.listingId = key.asInt();
         }
     }
 }

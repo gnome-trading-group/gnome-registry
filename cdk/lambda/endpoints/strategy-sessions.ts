@@ -1,5 +1,7 @@
 import { APIGatewayProxyEvent, APIGatewayProxyEventQueryStringParameters } from 'aws-lambda';
 import { ResourceHandler, withTransaction } from './base';
+import { LaunchCheckError, liveLaunchChecksEnabled } from './launch-checks';
+import { AccountAssignmentError, bindAccounts } from './venue-account-assignment';
 
 interface ISession {
   sessionId: string;
@@ -124,7 +126,8 @@ export class StrategySessionHandler extends ResourceHandler {
 
   // The session and its leases go in together: a session that trades a listing holds it from creation until its
   // process is gone, so a second session of the same strategy and mode can't take it in between. A clash is a 409
-  // naming the session that holds the listing.
+  // naming the session that holds the listing. A live session is also bound to the venue account it trades each
+  // exchange with, in the same transaction.
   async createOne(body: string | null) {
     if (!body) return this.createResponse(400, { message: 'Missing body' });
 
@@ -167,10 +170,17 @@ export class StrategySessionHandler extends ResourceHandler {
           `INSERT INTO strategy.session_listing (session_id, strategy_id, mode, listing_id)
            SELECT $1, $2, $3, unnest($4::int[])`,
           [s.sessionId, s.strategyId, s.mode, listings]);
+        if (s.mode === 'live') {
+          await bindAccounts(client, s.sessionId, s.strategyId, s.config, listings,
+            { checks: liveLaunchChecksEnabled(), now: new Date() });
+        }
         return result.rows[0];
       });
       return this.createResponse(200, row);
     } catch (error) {
+      if (error instanceof AccountAssignmentError || error instanceof LaunchCheckError) {
+        return this.createResponse(error.statusCode, { message: error.message });
+      }
       if (error instanceof SettledListingError) {
         return this.createResponse(409, { message: `Listing ${error.listingId} has settled; it can no longer be traded` });
       }

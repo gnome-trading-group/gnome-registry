@@ -143,6 +143,14 @@ export async function sessionsTotals(client: PoolClient, sessionIds: string[], n
   });
 }
 
+async function accountLabels(client: PoolClient, accountIds: (number | null)[]): Promise<Map<number, string>> {
+  const ids = [...new Set(accountIds.filter((id): id is number => id !== null))];
+  if (ids.length === 0) return new Map();
+  const rows = (await client.query(
+    'SELECT account_id, label FROM account_master.venue_account WHERE account_id = ANY($1::int[])', [ids])).rows;
+  return new Map(rows.map(r => [r.account_id, r.label]));
+}
+
 function lifetimeTotals(listings: StrategyListingState[]) {
   return listings.reduce((acc, l) => {
     const p = lifetimePnl(l.position, l.mark);
@@ -167,6 +175,7 @@ export async function strategySummary(client: PoolClient, strategyId: number, mo
     'SELECT DISTINCT mode FROM strategy.session WHERE strategy_id = $1', [strategyId])).rows.map(r => r.mode);
   const info = await loadListingInfo(client, current.listings.map(l => l.listingId));
   const review = await needsReview(client, strategyId, mode);
+  const labels = await accountLabels(client, current.listings.map(l => l.accountId));
 
   const lifetime = lifetimeTotals(current.listings);
   const startOfToday = lifetimeTotals(atDayStart.listings);
@@ -186,10 +195,12 @@ export async function strategySummary(client: PoolClient, strategyId: number, mo
     openPositions: current.listings.filter(l => l.position.netQuantity !== 0n).length,
     listings: current.listings.map(l => {
       const p = lifetimePnl(l.position, l.mark);
-      const before = atDayStart.listings.find(d => d.listingId === l.listingId);
+      const before = atDayStart.listings.find(d => d.listingId === l.listingId && d.accountId === l.accountId);
       const todayStart = before ? lifetimePnl(before.position, before.mark).total : 0n;
       return {
         ...listingFields(info.get(l.listingId), l.listingId),
+        accountId: l.accountId,
+        accountLabel: l.accountId === null ? null : labels.get(l.accountId) ?? null,
         ...positionFields(l.position),
         markPrice: markPrice(l.mark).toString(),
         bid: l.mark?.bid.toString() ?? null,

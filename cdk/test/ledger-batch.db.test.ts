@@ -1,5 +1,5 @@
 import { Pool, PoolClient } from 'pg';
-import { connectExclusive, LOCK_TIMEOUT_MS, release } from './ledger-db';
+import { connectExclusive, LOCK_TIMEOUT_MS, release, bindAccount } from './ledger-db';
 import { withTransaction } from '../lambda/endpoints/base';
 import { writeBatch } from '../lambda/endpoints/ledger-batch';
 import { StrategySessionHandler } from '../lambda/endpoints/strategy-sessions';
@@ -280,6 +280,7 @@ describeDb('ledger batch against Postgres', () => {
     await client.query(`INSERT INTO strategy.session (session_id, strategy_id, status, mode, config)
       VALUES ('s2', 2, 'RUNNING', 'paper', '{}'), ('l1', 1, 'RUNNING', 'live', '{}')`);
     await client.query(`INSERT INTO strategy.session_listing VALUES ('s2', 2, 'paper', 501, true), ('l1', 1, 'live', 500, true)`);
+    await bindAccount(client, 'l1');
     await post('s1', { fills: [fill(1, 1_000_000, 1_000_000, 1)] });
     await post('s2', { fills: [fill(1, 1_000_000, -1_000_000, 1, { listingId: 501, side: 1 })] });
     await post('l1', { fills: [fill(1, 1_000_000, 1_000_000, 1)] });

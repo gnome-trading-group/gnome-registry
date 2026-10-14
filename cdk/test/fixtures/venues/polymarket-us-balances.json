@@ -1,0 +1,25 @@
+{
+  "balances": [
+    {
+      "currentBalance": 0.412,
+      "currency": "USD",
+      "lastUpdated": null,
+      "buyingPower": 0.412,
+      "assetNotional": 0,
+      "assetAvailable": 0,
+      "pendingCredit": 0,
+      "openOrders": 0,
+      "unsettledFunds": 0,
+      "pendingWithdrawals": [],
+      "marginRequirement": 0,
+      "balanceReservation": 0,
+      "depositReservation": 0,
+      "bonusReservation": 0,
+      "displayedBonus": 0,
+      "displayedAvailableSoon": 0,
+      "displayedCash": 0.412,
+      "availableToWithdraw": 0.412,
+      "bonusHold": 0
+    }
+  ]
+}

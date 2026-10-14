@@ -2,11 +2,13 @@ import { APIGatewayProxyEvent, APIGatewayProxyEventQueryStringParameters } from 
 import { ResourceHandler, ValidationError } from './base';
 
 // A policy applies to exactly the ids it carries: none is global, a strategy covers every session of it, a listing
-// covers every strategy on it, and a session narrows a strategy to one running instance.
+// covers every strategy on it, an exchange covers every listing on it, and a session narrows a strategy to one
+// running instance. A listing already implies its exchange, so a row names one or the other.
 interface ICreateRiskPolicy {
   policyType: string;
   sessionId?: string;
   strategyId?: number;
+  exchangeId?: number;
   listingId?: number;
   parameters: Record<string, unknown>;
   enabled?: boolean;
@@ -23,7 +25,9 @@ interface IUpdateRiskPolicy {
 // limit is a scaled integer: money in price units, sizes in size units, counts as is.
 const POLICY_PARAMETERS: Record<string, string[]> = {
   KILL_SWITCH: [],
-  MAX_NOTIONAL: ['maxNotionalValue'],
+  MAX_ORDER_NOTIONAL: ['maxOrderNotional'],
+  MAX_COMMITTED_CAPITAL: ['maxCapital'],
+  MAX_CONSECUTIVE_REJECTS: ['maxRejects'],
   MAX_ORDER_SIZE: ['maxOrderSize'],
   MAX_POSITION: ['maxPosition'],
   MAX_OPEN_ORDERS: ['maxOpenOrders'],
@@ -65,6 +69,12 @@ function optionalId(name: string, value: unknown): number | null {
   return value;
 }
 
+function idList(name: string, value: string): string {
+  const ids = value.split(',').map(id => optionalId(name, Number(id)));
+  if (ids.length === 0 || ids.some(id => id === null)) throw new ValidationError(`${name} must list positive integers`);
+  return ids.join(',');
+}
+
 function optionalSessionId(value: unknown): string | null {
   if (value == null) return null;
   if (typeof value !== 'string' || !SESSION_ID_PATTERN.test(value)) {
@@ -103,6 +113,7 @@ class RiskPolicyHandler extends ResourceHandler {
     if (params?.policyId) query += ` AND policy_id=${optionalId('policyId', Number(params.policyId))}`;
     if (params?.strategyId) query += ` AND strategy_id=${optionalId('strategyId', Number(params.strategyId))}`;
     if (params?.listingId) query += ` AND listing_id=${optionalId('listingId', Number(params.listingId))}`;
+    if (params?.exchangeId) query += ` AND exchange_id=${optionalId('exchangeId', Number(params.exchangeId))}`;
     // What one running OMS needs: rows for every strategy or its own, and for no session or its own. Without
     // these an OMS would load every session's and strategy's rows and hit its policy cap fleet-wide.
     if (params?.forStrategy) {
@@ -112,6 +123,14 @@ class RiskPolicyHandler extends ResourceHandler {
       query += ' AND session_id IS NULL';
     } else if (params?.forSession) {
       query += ` AND (session_id IS NULL OR session_id='${optionalSessionId(params.forSession)}')`;
+    }
+    // Rows naming no strategy reach every session, so a session also narrows them to the listings and exchanges it
+    // trades; otherwise the firm's listing and exchange rows together would overflow every OMS's policy cap.
+    if (params?.forListings) {
+      query += ` AND (listing_id IS NULL OR listing_id IN (${idList('forListings', params.forListings)}))`;
+    }
+    if (params?.forExchanges) {
+      query += ` AND (exchange_id IS NULL OR exchange_id IN (${idList('forExchanges', params.forExchanges)}))`;
     }
     if (params?.enabled === 'true' || params?.enabled === 'false') query += ` AND enabled=${params.enabled}`;
     // The OMS reads policies into a fixed-size array, so a stable order keeps refreshes deterministic.
@@ -124,7 +143,11 @@ class RiskPolicyHandler extends ResourceHandler {
     validateParameters(p.policyType, p.parameters);
     const sessionId = optionalSessionId(p.sessionId);
     const strategyId = optionalId('strategyId', p.strategyId);
+    const exchangeId = optionalId('exchangeId', p.exchangeId) ?? 'null';
     const listingId = optionalId('listingId', p.listingId) ?? 'null';
+    if (exchangeId !== 'null' && listingId !== 'null') {
+      throw new ValidationError('a policy names an exchange or a listing, not both');
+    }
     const enabled = p.enabled !== false;
     // A session row carries its session's strategy; one naming another strategy fails the foreign key.
     const strategy = sessionId == null
@@ -132,8 +155,9 @@ class RiskPolicyHandler extends ResourceHandler {
       : (strategyId ?? `(SELECT strategy_id FROM strategy.session WHERE session_id='${sessionId}')`);
     const session = sessionId == null ? 'null' : `'${sessionId}'`;
     return `
-      INSERT INTO risk.policy (policy_type, session_id, strategy_id, listing_id, parameters, enabled)
-      VALUES ('${p.policyType}', ${session}, ${strategy}, ${listingId}, '${JSON.stringify(p.parameters)}', ${enabled})
+      INSERT INTO risk.policy (policy_type, session_id, strategy_id, exchange_id, listing_id, parameters, enabled)
+      VALUES ('${p.policyType}', ${session}, ${strategy}, ${exchangeId}, ${listingId}, '${JSON.stringify(p.parameters)}',
+        ${enabled})
       RETURNING *;
     `;
   }

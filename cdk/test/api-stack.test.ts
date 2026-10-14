@@ -110,6 +110,10 @@ describe('ApiStack auth', () => {
     ['ledger/positions', 'GET'],
     ['ledger/orders', 'GET'],
     ['strategy-sessions/stop', 'POST'],
+    ['strategy-sessions/accounts', 'GET'],
+    ['venue-accounts', 'POST'],
+    ['treasury/snapshots', 'POST'],
+    ['treasury/poll-targets', 'GET'],
   ])('%s %s stays on the API key for services', (path, httpMethod) => {
     method(template, resourceId(template, path), httpMethod);
   });
@@ -118,6 +122,7 @@ describe('ApiStack auth', () => {
     ['risk/policies', 'POST'],
     ['risk/policies', 'PATCH'],
     ['risk/policies', 'DELETE'],
+    ['venue-accounts', 'GET'],
   ])('%s %s is not exposed to the API key', (path, httpMethod) => {
     const methods = template.findResources('AWS::ApiGateway::Method', {
       Properties: { HttpMethod: httpMethod, ResourceId: { Ref: resourceId(template, path) } },
@@ -127,6 +132,18 @@ describe('ApiStack auth', () => {
 
   it('keeps position adjustments Cognito-only, so each is attributed to a person', () => {
     expect(hasResource(template, 'ledger/adjustments')).toBe(false);
+  });
+
+  it('keeps transfers, account settings and treasury reads Cognito-only', () => {
+    for (const path of ['treasury/summary', 'treasury/transfers', 'treasury/account-config', 'treasury/recon']) {
+      expect(hasResource(template, path)).toBe(false);
+      expect(hasResource(template, `cognito/${path}`)).toBe(true);
+    }
+  });
+
+  it('keeps moving an account through its lifecycle Cognito-only', () => {
+    expect(hasResource(template, 'venue-accounts/status')).toBe(false);
+    expect(hasResource(template, 'cognito/venue-accounts/status')).toBe(true);
   });
 
   it('stays well under the CloudFormation limit of 500 resources per stack', () => {

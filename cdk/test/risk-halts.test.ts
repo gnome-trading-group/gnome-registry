@@ -118,11 +118,12 @@ describe('POST /risk/halts upsert', () => {
 
   it('generates an enable-only upsert keyed on the unique index expressions', () => {
     const sql = generateHaltUpsertQuery({ strategyId: 7 }).replace(/\s+/g, ' ');
-    expect(sql).toContain("SELECT 'KILL_SWITCH', NULL, 7, NULL::integer, '{}'::jsonb, true");
+    expect(sql).toContain("SELECT 'KILL_SWITCH', NULL, 7, NULL::integer, NULL::integer, '{}'::jsonb, true");
     expect(sql).toContain(
-      "ON CONFLICT (policy_type, COALESCE(session_id, ''), COALESCE(strategy_id, 0), COALESCE(listing_id, 0))",
+      "ON CONFLICT (policy_type, COALESCE(session_id, ''), COALESCE(strategy_id, 0), COALESCE(exchange_id, 0),"
+        + ' COALESCE(listing_id, 0))',
     );
-    expect(sql).toContain('session_id IS NULL AND strategy_id=7 AND listing_id IS NULL');
+    expect(sql).toContain('session_id IS NULL AND strategy_id=7 AND exchange_id IS NULL AND listing_id IS NULL');
     expect(sql).toContain('DO UPDATE SET enabled=true, date_modified=NOW() WHERE risk.policy.enabled = false');
     expect(sql).not.toMatch(/enabled\s*=\s*false\s*(,|$)/);
     expect(sql).not.toMatch(/SET[^W]*enabled=false/);
@@ -133,8 +134,30 @@ describe('POST /risk/halts upsert', () => {
     const response = await handler(postEvent({ strategyId: 7, listingId: 500, reason: 'unattributable order' }));
     expect(response.statusCode).toBe(200);
     const sql = String(mockQuery.mock.calls[2][0]).replace(/\s+/g, ' ');
-    expect(sql).toContain("SELECT 'KILL_SWITCH', NULL, 7, 500, '{}'::jsonb, true");
-    expect(sql).toContain('session_id IS NULL AND strategy_id=7 AND listing_id=500');
+    expect(sql).toContain("SELECT 'KILL_SWITCH', NULL, 7, NULL::integer, 500, '{}'::jsonb, true");
+    expect(sql).toContain('session_id IS NULL AND strategy_id=7 AND exchange_id IS NULL AND listing_id=500');
+  });
+
+  it('halts a strategy on one exchange, or a whole exchange', async () => {
+    upsertReturns(12);
+    expect((await handler(postEvent({ strategyId: 7, exchangeId: 3, reason: 'venue rejects' }))).statusCode).toBe(200);
+    let sql = String(mockQuery.mock.calls[2][0]).replace(/\s+/g, ' ');
+    expect(sql).toContain("SELECT 'KILL_SWITCH', NULL, 7, 3, NULL::integer, '{}'::jsonb, true");
+    expect(sql).toContain('session_id IS NULL AND strategy_id=7 AND exchange_id=3 AND listing_id IS NULL');
+
+    mockQuery.mockClear();
+    upsertReturns(13);
+    expect((await handler(postEvent({ exchangeId: 3, reason: 'venue down' }))).statusCode).toBe(200);
+    sql = String(mockQuery.mock.calls[2][0]).replace(/\s+/g, ' ');
+    expect(sql).toContain("SELECT 'KILL_SWITCH', NULL, NULL::integer, 3, NULL::integer, '{}'::jsonb, true");
+    expect(sql).toContain('session_id IS NULL AND strategy_id IS NULL AND exchange_id=3 AND listing_id IS NULL');
+  });
+
+  it('refuses an exchange with a listing or a session', async () => {
+    expect((await handler(postEvent({ strategyId: 7, exchangeId: 3, listingId: 500, reason: 'x' }))).statusCode)
+      .toBe(400);
+    expect((await handler(postEvent({ sessionId: 'abc', exchangeId: 3, reason: 'x' }))).statusCode).toBe(400);
+    expect((await handler(postEvent({ exchangeId: 0, reason: 'x' }))).statusCode).toBe(400);
   });
 
   it('refuses a listing without a strategy', async () => {

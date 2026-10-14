@@ -1,10 +1,13 @@
 import { APIGatewayProxyEvent } from 'aws-lambda';
-import { connectLedgerDatabase, createResponse, parseMode, WRITABLE_SESSION_STATUSES } from './ledger-common';
+import {
+  connectLedgerDatabase, createResponse, isSessionId, parseMode, WRITABLE_SESSION_STATUSES,
+} from './ledger-common';
 
 // Orders for a starting session to recognise what was left resting on the venue: whose each order is, whether that
 // session might still be running, and how much of it the ledger has seen filled, at what cost and for what fees, so
 // whatever more the venue reports can be booked as the difference. Found either by listing, or by the ids the venue
-// knows them by, which finds an order whichever listing it was recorded under.
+// knows them by, which finds an order whichever listing it was recorded under. Given the starting session, only
+// orders on the accounts it was bound to: its credentials can't see or cancel another account's orders.
 export function buildOrdersQuery(params: Record<string, string | undefined>): { text: string; values: unknown[] } {
   const mode = parseMode(params.mode);
   if (!mode) throw new Error('mode is required');
@@ -17,7 +20,14 @@ export function buildOrdersQuery(params: Record<string, string | undefined>): { 
   if (status !== 'OPEN' && status !== 'ANY') throw new Error('status must be OPEN or ANY');
   const byExchangeId = exchangeOrderIds.length > 0;
   const values: unknown[] = [mode, WRITABLE_SESSION_STATUSES, byExchangeId ? exchangeOrderIds : ids];
-  const match = byExchangeId ? 'o.exchange_order_id = ANY($3::text[])' : 'o.listing_id = ANY($3::int[])';
+  let match = byExchangeId ? 'o.exchange_order_id = ANY($3::text[])' : 'o.listing_id = ANY($3::int[])';
+  if (params.sessionId) {
+    if (!isSessionId(params.sessionId)) throw new Error('sessionId must be a session id');
+    values.push(params.sessionId);
+    match += ` AND o.account_id IS NOT DISTINCT FROM (
+      SELECT sva.account_id FROM account_master.session_venue_account sva
+      WHERE sva.session_id = $4 AND sva.exchange_id = o.exchange_id)`;
+  }
   return {
     text: `
       SELECT o.*, s.status AS session_status, (s.status = ANY($2::text[])) AS session_active,

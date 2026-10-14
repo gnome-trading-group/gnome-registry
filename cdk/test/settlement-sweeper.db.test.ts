@@ -1,5 +1,5 @@
 import { Pool, PoolClient } from 'pg';
-import { connectExclusive, LOCK_TIMEOUT_MS, release } from './ledger-db';
+import { bindAccount, connectExclusive, LOCK_TIMEOUT_MS, release } from './ledger-db';
 import { ValidationError, withTransaction } from '../lambda/endpoints/base';
 import { writeBatch } from '../lambda/endpoints/ledger-batch';
 import { summarize } from '../lambda/endpoints/pnl-summary';
@@ -57,6 +57,7 @@ describeDb('Settlement sweeper, against Postgres', () => {
     for (const listing of listings) {
       await client.query(`INSERT INTO strategy.session_listing VALUES ($1, 1, $2, $3, true)`, [id, mode, listing]);
     }
+    if (mode === 'live') await bindAccount(client, id);
   }
 
   async function stop(id: string) {

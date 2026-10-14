@@ -14,12 +14,14 @@ const DEFAULT_ACTOR = 'oms';
 const SESSION_ID_PATTERN = /^[A-Za-z0-9_-]+$/;
 
 // Exactly one target: a strategy halts every session of it (an OMS escalating a breach), a session halts just that
-// running instance (an operator stopping it), and a strategy on one listing halts only that (a starting session that
-// found an order on the venue it can't account for).
+// running instance (an operator stopping it), a strategy on one listing halts only that (a starting session that
+// found an order on the venue it can't account for), a strategy on one exchange halts its trading there (an OMS
+// whose venue account ran out of funds), and an exchange alone halts everything on that venue.
 interface IRequestHalt {
   strategyId?: number;
   sessionId?: string;
   listingId?: number;
+  exchangeId?: number;
   reason: string;
   // Lets the session launcher (which has no DB access and calls this endpoint over HTTP) attribute the halt
   // to the operator who stopped the session instead of the OMS.
@@ -42,27 +44,39 @@ export function isValidSessionId(value: unknown): value is string {
   return typeof value === 'string' && SESSION_ID_PATTERN.test(value);
 }
 
-export type HaltTarget = { strategyId: number; listingId?: number } | { sessionId: string };
+export type HaltTarget =
+  | { strategyId: number; listingId?: number; exchangeId?: number }
+  | { exchangeId: number }
+  | { sessionId: string };
 
 // This only ever enables: a halt must not be reversible through the API-key path. The DO UPDATE is skipped
 // when the switch is already on so repeated halts (OMS retries) don't churn the history table, and the
 // fallback SELECT still returns the policy_id in that case. The fallback matches the target exactly, so a session's
 // kill and its strategy's kill are never both returned. A session that doesn't exist inserts nothing and returns no
-// rows.
+// rows. The ON CONFLICT names idx_risk_policy_unique's exact expressions (migration 037), so the two change together.
 export function generateHaltUpsertQuery(target: HaltTarget): string {
-  const listing = 'sessionId' in target || target.listingId == null ? null : target.listingId;
-  const source = 'sessionId' in target
-    ? `SELECT 'KILL_SWITCH', session_id, strategy_id, NULL::integer, '{}'::jsonb, true
-       FROM strategy.session WHERE session_id='${target.sessionId}'`
-    : `SELECT 'KILL_SWITCH', NULL, ${target.strategyId}, ${listing ?? 'NULL::integer'}, '{}'::jsonb, true`;
-  const match = 'sessionId' in target
-    ? `session_id='${target.sessionId}' AND listing_id IS NULL`
-    : `session_id IS NULL AND strategy_id=${target.strategyId} AND ${listing == null ? 'listing_id IS NULL' : `listing_id=${listing}`}`;
+  const idOrNull = (id: number | undefined) => (id == null ? 'NULL::integer' : String(id));
+  const isOrEquals = (column: string, id: number | undefined) => (id == null ? `${column} IS NULL` : `${column}=${id}`);
+  let source: string;
+  let match: string;
+  if ('sessionId' in target) {
+    source = `SELECT 'KILL_SWITCH', session_id, strategy_id, NULL::integer, NULL::integer, '{}'::jsonb, true
+       FROM strategy.session WHERE session_id='${target.sessionId}'`;
+    match = `session_id='${target.sessionId}' AND exchange_id IS NULL AND listing_id IS NULL`;
+  } else {
+    const strategyId = 'strategyId' in target ? target.strategyId : undefined;
+    const listingId = 'listingId' in target ? target.listingId : undefined;
+    source = `SELECT 'KILL_SWITCH', NULL, ${idOrNull(strategyId)}, ${idOrNull(target.exchangeId)},
+       ${idOrNull(listingId)}, '{}'::jsonb, true`;
+    match = `session_id IS NULL AND ${isOrEquals('strategy_id', strategyId)}`
+      + ` AND ${isOrEquals('exchange_id', target.exchangeId)} AND ${isOrEquals('listing_id', listingId)}`;
+  }
   return `
     WITH upserted AS (
-      INSERT INTO risk.policy (policy_type, session_id, strategy_id, listing_id, parameters, enabled)
+      INSERT INTO risk.policy (policy_type, session_id, strategy_id, exchange_id, listing_id, parameters, enabled)
       ${source}
-      ON CONFLICT (policy_type, COALESCE(session_id, ''), COALESCE(strategy_id, 0), COALESCE(listing_id, 0))
+      ON CONFLICT (policy_type, COALESCE(session_id, ''), COALESCE(strategy_id, 0), COALESCE(exchange_id, 0),
+                   COALESCE(listing_id, 0))
       DO UPDATE SET enabled=true, date_modified=NOW()
       WHERE risk.policy.enabled = false
       RETURNING policy_id
@@ -96,7 +110,15 @@ export const handler = async (event: APIGatewayProxyEvent) => {
   if (request?.listingId != null && !isValidStrategyId(request.listingId)) {
     return createResponse(400, { message: 'listingId must be a positive integer' });
   }
-  if (request?.sessionId != null && request?.strategyId == null) {
+  if (request?.exchangeId != null && !isValidStrategyId(request.exchangeId)) {
+    return createResponse(400, { message: 'exchangeId must be a positive integer' });
+  }
+  if (request?.exchangeId != null && (request.listingId != null || request.sessionId != null)) {
+    return createResponse(400, { message: 'exchangeId halts a strategy or a whole venue, not a listing or session' });
+  }
+  if (request?.exchangeId != null && request?.strategyId == null) {
+    target = { exchangeId: request.exchangeId };
+  } else if (request?.sessionId != null && request?.strategyId == null) {
     if (!isValidSessionId(request.sessionId)) {
       return createResponse(400, { message: 'sessionId must be a session id' });
     }
@@ -107,9 +129,11 @@ export const handler = async (event: APIGatewayProxyEvent) => {
     }
     target = request.listingId != null
       ? { strategyId: request.strategyId, listingId: request.listingId }
-      : { strategyId: request.strategyId };
+      : request.exchangeId != null
+        ? { strategyId: request.strategyId, exchangeId: request.exchangeId }
+        : { strategyId: request.strategyId };
   } else {
-    return createResponse(400, { message: 'Exactly one of strategyId or sessionId is required' });
+    return createResponse(400, { message: 'Exactly one of strategyId, sessionId or exchangeId is required' });
   }
   if (typeof request.reason !== 'string') {
     return createResponse(400, { message: 'reason must be a string' });

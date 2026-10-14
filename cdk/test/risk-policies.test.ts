@@ -93,7 +93,15 @@ describe('risk policy targets and validation', () => {
 
   it('stores exactly the ids it is given, as nulls when absent', async () => {
     await handler(event('POST', { policyType: 'MAX_POSITION', listingId: 500, parameters: { maxPosition: 10 } }));
-    expect(insertSql()).toContain("VALUES ('MAX_POSITION', null, null, 500, '{\"maxPosition\":10}', true)");
+    expect(insertSql()).toContain("VALUES ('MAX_POSITION', null, null, null, 500, '{\"maxPosition\":10}', true)");
+  });
+
+  it('stores a strategy\'s budget on one exchange', async () => {
+    await handler(event('POST', {
+      policyType: 'MAX_COMMITTED_CAPITAL', strategyId: 7, exchangeId: 3, parameters: { maxCapital: 500_000_000_000 },
+    }));
+    expect(insertSql()).toContain(
+      "VALUES ('MAX_COMMITTED_CAPITAL', null, 7, 3, null, '{\"maxCapital\":500000000000}', true)");
   });
 
   it('fills a session row\'s strategy from its session', async () => {
@@ -110,6 +118,9 @@ describe('risk policy targets and validation', () => {
     [{ policyType: 'KILL_SWITCH', parameters: { maxLoss: 1 } }],
     [{ policyType: 'KILL_SWITCH', strategyId: 0, parameters: {} }],
     [{ policyType: 'KILL_SWITCH', sessionId: "x'y", parameters: {} }],
+    [{ policyType: 'MAX_NOTIONAL', parameters: { maxNotionalValue: 1 } }],
+    [{ policyType: 'MAX_CONSECUTIVE_REJECTS', parameters: { maxRejects: 0 } }],
+    [{ policyType: 'KILL_SWITCH', exchangeId: 3, listingId: 500, parameters: {} }],
   ])('rejects %j with a 400 before writing', async (body) => {
     const response = await handler(event('POST', body));
     expect(response.statusCode).toBe(400);
@@ -142,6 +153,17 @@ describe('risk policy targets and validation', () => {
     mockQuery.mockClear();
     await handler(event('GET', null, undefined, { forSession: 'none' }));
     expect(String(mockQuery.mock.calls[0][0])).toContain('session_id IS NULL');
+  });
+
+  it('narrows rows naming no strategy to the session\'s listings and exchanges', async () => {
+    mockQuery.mockImplementation(async () => ({ rowCount: 0, rows: [] }));
+    await handler(event('GET', null, undefined, { forStrategy: '7', forListings: '500,501', forExchanges: '3' }));
+    const sql = String(mockQuery.mock.calls[0][0]);
+    expect(sql).toContain('(listing_id IS NULL OR listing_id IN (500,501))');
+    expect(sql).toContain('(exchange_id IS NULL OR exchange_id IN (3))');
+    mockQuery.mockClear();
+    const bad = await handler(event('GET', null, undefined, { forListings: '500,x' }));
+    expect(bad.statusCode).toBe(400);
   });
 
   it('lists every row, session rows included, by default', async () => {

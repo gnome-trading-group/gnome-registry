@@ -185,6 +185,16 @@ describe('POST /strategy-sessions/launch', () => {
     expect(patchBodies[0]).toEqual({ instanceId: 'i-123', availabilityZone: 'us-east-1b' });
   });
 
+  it('launches a live session from the live template, whose role alone reads venue account credentials', async () => {
+    await launcher.handler(apiEvent('/strategy-sessions/launch', launchBody({ mode: 'live' },
+      { accounts: { POLYMARKET_INTL: 'sleepy-otter-42' } })));
+    const input = runInstancesInput();
+    expect(input.LaunchTemplate.LaunchTemplateName).toBe('gnome-orchestrator-live');
+    const env = JSON.parse(Buffer.from(
+      Buffer.from(input.UserData, 'base64').toString().match(/echo '([^']+)'/)![1], 'base64').toString());
+    expect(env.ACCOUNTS).toBeUndefined();
+  });
+
   it('launches from the launch template with the right AMI, subnet and tags', async () => {
     await launcher.handler(apiEvent('/strategy-sessions/launch', launchBody()));
 

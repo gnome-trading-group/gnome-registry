@@ -10,6 +10,7 @@ interface Props extends cdk.StackProps {
   api: apigw.RestApi;
   syncLambda: lambda.IFunction;
   settlementSweeperLambda: lambda.IFunction;
+  venuePollerLambda: lambda.IFunction;
   database: rds.DatabaseInstance;
 }
 
@@ -49,6 +50,14 @@ export class MonitoringStack extends cdk.Stack {
         lambdaFunction: props.settlementSweeperLambda,
         humanReadableName: 'Settlement Sweeper',
         alarmFriendlyName: 'SettlementSweeper',
+        addFaultCountAlarm: {
+          Critical: { maxErrorCount: 0 },
+        },
+      })
+      .monitorLambdaFunction({
+        lambdaFunction: props.venuePollerLambda,
+        humanReadableName: 'Venue Poller',
+        alarmFriendlyName: 'VenuePoller',
         addFaultCountAlarm: {
           Critical: { maxErrorCount: 0 },
         },

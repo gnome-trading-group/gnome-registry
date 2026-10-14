@@ -8,11 +8,12 @@ import { abs } from '../endpoints/ledger-math';
 const ACTOR = 'settlement-sweeper';
 const PRICE_SCALE = 1_000_000_000n;
 
-// Positions still open on a listing whose outcome has settled, that no session holds. A held position is left to
-// its session's OMS, which owns it until the session ends and releases the lease; a position under review is left
-// to an operator, since closing an untrusted quantity would book untrusted PnL.
+// Positions still open on a listing whose outcome has settled, that no session holds on their account. A held
+// position is left to its session's OMS, which owns it until the session ends and releases the lease; a position
+// under review is left to an operator, since closing an untrusted quantity would book untrusted PnL. A session
+// trading the listing on another account (the strategy moved off a draining wallet) holds a different position.
 const FIND_SETTLED_POSITIONS = `
-  SELECT p.strategy_id, p.listing_id, p.mode, p.net_quantity, ec.settlement_price
+  SELECT p.strategy_id, p.listing_id, p.mode, p.account_id, p.net_quantity, ec.settlement_price
   FROM ledger.position p
   JOIN sm.listing l ON l.listing_id = p.listing_id
   JOIN LATERAL (
@@ -22,8 +23,11 @@ const FIND_SETTLED_POSITIONS = `
   WHERE p.net_quantity <> 0 AND NOT p.needs_review
     AND NOT EXISTS (
       SELECT 1 FROM strategy.session_listing sl
-      WHERE sl.strategy_id = p.strategy_id AND sl.mode = p.mode AND sl.listing_id = p.listing_id AND sl.active)
-  ORDER BY p.strategy_id, p.listing_id, p.mode`;
+      LEFT JOIN account_master.session_venue_account sva
+        ON sva.session_id = sl.session_id AND sva.exchange_id = l.exchange_id
+      WHERE sl.strategy_id = p.strategy_id AND sl.mode = p.mode AND sl.listing_id = p.listing_id AND sl.active
+        AND sva.account_id IS NOT DISTINCT FROM p.account_id)
+  ORDER BY p.strategy_id, p.listing_id, p.mode, p.account_id`;
 
 // Orders an ended session left resting died with the market. Only an ended session's orders are touched, as when a
 // starting session recovers them, so a running session's orders stay its own.
@@ -53,12 +57,14 @@ export async function sweepSettlements(client: PoolClient): Promise<SweepResult>
   for (const row of candidates) {
     const net = BigInt(row.net_quantity);
     const price = BigInt(row.settlement_price);
-    const label = `strategy ${row.strategy_id} listing ${row.listing_id} ${row.mode}`;
+    const label = `strategy ${row.strategy_id} listing ${row.listing_id} ${row.mode}`
+      + (row.account_id === null ? '' : ` account ${row.account_id}`);
     try {
       const position = await withTransaction(client, (c) => bookTrade(c, {
         strategyId: row.strategy_id,
         listingId: row.listing_id,
         mode: row.mode,
+        accountId: row.account_id,
         trade: { side: net > 0n ? 1 : 0, qty: abs(net), price, fee: 0n },
         expectedNetQuantity: net,
         actor: ACTOR,

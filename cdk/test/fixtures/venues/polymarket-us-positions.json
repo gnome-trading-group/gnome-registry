@@ -1,0 +1,111 @@
+{
+  "long": {
+    "positions": {
+      "tec-mlb-nlchamp-2026-09-27-lad": {
+        "netPosition": "1",
+        "qtyBought": "1",
+        "qtySold": "0",
+        "cost": {
+          "value": "0.3120",
+          "currency": "USD"
+        },
+        "realized": {
+          "value": "0.0000",
+          "currency": "USD"
+        },
+        "bodPosition": "0",
+        "expired": false,
+        "updateTime": "2026-10-14T01:27:35.262851430Z",
+        "cashValue": {
+          "value": "0.3070",
+          "currency": "USD"
+        },
+        "qtyAvailable": "1",
+        "avgPx": {
+          "value": "0.3120",
+          "currency": "USD"
+        },
+        "fees": null,
+        "baseCost": null,
+        "costPerShare": null,
+        "netPositionDecimal": "1.0000",
+        "qtyBoughtDecimal": "1.0000",
+        "qtySoldDecimal": "0.0000",
+        "bodPositionDecimal": "0.0000",
+        "qtyAvailableDecimal": "1.0000",
+        "comboLegDetails": [],
+        "positionId": "6ac711b0-5fb6-4c4c-92de-f9c025d32f59:LONG:tec-mlb-nlchamp-2026-09-27-lad"
+      }
+    },
+    "nextCursor": "",
+    "eof": true,
+    "availablePositions": []
+  },
+  "short": {
+    "positions": {
+      "tec-mlb-nlchamp-2026-09-27-lad": {
+        "netPosition": "-1",
+        "qtyBought": "1",
+        "qtySold": "2",
+        "cost": {
+          "value": "0.6980",
+          "currency": "USD"
+        },
+        "realized": {
+          "value": "-0.0100",
+          "currency": "USD"
+        },
+        "bodPosition": "0",
+        "expired": false,
+        "updateTime": "2026-10-14T01:27:39.161974030Z",
+        "cashValue": {
+          "value": "0.6930",
+          "currency": "USD"
+        },
+        "qtyAvailable": "-1",
+        "avgPx": {
+          "value": "0.6980",
+          "currency": "USD"
+        },
+        "fees": null,
+        "baseCost": null,
+        "costPerShare": null,
+        "netPositionDecimal": "-1.0000",
+        "qtyBoughtDecimal": "1.0000",
+        "qtySoldDecimal": "2.0000",
+        "bodPositionDecimal": "0.0000",
+        "qtyAvailableDecimal": "-1.0000",
+        "comboLegDetails": [],
+        "positionId": "6ac711b0-5fb6-4c4c-92de-f9c025d32f59:SHORT:tec-mlb-nlchamp-2026-09-27-lad"
+      }
+    },
+    "nextCursor": "",
+    "eof": true,
+    "availablePositions": []
+  },
+  "balancesWithShort": {
+    "balances": [
+      {
+        "currentBalance": 10.674,
+        "currency": "USD",
+        "lastUpdated": null,
+        "buyingPower": 9.674,
+        "assetNotional": 0,
+        "assetAvailable": 0,
+        "pendingCredit": 0,
+        "openOrders": 0,
+        "unsettledFunds": 0,
+        "pendingWithdrawals": [],
+        "marginRequirement": 1,
+        "balanceReservation": 9.674,
+        "depositReservation": 9.674,
+        "bonusReservation": 0,
+        "displayedBonus": 0,
+        "displayedAvailableSoon": 9.674,
+        "displayedCash": 0,
+        "availableToWithdraw": 0,
+        "bonusHold": 0
+      }
+    ]
+  }
+}

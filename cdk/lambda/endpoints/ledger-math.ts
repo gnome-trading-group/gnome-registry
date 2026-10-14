@@ -87,3 +87,39 @@ export function applyTrade(position: { netQuantity: bigint; totalCost: bigint },
     : notional(entry, abs(after));
   return { netQuantity: after, totalCost, realized };
 }
+
+export const PRICE_SCALE = 1_000_000_000n;
+
+// What a position and its working orders tie up, as MaxCommittedCapitalPolicy (gnome-oms CommittedCapital) counts
+// it. A $1-payout contract commits what was paid for a long, and the rest of the dollar for a short; a resting buy
+// commits its price unless it would only cover a short, and a resting sell commits the rest of the dollar unless
+// long inventory covers it. Anything else is counted at its gross notional, which can only overstate it.
+export interface CommittedInputs {
+  binary: boolean;
+  netQuantity: bigint;
+  totalCost: bigint;
+  leavesBuyQty: bigint;
+  leavesBuyNotional: bigint;
+  leavesSellQty: bigint;
+  leavesSellNotional: bigint;
+}
+
+// The OMS holds money in a signed 64-bit long and saturates a sum past it rather than wrapping.
+const LONG_MAX = 9_223_372_036_854_775_807n;
+
+function saturate(value: bigint): bigint {
+  return value > LONG_MAX ? LONG_MAX : value;
+}
+
+export function committedCapital(c: CommittedInputs): bigint {
+  if (!c.binary) return saturate(abs(c.totalCost) + c.leavesBuyNotional + c.leavesSellNotional);
+  const net = c.netQuantity;
+  const held = net > 0n ? c.totalCost : net < 0n ? notional(PRICE_SCALE, -net) - c.totalCost : 0n;
+  const max0 = (v: bigint) => (v > 0n ? v : 0n);
+  const uncoveredBuys = max0(c.leavesBuyQty - max0(-net));
+  const buys = c.leavesBuyQty === 0n ? 0n : (c.leavesBuyNotional * uncoveredBuys) / c.leavesBuyQty;
+  const uncoveredSells = max0(c.leavesSellQty - max0(net));
+  const sells = c.leavesSellQty === 0n ? 0n
+    : ((notional(PRICE_SCALE, c.leavesSellQty) - c.leavesSellNotional) * uncoveredSells) / c.leavesSellQty;
+  return saturate(held + buys + sells);
+}

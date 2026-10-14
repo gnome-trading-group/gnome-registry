@@ -129,7 +129,29 @@ async function loadHoldings(
     throw new BadRequest(error instanceof Error ? error.message : String(error));
   }
   if (!mode) throw new BadRequest('mode is required');
-  return (await loadStrategyState(client, mode, strategyId, now)).listings.map(strategyHolding);
+  return combineAccounts((await loadStrategyState(client, mode, strategyId, now)).listings.map(strategyHolding));
+}
+
+// A listing the strategy holds on several venue accounts is one holding here: its outcomes are the same whichever
+// account holds them, so the quantities add and each account's PnL is summed.
+function combineAccounts(holdings: Holding[]): Holding[] {
+  const byListing = new Map<number, Holding>();
+  for (const h of holdings) {
+    const prior = byListing.get(h.listingId);
+    byListing.set(h.listingId, prior === undefined ? h : {
+      listingId: h.listingId,
+      position: {
+        netQuantity: prior.position.netQuantity + h.position.netQuantity,
+        totalCost: prior.position.totalCost + h.position.totalCost,
+        realizedPnl: prior.position.realizedPnl + h.position.realizedPnl,
+        totalFees: prior.position.totalFees + h.position.totalFees,
+      },
+      mark: h.mark,
+      total: () => prior.total() + h.total(),
+      settled: settle => prior.settled(settle) + h.settled(settle),
+    });
+  }
+  return [...byListing.values()];
 }
 
 export async function events(client: PoolClient, params: Record<string, string | undefined>, now: Date) {

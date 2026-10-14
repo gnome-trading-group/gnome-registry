@@ -31,9 +31,12 @@ export interface SessionListingState {
   lastFillAt: Date | null;
 }
 
+// One per venue account the strategy holds the listing on (a single one with no account in paper mode): an account
+// moved off while it drains keeps its own position, which is valued and summed separately.
 export interface StrategyListingState {
   strategyId: number;
   listingId: number;
+  accountId: number | null;
   position: PositionState;
   mark: MarkInputs | null;
   markTime: Date | null;
@@ -114,10 +117,16 @@ export async function loadSessionStates(client: PoolClient, sessionIds: string[]
       m0.bid AS open_bid, m0.ask AS open_ask, m0.last_trade AS open_last,
       m1.bid, m1.ask, m1.last_trade, m1.ts AS mark_time
     FROM s JOIN l USING (session_id)
+    -- What the session inherited is the position on the account it trades the listing with.
     LEFT JOIN LATERAL (
       SELECT net_quantity_after, total_cost_after, position_version FROM ledger.fill f
       WHERE f.strategy_id = s.strategy_id AND f.mode = s.mode AND f.listing_id = l.listing_id
         AND f.source <> 'GAP' AND f.recorded_at < s.started_at
+        AND f.account_id IS NOT DISTINCT FROM (
+          SELECT sva.account_id FROM sm.listing ll
+          JOIN account_master.session_venue_account sva
+            ON sva.exchange_id = ll.exchange_id AND sva.session_id = s.session_id
+          WHERE ll.listing_id = l.listing_id)
       ORDER BY f.fill_id DESC LIMIT 1
     ) op ON TRUE
     LEFT JOIN LATERAL (
@@ -172,31 +181,34 @@ export async function loadStrategyState(
     )`;
   const listings = (await client.query(`${filtered},
     pos AS (
-      SELECT DISTINCT ON (strategy_id, listing_id) strategy_id, listing_id, net_quantity_after, total_cost_after,
-        position_version, recorded_at
-      FROM f ORDER BY strategy_id, listing_id, fill_id DESC
+      SELECT DISTINCT ON (strategy_id, listing_id, account_id) strategy_id, listing_id, account_id,
+        net_quantity_after, total_cost_after, position_version, recorded_at
+      FROM f ORDER BY strategy_id, listing_id, account_id, fill_id DESC
     ),
+    -- A session trades each listing through one account, so its totals belong to that account's position.
     sess AS (
-      SELECT DISTINCT ON (session_id, listing_id) strategy_id, listing_id, realized_pnl_after, fees_after
+      SELECT DISTINCT ON (session_id, listing_id) strategy_id, listing_id, account_id, realized_pnl_after, fees_after
       FROM f WHERE session_id IS NOT NULL ORDER BY session_id, listing_id, fill_id DESC
     ),
     -- Each session's running totals end at its last row; a manual trade or a settlement carries only its own amounts.
     tot AS (
-      SELECT strategy_id, listing_id, SUM(realized_pnl_after) AS realized, SUM(fees_after) AS fees
+      SELECT strategy_id, listing_id, account_id, SUM(realized_pnl_after) AS realized, SUM(fees_after) AS fees
       FROM (SELECT * FROM sess
             UNION ALL
-            SELECT strategy_id, listing_id, realized_pnl_after, fees_after FROM f WHERE source IN ('MANUAL', 'SETTLEMENT')) booked
-      GROUP BY strategy_id, listing_id
+            SELECT strategy_id, listing_id, account_id, realized_pnl_after, fees_after FROM f
+            WHERE source IN ('MANUAL', 'SETTLEMENT')) booked
+      GROUP BY strategy_id, listing_id, account_id
     )
     SELECT pos.*, COALESCE(tot.realized, 0) AS realized, COALESCE(tot.fees, 0) AS fees,
       mk.bid, mk.ask, mk.last_trade, mk.ts AS mark_time
     FROM pos
-    LEFT JOIN tot USING (strategy_id, listing_id)
+    LEFT JOIN tot ON tot.strategy_id = pos.strategy_id AND tot.listing_id = pos.listing_id
+      AND tot.account_id IS NOT DISTINCT FROM pos.account_id
     LEFT JOIN LATERAL (
       SELECT bid, ask, last_trade, ts FROM ledger.mark m
       WHERE m.listing_id = pos.listing_id AND m.ts <= $3 ORDER BY m.ts DESC LIMIT 1
     ) mk ON TRUE
-    ORDER BY pos.strategy_id, pos.listing_id`, [mode, strategyId, at])).rows;
+    ORDER BY pos.strategy_id, pos.listing_id, pos.account_id`, [mode, strategyId, at])).rows;
   const sessions = (await client.query(`${filtered}
     SELECT DISTINCT ON (session_id, listing_id) session_id, strategy_id, listing_id, realized_pnl_after, fees_after
     FROM f WHERE session_id IS NOT NULL ORDER BY session_id, listing_id, fill_id DESC`,
@@ -205,6 +217,7 @@ export async function loadStrategyState(
     listings: listings.map(r => ({
       strategyId: r.strategy_id,
       listingId: r.listing_id,
+      accountId: r.account_id,
       position: position(r.net_quantity_after, r.total_cost_after, r.realized, r.fees),
       mark: toMark(r),
       markTime: r.mark_time,

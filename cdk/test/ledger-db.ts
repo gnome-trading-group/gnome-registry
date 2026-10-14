@@ -19,3 +19,18 @@ export async function release(pool: Pool, client: PoolClient): Promise<void> {
 }
 
 export { LOCK_TIMEOUT_MS };
+
+// Binds a live session to a venue account on an exchange, creating the account if it doesn't exist yet. Live
+// sessions trade through an account, and the ledger refuses a live write without one.
+export async function bindAccount(client: PoolClient, sessionId: string, exchangeId = 1, label = 'steady-heron-01'): Promise<number> {
+  const account = await client.query(
+    `INSERT INTO account_master.venue_account (exchange_id, label, status, trading_secret_name, activated_at)
+     VALUES ($1, $2, 'ACTIVE', 'gnome/test', NOW())
+     ON CONFLICT (label) DO UPDATE SET label = EXCLUDED.label RETURNING account_id`,
+    [exchangeId, label]);
+  const accountId = account.rows[0].account_id;
+  await client.query(
+    `INSERT INTO account_master.session_venue_account (session_id, exchange_id, account_id) VALUES ($1, $2, $3)`,
+    [sessionId, exchangeId, accountId]);
+  return accountId;
+}

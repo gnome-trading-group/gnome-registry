@@ -10,6 +10,7 @@ public final class RiskPolicyRecord {
     public final ExpandingMutableString policyType = new ExpandingMutableString();
     public final ExpandingMutableString sessionId = new ExpandingMutableString();
     public int strategyId;
+    public int exchangeId;
     public int listingId;
     public final ExpandingMutableString parametersJson = new ExpandingMutableString();
     public boolean enabled;

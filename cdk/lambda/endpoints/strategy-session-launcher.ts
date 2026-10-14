@@ -18,7 +18,9 @@ const STAGE = process.env.STAGE ?? '';
 const NETWORK_TAG_KEY = 'gnome:purpose';
 const NETWORK_TAG_VALUE = 'orchestrator-ecs';
 const INSTANCE_PURPOSE = 'orchestrator-ec2';
+// A live session runs under the live template's role, the only one allowed to read venue account credentials.
 const LAUNCH_TEMPLATE_NAME = 'gnome-orchestrator';
+const LIVE_LAUNCH_TEMPLATE_NAME = 'gnome-orchestrator-live';
 const AMI_PARAMETER_PREFIX = '/gnome/orchestrator/ami';
 const LATEST_ORCHESTRATOR_PARAMETER = '/gnome/orchestrator/latest-version';
 // Published by gnome-orchestrator per release as <prefix>/<version>, plus <prefix>/latest:
@@ -240,6 +242,8 @@ export function buildSessionEnvironment(
   const args: Record<string, unknown> = {};
   const overrides: Record<string, unknown> = {};
   for (const [key, value] of Object.entries(s.config)) {
+    // The registry binds the session's accounts when it is created; the orchestrator reads them from there.
+    if (key === 'accounts') continue;
     if (key.startsWith('strategy.args.')) {
       args[key.substring('strategy.args.'.length)] = value;
     } else if (key.startsWith(OVERRIDE_PREFIX)) {
@@ -372,8 +376,8 @@ async function handleLaunch(body: string | null) {
   }
 
   // The row exists before the instance does, so an instance can never be running without a session to stop it.
-  // A 409 means another session of this strategy already holds one of these listings: passed back as is, so the
-  // caller sees which session.
+  // A refusal is passed back as is: a 409 names the session already holding one of these listings, a 422 the venue
+  // account or risk policy a live session lacks.
   const created = await registryRequest('/strategy-sessions', 'POST', {
     sessionId: s.sessionId,
     strategyId: s.strategyId,
@@ -386,8 +390,8 @@ async function handleLaunch(body: string | null) {
     orchestratorVersion,
     gnomepyVersion,
   });
-  if (created.status === 409) {
-    return createResponse(409, created.body);
+  if (created.status >= 400 && created.status < 500) {
+    return createResponse(created.status, created.body);
   }
   if (created.status < 200 || created.status >= 300) {
     throw new Error(`Registry POST /strategy-sessions failed (${created.status}): ${JSON.stringify(created.body)}`);
@@ -405,7 +409,9 @@ async function handleLaunch(body: string | null) {
   let availabilityZone: string | undefined;
   try {
     const result = await new EC2Client({ region }).send(new RunInstancesCommand({
-      LaunchTemplate: { LaunchTemplateName: LAUNCH_TEMPLATE_NAME, Version: '$Latest' },
+      LaunchTemplate: {
+        LaunchTemplateName: s.mode === 'live' ? LIVE_LAUNCH_TEMPLATE_NAME : LAUNCH_TEMPLATE_NAME, Version: '$Latest',
+      },
       ImageId: imageId,
       InstanceType: instanceType as any,
       SubnetId: subnet.subnetId,

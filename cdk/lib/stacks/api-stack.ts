@@ -132,6 +132,24 @@ export class ApiStack extends cdk.Stack {
     // API key only: the OMS halts its own strategy automatically, and the handler can only ever enable a kill.
     this.attachMethods('risk/halts', 'risk-halts.ts', ['POST']);
 
+    // Venue accounts: an operator's script registers one (API key; the credentials go to Secrets Manager, not here),
+    // a starting orchestrator reads the accounts its session was bound to (API key), and listing accounts or moving
+    // one through its lifecycle is a person's (Cognito).
+    const venueAccounts = this.createIntegration('venue-accounts.ts');
+    this.attachIntegration('venue-accounts', venueAccounts, ['POST'], ['GET']);
+    this.attachIntegration('venue-accounts/status', venueAccounts, [], ['PATCH']);
+    this.attachIntegration('strategy-sessions/accounts', venueAccounts, ['GET'], ['GET']);
+
+    // The treasury: the venue poller posts what each account holds and reads which accounts to poll (API key); an
+    // operator reads where the money stands and records transfers, settings and manual readings (Cognito).
+    const treasury = this.createIntegration('treasury-api.ts');
+    this.attachIntegration('treasury/snapshots', treasury, ['POST'], ['POST']);
+    this.attachIntegration('treasury/poll-targets', treasury, ['GET'], []);
+    this.attachIntegration('treasury/summary', treasury, [], ['GET']);
+    this.attachIntegration('treasury/transfers', treasury, [], ['GET', 'POST']);
+    this.attachIntegration('treasury/account-config', treasury, [], ['PUT']);
+    this.attachIntegration('treasury/recon', treasury, [], ['GET']);
+
     // /strategy-sessions — split into two Lambdas:
     // - In-VPC Lambda: GET/PATCH/POST (DB-only operations)
     // - Outside-VPC launcher Lambda: POST /launch + POST /stop (ECS/EC2 orchestration, calls Registry API for DB)
@@ -142,6 +160,11 @@ export class ApiStack extends cdk.Stack {
       vpcSubnets: this.props.vpc.selectSubnets({ subnetType: ec2.SubnetType.PRIVATE_ISOLATED }),
     });
     this.props.database.grantConnect(strategySessionsDbLambda);
+    // Live launches need every required risk policy and enough money behind each account's allocations. Off until
+    // the treasury has balance snapshots for every account (`cdk deploy -c liveLaunchChecks=on`), since with them on
+    // a live launch is refused without one.
+    strategySessionsDbLambda.addEnvironment(
+      'LIVE_LAUNCH_CHECKS', this.node.tryGetContext('liveLaunchChecks') === 'on' ? 'on' : 'off');
 
     const strategySessionsLauncherLambda = new lambda.NodejsFunction(this, 'strategy-session-launcher-lambda', {
       entry: join(__dirname, '..', '..', 'lambda', 'endpoints', 'strategy-session-launcher.ts'),
@@ -191,8 +214,9 @@ export class ApiStack extends cdk.Stack {
       resources: ['arn:aws:logs:*:*:log-group:/gnome/orchestrator/*'],
     }));
 
-    const sessionsDbIntegration = new apigw.LambdaIntegration(strategySessionsDbLambda);
-    const sessionsLauncherIntegration = new apigw.LambdaIntegration(strategySessionsLauncherLambda);
+    const sessionsDbIntegration = new apigw.LambdaIntegration(strategySessionsDbLambda, { scopePermissionToMethod: false });
+    const sessionsLauncherIntegration = new apigw.LambdaIntegration(
+      strategySessionsLauncherLambda, { scopePermissionToMethod: false });
 
     this.attachIntegration('strategy-sessions', sessionsDbIntegration, ['GET', 'PATCH', 'POST'], ['GET']);
     this.attachIntegration('strategy-sessions/launch', sessionsLauncherIntegration, ['POST'], ['POST']);
@@ -260,8 +284,9 @@ export class ApiStack extends cdk.Stack {
     });
     this.props.database.grantConnect(l);
 
-    // CloudFormation caps a stack at 500 resources, and each method otherwise adds a second Lambda permission that
-    // only lets the API Gateway console's "Test" button invoke it.
-    return new apigw.LambdaIntegration(l, { allowTestInvoke: false });
+    // CloudFormation caps a stack at 500 resources, and a permission scoped to each method would add one per method
+    // (two with the console's "Test" button). One permission per function lets this API invoke it from any of its
+    // methods, which are the only ones wired to it anyway.
+    return new apigw.LambdaIntegration(l, { scopePermissionToMethod: false });
   }
 }
