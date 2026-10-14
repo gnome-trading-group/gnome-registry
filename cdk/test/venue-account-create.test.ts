@@ -1,5 +1,7 @@
 import { generateKeyPairSync } from 'crypto';
-import { CreateError, credentialsFor, readSecretFor } from '../lambda/endpoints/venue-account-create';
+import {
+  CreateError, credentialsFor, MARKET_DATA_EXCHANGES, marketDataKeyStatus, needsKey, readSecretFor,
+} from '../lambda/endpoints/venue-account-create';
 
 const pem = generateKeyPairSync('rsa', { modulusLength: 2048 }).privateKey
   .export({ type: 'pkcs8', format: 'pem' }).toString();
@@ -56,11 +58,43 @@ describe('venue account credentials', () => {
     expect(() => credentialsFor('BINANCE', {}, 'credentials')).toThrow(CreateError);
   });
 
-  it('reads with the trading key unless given a read-only one, and never reads Polymarket Intl with a key', () => {
-    const trading = { apiKey: 'k', privateKey: pem };
-    expect(readSecretFor('KALSHI', undefined, trading)).toBe(trading);
-    expect(readSecretFor('KALSHI', { apiKey: 'ro', privateKey: pem }, trading)).toEqual({ apiKey: 'ro', privateKey: pem.trim() });
-    expect(readSecretFor('POLYMARKET_INTL', undefined, { apiKey: 'k' })).toBeNull();
-    expect(() => readSecretFor('POLYMARKET_INTL', { apiKey: 'k' }, { apiKey: 'k' })).toThrow(/without credentials/);
+  it('needs every venue\'s own poller key except where the venue has no use for one', () => {
+    expect(() => readSecretFor('KALSHI', undefined)).toThrow(/separate key for the poller/);
+    expect(readSecretFor('KALSHI', { apiKey: 'ro', privateKey: pem })).toEqual({ apiKey: 'ro', privateKey: pem.trim() });
+    expect(() => readSecretFor('POLYMARKET_US', undefined)).toThrow(/separate key for the poller/);
+    const us = { apiKey: 'ro', secret: Buffer.alloc(32, 1).toString('base64') };
+    expect(readSecretFor('POLYMARKET_US', us)).toEqual(us);
+    expect(readSecretFor('POLYMARKET_INTL', undefined)).toBeNull();
+    expect(() => readSecretFor('POLYMARKET_INTL', { apiKey: 'k' })).toThrow(/without credentials/);
+  });
+
+  it('keeps a market data key for every venue whose market data is signed', () => {
+    expect(MARKET_DATA_EXCHANGES).toEqual({
+      KALSHI: 'gnome/market-data/kalshi',
+      POLYMARKET_US: 'gnome/market-data/polymarket-us',
+    });
+    expect(needsKey('POLYMARKET_INTL', 'marketData')).toBe(false);
+    expect(needsKey('KALSHI', 'read')).toBe(true);
+  });
+
+  it('shows a market data key as in sync only when every trading region holds its current value', () => {
+    const described = (statuses: Record<string, string>) => ({
+      $metadata: {},
+      LastChangedDate: new Date('2026-10-14T12:00:00Z'),
+      Tags: [{ Key: 'updated-by', Value: 'ops@example.com' }, { Key: 'api-key-id', Value: 'f054773a-1' }],
+      ReplicationStatus: Object.entries(statuses).map(([Region, Status]) => ({ Region, Status: Status as 'InSync' })),
+    });
+    const synced = marketDataKeyStatus('KALSHI', described({ 'ap-northeast-1': 'InSync', 'eu-west-1': 'InSync' }));
+    expect(synced).toMatchObject({
+      secretName: 'gnome/market-data/kalshi', exists: true, apiKeyId: 'f054773a-1', updatedBy: 'ops@example.com',
+      lastChangedAt: '2026-10-14T12:00:00.000Z', inSync: true,
+    });
+    expect(marketDataKeyStatus('KALSHI', described({ 'ap-northeast-1': 'InSync', 'eu-west-1': 'Failed' })).inSync).toBe(false);
+    const missingReplica = marketDataKeyStatus('KALSHI', described({ 'ap-northeast-1': 'InSync' }));
+    expect(missingReplica.inSync).toBe(false);
+    expect(missingReplica.replicas).toContainEqual({ region: 'eu-west-1', status: 'Missing', message: null });
+    expect(marketDataKeyStatus('POLYMARKET_US', null)).toMatchObject({
+      secretName: 'gnome/market-data/polymarket-us', exists: false, inSync: false,
+    });
   });
 });

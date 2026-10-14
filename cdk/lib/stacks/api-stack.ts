@@ -143,7 +143,8 @@ export class ApiStack extends cdk.Stack {
 
     // Creating an account from the controller puts its credentials in Secrets Manager, which the registry's isolated
     // subnets can't reach, so this one runs outside the VPC and registers the account through the API. Cognito only,
-    // so each account is attributed to the person who created it; it may only touch gnome/accounts/* secrets.
+    // so each account is attributed to the person who created it. It also sets the per-exchange market-data keys, and
+    // may only touch gnome/accounts/* and gnome/market-data/* secrets.
     const accountCreator = new lambda.NodejsFunction(this, 'venue-account-create-lambda', {
       entry: join(__dirname, '..', '..', 'lambda', 'endpoints', 'venue-account-create.ts'),
       ...this.nodeJsProps,
@@ -160,10 +161,14 @@ export class ApiStack extends cdk.Stack {
         'secretsmanager:CreateSecret',
         'secretsmanager:DeleteSecret',
         'secretsmanager:PutSecretValue',
+        'secretsmanager:DescribeSecret',
         'secretsmanager:ReplicateSecretToRegions',
         'secretsmanager:TagResource',
       ],
-      resources: [`arn:aws:secretsmanager:*:${this.account}:secret:gnome/accounts/*`],
+      resources: [
+        `arn:aws:secretsmanager:*:${this.account}:secret:gnome/accounts/*`,
+        `arn:aws:secretsmanager:*:${this.account}:secret:gnome/market-data/*`,
+      ],
     }));
     accountCreator.addToRolePolicy(new iam.PolicyStatement({
       actions: ['apigateway:GET'],
@@ -173,6 +178,7 @@ export class ApiStack extends cdk.Stack {
     this.attachIntegration('venue-accounts/create', accountCreation, [], ['POST']);
     this.attachIntegration('venue-accounts/credentials', accountCreation, [], ['POST']);
     this.attachIntegration('venue-accounts/delete-secrets', accountCreation, [], ['POST']);
+    this.attachIntegration('market-data-keys', accountCreation, [], ['GET', 'POST']);
 
     // The treasury: the venue poller posts what each account holds and reads which accounts to poll (API key); an
     // operator reads where the money stands and records transfers, settings and manual readings (Cognito).

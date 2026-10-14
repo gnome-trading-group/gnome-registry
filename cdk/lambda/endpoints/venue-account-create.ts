@@ -1,6 +1,7 @@
 import { APIGatewayProxyEvent } from 'aws-lambda';
 import {
-  CreateSecretCommand, DeleteSecretCommand, PutSecretValueCommand, ResourceExistsException, SecretsManagerClient,
+  CreateSecretCommand, DeleteSecretCommand, DescribeSecretCommand, DescribeSecretCommandOutput, PutSecretValueCommand,
+  ResourceExistsException, ResourceNotFoundException, SecretsManagerClient, TagResourceCommand,
 } from '@aws-sdk/client-secrets-manager';
 import { createPrivateKey } from 'crypto';
 import { registryFetch, resolveApiKey } from '../sync/registry-client';
@@ -105,33 +106,50 @@ export function credentialsFor(exchangeCode: string, fields: Fields, what: strin
   }
 }
 
-// What the poller reads the account with; Polymarket Intl reads the chain and needs none. Without a separate
-// read-only key, the trading key is copied for it: the poller only reads with it, and still never sees the trading
-// secret itself.
-export function readSecretFor(
-  exchangeCode: string, fields: Fields | undefined, trading: Record<string, string>,
-): Record<string, string> | null {
-  if (exchangeCode === 'POLYMARKET_INTL') {
-    if (fields !== undefined && fields !== null) throw new CreateError(400, 'Polymarket Intl accounts are read without credentials');
+// Every venue we trade takes three keys, each revocable without breaking the others: one that trades, one the balance
+// poller reads with, and one market data signs in with. A key some venues have no use for is the exception, listed
+// here; anything not listed is required.
+export type KeyKind = 'read' | 'marketData';
+const KEYS_NOT_NEEDED: Record<string, KeyKind[]> = {
+  // The poller reads the wallet from the chain, and the market channel is public.
+  POLYMARKET_INTL: ['read', 'marketData'],
+};
+export const VENUES = ['KALSHI', 'POLYMARKET_INTL', 'POLYMARKET_US'];
+
+export function needsKey(exchangeCode: string, kind: KeyKind): boolean {
+  return !(KEYS_NOT_NEEDED[exchangeCode] ?? []).includes(kind);
+}
+
+// A venue's poller key must be its own: Kalshi's is read-scoped, but Polymarket US keys can all trade, so there it
+// only makes the poller's key revocable alone.
+export function readSecretFor(exchangeCode: string, fields: Fields | undefined): Record<string, string> | null {
+  if (!needsKey(exchangeCode, 'read')) {
+    if (fields !== undefined && fields !== null) {
+      throw new CreateError(400, `${exchangeCode} accounts are read without credentials`);
+    }
     return null;
   }
-  if (fields === undefined || fields === null) return trading;
+  if (fields === undefined || fields === null) {
+    throw new CreateError(400, `${exchangeCode} accounts need a separate key for the poller`);
+  }
   return credentialsFor(exchangeCode, fields, 'readCredentials').secret;
 }
 
-async function createSecret(name: string, value: Record<string, string>) {
+const ACCOUNT_DESCRIPTION = 'Venue account credentials, registered from the controller';
+
+async function createSecret(name: string, value: Record<string, string>, description = ACCOUNT_DESCRIPTION) {
   await secrets.send(new CreateSecretCommand({
     Name: name,
     SecretString: JSON.stringify(value),
     AddReplicaRegions: REPLICA_REGIONS.map(Region => ({ Region })),
-    Description: 'Venue account credentials, registered from the controller',
+    Description: description,
   }));
 }
 
 // Writes a secret, creating it (in every region) if it is new; true when it was created, so a failure can undo it.
-async function writeSecret(name: string, value: Record<string, string>): Promise<boolean> {
+async function writeSecret(name: string, value: Record<string, string>, description?: string): Promise<boolean> {
   try {
-    await createSecret(name, value);
+    await createSecret(name, value, description);
     return true;
   } catch (error) {
     if (!(error instanceof ResourceExistsException)) throw error;
@@ -174,7 +192,7 @@ export async function createAccount(body: CreateRequest, actor: string) {
     `/exchanges?exchangeId=${body.exchangeId}`, 'GET', apiKey))[0];
   if (!exchange) throw new CreateError(400, `Unknown exchange ${body.exchangeId}`);
   const { secret, venueRef } = credentialsFor(exchange.exchange_code, body.credentials, 'credentials');
-  const readSecret = readSecretFor(exchange.exchange_code, body.readCredentials, secret);
+  const readSecret = readSecretFor(exchange.exchange_code, body.readCredentials);
 
   for (let attempt = 0; attempt < LABEL_ATTEMPTS; attempt++) {
     const label = gamertag();
@@ -243,7 +261,7 @@ export async function updateCredentials(body: UpdateRequest, actor: string) {
   const { secret, venueRef } = credentialsFor(account.exchange_code, body.credentials, 'credentials');
   const changed = identityChange(account.venue_ref, venueRef);
   if (changed) throw new CreateError(409, changed);
-  const readSecret = readSecretFor(account.exchange_code, body.readCredentials, secret);
+  const readSecret = readSecretFor(account.exchange_code, body.readCredentials);
 
   const tradingSecretName = `gnome/accounts/${account.label}/trading`;
   const readSecretName = readSecret ? `gnome/accounts/${account.label}/read` : account.read_secret_name;
@@ -279,6 +297,82 @@ export async function deleteAccountSecrets(accountId: unknown) {
   return { label: account.label, deleted: names, recoveryWindowDays: RECOVERY_WINDOW_DAYS };
 }
 
+// Market data signs in with one key per exchange, shared by every session and collector, so it belongs to no venue
+// account. Secrets Manager is its only store: tags say who set it and which key it is, and the secret's versions and
+// CloudTrail keep its history. Binance, not a venue we trade, stays on its old secret.
+export const MARKET_DATA_EXCHANGES: Record<string, string> = Object.fromEntries(
+  VENUES.filter(code => needsKey(code, 'marketData'))
+    .map(code => [code, `gnome/market-data/${code.toLowerCase().replace(/_/g, '-')}`]),
+);
+const UPDATED_BY_TAG = 'updated-by';
+const API_KEY_ID_TAG = 'api-key-id';
+
+export interface MarketDataKeyStatus {
+  exchangeCode: string;
+  secretName: string;
+  exists: boolean;
+  apiKeyId: string | null;
+  updatedBy: string | null;
+  lastChangedAt: string | null;
+  replicas: { region: string; status: string; message: string | null }[];
+  // Every trading region holds the current value: the primary exists and each replica reports InSync.
+  inSync: boolean;
+}
+
+export function marketDataKeyStatus(
+  exchangeCode: string, described: DescribeSecretCommandOutput | null,
+): MarketDataKeyStatus {
+  const secretName = MARKET_DATA_EXCHANGES[exchangeCode];
+  if (!described) {
+    return {
+      exchangeCode, secretName, exists: false, apiKeyId: null, updatedBy: null, lastChangedAt: null, replicas: [],
+      inSync: false,
+    };
+  }
+  const tag = (key: string) => described.Tags?.find(t => t.Key === key)?.Value ?? null;
+  const replicas = REPLICA_REGIONS.map(region => {
+    const r = described.ReplicationStatus?.find(x => x.Region === region);
+    return { region, status: r?.Status ?? 'Missing', message: r?.StatusMessage ?? null };
+  });
+  return {
+    exchangeCode, secretName, exists: true, apiKeyId: tag(API_KEY_ID_TAG), updatedBy: tag(UPDATED_BY_TAG),
+    lastChangedAt: described.LastChangedDate ? new Date(described.LastChangedDate).toISOString() : null,
+    replicas, inSync: replicas.every(r => r.status === 'InSync'),
+  };
+}
+
+async function describeMarketDataKey(exchangeCode: string): Promise<MarketDataKeyStatus> {
+  try {
+    const described = await secrets.send(new DescribeSecretCommand({ SecretId: MARKET_DATA_EXCHANGES[exchangeCode] }));
+    // A secret scheduled for deletion still describes, but nothing can read it.
+    return marketDataKeyStatus(exchangeCode, described.DeletedDate ? null : described);
+  } catch (error) {
+    if (error instanceof ResourceNotFoundException) return marketDataKeyStatus(exchangeCode, null);
+    throw error;
+  }
+}
+
+export async function listMarketDataKeys(): Promise<MarketDataKeyStatus[]> {
+  return Promise.all(Object.keys(MARKET_DATA_EXCHANGES).map(describeMarketDataKey));
+}
+
+export async function setMarketDataKey(body: { exchangeCode?: string; credentials?: Fields }, actor: string) {
+  const exchangeCode = body.exchangeCode ?? '';
+  if (!(exchangeCode in MARKET_DATA_EXCHANGES)) {
+    throw new CreateError(400, `exchangeCode must be one of ${Object.keys(MARKET_DATA_EXCHANGES).join(', ')}`);
+  }
+  if (body.credentials === null || typeof body.credentials !== 'object') throw new CreateError(400, 'credentials are required');
+  const { secret } = credentialsFor(exchangeCode, body.credentials, 'credentials');
+  const name = MARKET_DATA_EXCHANGES[exchangeCode];
+  await writeSecret(name, secret, `Market data credentials for ${exchangeCode}, set from the controller`);
+  await secrets.send(new TagResourceCommand({
+    SecretId: name,
+    Tags: [{ Key: UPDATED_BY_TAG, Value: actor }, { Key: API_KEY_ID_TAG, Value: secret.apiKey }],
+  }));
+  console.log(`Set the ${exchangeCode} market data key for ${actor}`);
+  return describeMarketDataKey(exchangeCode);
+}
+
 export const handler = async (event: APIGatewayProxyEvent) => {
   const resource = (event.resource ?? '').replace(/^\/cognito\//, '/');
   try {
@@ -288,6 +382,12 @@ export const handler = async (event: APIGatewayProxyEvent) => {
     }
     if (resource === '/venue-accounts/credentials' && event.httpMethod === 'POST') {
       return createResponse(200, await updateCredentials(body, getActor(event)));
+    }
+    if (resource === '/market-data-keys' && event.httpMethod === 'GET') {
+      return createResponse(200, await listMarketDataKeys());
+    }
+    if (resource === '/market-data-keys' && event.httpMethod === 'POST') {
+      return createResponse(200, await setMarketDataKey(body, getActor(event)));
     }
     if (resource === '/venue-accounts/delete-secrets' && event.httpMethod === 'POST') {
       return createResponse(200, await deleteAccountSecrets(body.accountId));

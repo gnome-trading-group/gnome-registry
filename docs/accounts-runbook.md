@@ -13,9 +13,10 @@ Lifecycle: `PROVISIONING` → `ACTIVE` → `DRAINING` → `RETIRED` (a draining 
    fund it **directly from a CEX withdrawal**. Never fund it from another of our wallets, and never fund gas or
    approvals from a shared address: either links the wallets publicly.
 2. On the **Treasury** page, click **Register account**, pick the exchange and enter the credentials (or upload them:
-   a JSON file for Polymarket, the `.pem` key file for Kalshi). For Kalshi and Polymarket US, tick "Use a separate
-   read-only key" and enter one if the venue issues them; otherwise the poller reads with a copy of the trading key
-   (`/read`).
+   a JSON file for Polymarket, the `.pem` key file for Kalshi). Every venue takes three keys of its own, each revocable
+   without breaking the others: trading, the poller's (`/read`), and market data (set once per exchange, see below).
+   Create Kalshi's poller key with only the `read` scope. Polymarket Intl is the exception: the poller reads the
+   wallet from the chain and its market data is public, so it takes only the trading key.
    The registry draws a gamer-tag label (e.g. `sleepy-otter-42`), stores the credentials in Secrets Manager as
    `gnome/accounts/<label>/trading` (and `/read`) in every trading region, derives the public identifiers (wallet
    addresses, Kalshi subaccount) from them, and registers the account as `PROVISIONING`. The credentials are never
@@ -60,3 +61,17 @@ A live session is refused unless every listing it trades is covered by MAX_COMMI
 MAX_POSITION and MAX_CONSECUTIVE_REJECTS, the strategy has a MAX_COMMITTED_CAPITAL for each exchange, and the bound
 account's latest balance snapshot is fresh with room for the strategy's budget. Paper sessions are never checked. If
 the poller is down, record a manual snapshot on the Treasury page.
+
+## Market data keys
+
+Market data (every session, paper included, and every collector) signs into Kalshi and Polymarket US with one key per
+exchange, kept apart from the venue accounts: **Market Data → Credentials** in the controller. It stores the key as
+`gnome/market-data/<exchange>` in every trading region and shows whether all three hold it; tags record who set it and
+which key id it is, and Secrets Manager's versions and CloudTrail keep the history.
+
+Use a key of its own, never an account's trading or poller key. Kalshi's should have only the `read` scope;
+Polymarket US keys have no scopes, so its market data key can trade the account it was created on. Polymarket Intl
+needs none (public market data). **Binance** still uses `gnome/exchange-credentials/binance`.
+
+Running sessions and collectors keep the key they connected with; each picks up a new one when it next starts.
+
