@@ -107,6 +107,19 @@ describeDb('treasury, against Postgres', () => {
     await policy('MAX_CONSECUTIVE_REJECTS', { maxRejects: 5 }, { strategyId });
   }
 
+  it('says why an account can\'t be read, while keeping its last good balance', async () => {
+    const heron = await account(1, 'steady-heron-01');
+    const read = new Date(Date.now() - 60_000);
+    await snapshot(heron, 5000, read);
+    let [view] = (await summary(client, new Date())).accounts as any[];
+    expect(view.lastReadingError).toBeNull();
+    await snapshot(heron, 0, new Date(), { status: 'ERROR', error: 'This account has no read-only secret' });
+    [view] = (await summary(client, new Date())).accounts as any[];
+    expect(view.lastReadingError).toBe('This account has no read-only secret');
+    expect(view.cashTotal).toBe(String(5000 * CENT));
+    expect(new Date(view.snapshotAt).getTime()).toBe(read.getTime());
+  });
+
   it('cash agrees when the venue holds the opening balance less what was bought and its fees', async () => {
     const kalshi = await account(1, 'steady-heron-01');
     await open(kalshi, 100);

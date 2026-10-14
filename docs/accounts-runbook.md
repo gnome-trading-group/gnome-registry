@@ -23,6 +23,17 @@ Lifecycle: `PROVISIONING` → `ACTIVE` → `DRAINING` → `RETIRED` (a draining 
 4. Record the account's `OPENING` transfer: the cash it holds now. Reconciliation starts there.
 5. Set the account's buffer and thresholds, then **Activate** it.
 
+## Update an account's credentials
+
+Choose **Update credentials** from the account's menu to replace the keys it trades and is read with (a rotated API
+key, or a read-only key added later). They are written to the account's own `gnome/accounts/<label>/...` secrets and
+must be for the same wallet or Kalshi subaccount: a different one is a new account. The poller uses them on its next
+run; running sessions keep the old keys until relaunched.
+
+The three accounts seeded by migration 036 start on the old shared `gnome/exchange-credentials/*` secrets, with no
+read-only key and (Polymarket Intl) no wallet address, so the poller can't read them: update each one's credentials
+once before trading live. That also fills in the Polymarket Intl funder address.
+
 ## Rotate a Polymarket Intl wallet
 
 1. Register and activate the new wallet.

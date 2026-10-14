@@ -72,6 +72,62 @@ export async function registerAccount(client: PoolClient, a: IRegisterAccount) {
   }
 }
 
+// What identifies the account on its venue. New credentials must still be for the same one: a different wallet or
+// subaccount is a different account, with its own ledger and reconciliation, so it is registered rather than swapped in.
+export const IDENTITY_KEYS = ['funderAddress', 'subaccount'];
+
+export function identityChange(current: Record<string, unknown>, next: Record<string, unknown>): string | null {
+  for (const key of IDENTITY_KEYS) {
+    const was = current?.[key];
+    if (was === undefined || was === null) continue;
+    if (String(was).toLowerCase() !== String(next?.[key] ?? '').toLowerCase()) {
+      return `These credentials are for a different ${key} (${String(next?.[key] ?? 'none')}, not ${String(was)}); `
+        + 'register them as a new account';
+    }
+  }
+  return null;
+}
+
+interface ISecretsReplacement {
+  accountId?: number;
+  tradingSecretName?: string;
+  readSecretName?: string | null;
+  venueRef?: Record<string, unknown>;
+  actor?: string;
+}
+
+// Points an account at new credentials: the account-creation Lambda has already written them to Secrets Manager.
+// Sessions read the secret's name when they start, so running ones keep what they started with.
+export async function replaceSecrets(client: PoolClient, r: ISecretsReplacement) {
+  if (!isPositiveInt(r.accountId)) throw new AccountError(400, 'accountId must be a positive integer');
+  if (typeof r.tradingSecretName !== 'string' || !SECRET_NAME_PATTERN.test(r.tradingSecretName)) {
+    throw new AccountError(400, 'tradingSecretName must be a Secrets Manager secret name');
+  }
+  if (r.readSecretName != null && (typeof r.readSecretName !== 'string' || !SECRET_NAME_PATTERN.test(r.readSecretName))) {
+    throw new AccountError(400, 'readSecretName must be a Secrets Manager secret name');
+  }
+  if (r.venueRef == null || typeof r.venueRef !== 'object' || Array.isArray(r.venueRef)) {
+    throw new AccountError(400, 'venueRef must be an object');
+  }
+  if (typeof r.actor !== 'string' || r.actor.trim().length === 0) throw new AccountError(400, 'actor is required');
+  const current = (await client.query(
+    'SELECT status, venue_ref FROM account_master.venue_account WHERE account_id = $1 FOR UPDATE', [r.accountId])).rows[0];
+  if (!current) throw new AccountError(404, `Unknown account ${r.accountId}`);
+  if (current.status === 'RETIRED') throw new AccountError(409, 'A retired account takes no new credentials');
+  const changed = identityChange(current.venue_ref, r.venueRef);
+  if (changed) throw new AccountError(409, changed);
+  const account = (await client.query(
+    `UPDATE account_master.venue_account
+     SET trading_secret_name = $2, read_secret_name = $3, venue_ref = venue_ref || $4::jsonb
+     WHERE account_id = $1 RETURNING *`,
+    [r.accountId, r.tradingSecretName, r.readSecretName ?? null, JSON.stringify(r.venueRef)])).rows[0];
+  // The history trigger only sees status changes; a credential change is worth the same audit trail.
+  await client.query(
+    `INSERT INTO account_master.venue_account_history (account_id, old_status, new_status, actor, reason)
+     VALUES ($1, $2, $2, $3, 'credentials replaced')`, [r.accountId, account.status, r.actor]);
+  return account;
+}
+
 export async function sessionAccounts(client: PoolClient, sessionId: string) {
   return (await client.query(
     `SELECT a.account_id, a.exchange_id, a.label, a.status, a.trading_secret_name, a.venue_ref
@@ -157,14 +213,21 @@ export const handler = async (event: APIGatewayProxyEvent) => {
       if (!isSessionId(sessionId)) return createResponse(400, { message: 'sessionId must be a session id' });
       return createResponse(200, await sessionAccounts(client, sessionId));
     }
-    // The account-creation Lambda (outside the VPC) deleting a retired account's secrets: names and status only.
+    // The account-creation Lambda (outside the VPC) replacing or deleting an account's secrets: their names, never
+    // their contents, which the registry doesn't have.
     if (resource === '/venue-accounts/secrets' && event.httpMethod === 'GET' && !isCognito(event)) {
       const accountId = Number(event.queryStringParameters?.accountId);
       if (!isPositiveInt(accountId)) return createResponse(400, { message: 'accountId must be a positive integer' });
       const row = (await client.query(
-        `SELECT label, status, trading_secret_name, read_secret_name FROM account_master.venue_account
-         WHERE account_id = $1`, [accountId])).rows[0];
+        `SELECT a.account_id, a.exchange_id, e.exchange_code, a.label, a.status, a.venue_ref, a.trading_secret_name,
+           a.read_secret_name
+         FROM account_master.venue_account a JOIN sm.exchange e USING (exchange_id) WHERE a.account_id = $1`,
+        [accountId])).rows[0];
       return row ? createResponse(200, row) : createResponse(404, { message: `Unknown account ${accountId}` });
+    }
+    if (resource === '/venue-accounts/secrets' && event.httpMethod === 'PUT' && !isCognito(event)) {
+      const replacement = JSON.parse(event.body ?? '{}') as ISecretsReplacement;
+      return createResponse(200, await withTransaction(client, (c) => replaceSecrets(c, replacement)));
     }
     if (resource === '/venue-accounts' && event.httpMethod === 'POST' && !isCognito(event)) {
       const registration = parseRegistration(event.body ?? '');

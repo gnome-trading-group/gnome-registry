@@ -1,11 +1,12 @@
 import { APIGatewayProxyEvent } from 'aws-lambda';
 import {
-  CreateSecretCommand, DeleteSecretCommand, ResourceExistsException, SecretsManagerClient,
+  CreateSecretCommand, DeleteSecretCommand, PutSecretValueCommand, ResourceExistsException, SecretsManagerClient,
 } from '@aws-sdk/client-secrets-manager';
 import { createPrivateKey } from 'crypto';
 import { registryFetch, resolveApiKey } from '../sync/registry-client';
 import { getActor } from './base';
 import { gamertag } from './gamertag';
+import { identityChange } from './venue-accounts';
 import { createResponse, isPositiveInt } from './ledger-common';
 
 // Registers a venue account from the controller: its credentials go into Secrets Manager under a fresh gamer-tag
@@ -116,6 +117,31 @@ async function createSecret(name: string, value: Record<string, string>) {
   }));
 }
 
+// Writes a secret, creating it (in every region) if it is new; true when it was created, so a failure can undo it.
+async function writeSecret(name: string, value: Record<string, string>): Promise<boolean> {
+  try {
+    await createSecret(name, value);
+    return true;
+  } catch (error) {
+    if (!(error instanceof ResourceExistsException)) throw error;
+    await secrets.send(new PutSecretValueCommand({ SecretId: name, SecretString: JSON.stringify(value) }));
+    return false;
+  }
+}
+
+// The registry's own refusal (a 4xx) is the operator's to read; anything else stays a server error.
+function registryRefusal(error: unknown): CreateError | null {
+  const match = error instanceof Error ? / failed: (4\d\d) (.*)$/s.exec(error.message) : null;
+  if (!match) return null;
+  let message = match[2];
+  try {
+    message = JSON.parse(match[2]).message ?? message;
+  } catch {
+    // not JSON: keep the text as it came
+  }
+  return new CreateError(Number(match[1]), message);
+}
+
 async function deleteSecret(name: string, recoveryDays: number | null) {
   await secrets.send(new DeleteSecretCommand(recoveryDays === null
     ? { SecretId: name, ForceDeleteWithoutRecovery: true }
@@ -173,6 +199,63 @@ export async function createAccount(body: CreateRequest, actor: string) {
   throw new CreateError(503, `No free label after ${LABEL_ATTEMPTS} tries`);
 }
 
+interface AccountSecrets {
+  account_id: number;
+  exchange_id: number;
+  exchange_code: string;
+  label: string;
+  status: string;
+  venue_ref: Record<string, unknown>;
+  trading_secret_name: string;
+  read_secret_name: string | null;
+}
+
+interface UpdateRequest {
+  accountId?: number;
+  credentials?: Fields;
+  readCredentials?: Fields;
+}
+
+// Gives an existing account new credentials under its own label's secrets, for keys a venue rotated, or for the
+// accounts seeded from the old per-exchange secrets, which had no read-only key or wallet address. Without new
+// read-only credentials, the account keeps the read secret it has.
+export async function updateCredentials(body: UpdateRequest, actor: string) {
+  if (!isPositiveInt(body.accountId)) throw new CreateError(400, 'accountId must be a positive integer');
+  if (body.credentials === null || typeof body.credentials !== 'object') throw new CreateError(400, 'credentials are required');
+  const apiKey = await resolveApiKey();
+  let account: AccountSecrets;
+  try {
+    account = await registryFetch<AccountSecrets>(`/venue-accounts/secrets?accountId=${body.accountId}`, 'GET', apiKey);
+  } catch (error) {
+    throw registryRefusal(error) ?? error;
+  }
+  if (account.status === 'RETIRED') throw new CreateError(409, `${account.label} is retired`);
+  const { secret, venueRef } = credentialsFor(account.exchange_code, body.credentials, 'credentials');
+  const changed = identityChange(account.venue_ref, venueRef);
+  if (changed) throw new CreateError(409, changed);
+  const readSecret = readSecretFor(account.exchange_code, body.readCredentials);
+
+  const tradingSecretName = `gnome/accounts/${account.label}/trading`;
+  const readSecretName = readSecret ? `gnome/accounts/${account.label}/read` : account.read_secret_name;
+  const created: string[] = [];
+  try {
+    if (await writeSecret(tradingSecretName, secret)) created.push(tradingSecretName);
+    if (readSecret && readSecretName && await writeSecret(readSecretName, readSecret)) created.push(readSecretName);
+    const updated = await registryFetch<Record<string, unknown>>('/venue-accounts/secrets', 'PUT', apiKey, {
+      accountId: account.account_id, tradingSecretName, readSecretName, venueRef, actor,
+    });
+    console.log(`Replaced the credentials of ${account.exchange_code} account ${account.label} for ${actor}`);
+    const written = [tradingSecretName, ...(readSecret && readSecretName ? [readSecretName] : [])];
+    return {
+      account: updated,
+      secrets: written.map(name => ({ name, regions: [PRIMARY_REGION, ...REPLICA_REGIONS] })),
+    };
+  } catch (error) {
+    for (const name of created) await deleteSecret(name, null).catch(() => undefined);
+    throw registryRefusal(error) ?? error;
+  }
+}
+
 // A retired account's credentials are no longer needed; deleted after Secrets Manager's recovery window.
 export async function deleteAccountSecrets(accountId: unknown) {
   if (!isPositiveInt(accountId)) throw new CreateError(400, 'accountId must be a positive integer');
@@ -192,6 +275,9 @@ export const handler = async (event: APIGatewayProxyEvent) => {
     const body = JSON.parse(event.body ?? '{}');
     if (resource === '/venue-accounts/create' && event.httpMethod === 'POST') {
       return createResponse(200, await createAccount(body, getActor(event)));
+    }
+    if (resource === '/venue-accounts/credentials' && event.httpMethod === 'POST') {
+      return createResponse(200, await updateCredentials(body, getActor(event)));
     }
     if (resource === '/venue-accounts/delete-secrets' && event.httpMethod === 'POST') {
       return createResponse(200, await deleteAccountSecrets(body.accountId));

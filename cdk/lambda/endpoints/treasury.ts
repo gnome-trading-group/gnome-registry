@@ -358,6 +358,9 @@ export interface AccountTreasury {
   status: string;
   snapshotAt: Date | null;
   snapshotFresh: boolean;
+  // The latest reading of any outcome: when it failed, why, so a page can say what keeps the account unread.
+  lastReadingAt: Date | null;
+  lastReadingError: string | null;
   cashTotal: bigint;
   cashAvailable: bigint;
   portfolioValue: bigint;
@@ -383,7 +386,8 @@ export async function accountTreasury(client: PoolClient, accountIds: number[] |
   const accounts = (await client.query(
     `SELECT a.account_id, a.exchange_id, e.exchange_code, a.label, a.status, c.min_buffer, c.low_balance_threshold,
        c.partition_low_thresholds, s.taken_at, s.cash_total, s.cash_available, s.portfolio_value, s.redeemable_value,
-       s.cash_by_partition,
+       s.cash_by_partition, r.taken_at AS last_reading_at, CASE WHEN r.status = 'ERROR' THEN COALESCE(r.error, 'unknown error') END
+         AS last_reading_error,
        (s.taken_at IS NOT NULL AND s.taken_at >= $2::timestamptz - c.snapshot_max_age) AS fresh
      FROM account_master.venue_account a
      JOIN sm.exchange e USING (exchange_id)
@@ -392,6 +396,10 @@ export async function accountTreasury(client: PoolClient, accountIds: number[] |
        SELECT * FROM treasury.balance_snapshot b WHERE b.account_id = a.account_id AND b.status = 'OK'
        ORDER BY taken_at DESC LIMIT 1
      ) s ON TRUE
+     LEFT JOIN LATERAL (
+       SELECT taken_at, status, error FROM treasury.balance_snapshot b WHERE b.account_id = a.account_id
+       ORDER BY taken_at DESC, snapshot_id DESC LIMIT 1
+     ) r ON TRUE
      WHERE ($1::int[] IS NULL OR a.account_id = ANY($1::int[])) AND a.status <> 'RETIRED'
      ORDER BY a.exchange_id, a.label`, [accountIds, now])).rows;
   if (accounts.length === 0) return [];
@@ -461,7 +469,8 @@ export async function accountTreasury(client: PoolClient, accountIds: number[] |
     const minBuffer = toBigInt(a.min_buffer);
     return {
       accountId: a.account_id, exchangeId: a.exchange_id, exchangeCode: a.exchange_code, label: a.label,
-      status: a.status, snapshotAt: a.taken_at, snapshotFresh: a.fresh, cashTotal,
+      status: a.status, snapshotAt: a.taken_at, snapshotFresh: a.fresh, lastReadingAt: a.last_reading_at,
+      lastReadingError: a.last_reading_error, cashTotal,
       cashAvailable: toBigInt(a.cash_available), portfolioValue: toBigInt(a.portfolio_value), redeemable,
       heldAtCost, committed, base, allocated, minBuffer, free: base - minBuffer - allocated,
       lowBalanceThreshold: toBigInt(a.low_balance_threshold),

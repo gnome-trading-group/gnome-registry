@@ -142,11 +142,12 @@ describe('ApiStack auth', () => {
   });
 
   it('keeps creating an account and deleting its secrets Cognito-only, and reads secret names with the API key', () => {
-    for (const path of ['venue-accounts/create', 'venue-accounts/delete-secrets']) {
+    for (const path of ['venue-accounts/create', 'venue-accounts/credentials', 'venue-accounts/delete-secrets']) {
       expect(hasResource(template, path)).toBe(false);
       expect(hasResource(template, `cognito/${path}`)).toBe(true);
     }
     method(template, resourceId(template, 'venue-accounts/secrets'), 'GET');
+    method(template, resourceId(template, 'venue-accounts/secrets'), 'PUT');
     expect(hasResource(template, 'cognito/venue-accounts/secrets')).toBe(false);
   });
 

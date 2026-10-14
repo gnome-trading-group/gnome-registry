@@ -139,7 +139,7 @@ export class ApiStack extends cdk.Stack {
     this.attachIntegration('venue-accounts', venueAccounts, ['POST'], ['GET']);
     this.attachIntegration('venue-accounts/status', venueAccounts, [], ['PATCH']);
     this.attachIntegration('strategy-sessions/accounts', venueAccounts, ['GET'], ['GET']);
-    this.attachIntegration('venue-accounts/secrets', venueAccounts, ['GET'], []);
+    this.attachIntegration('venue-accounts/secrets', venueAccounts, ['GET', 'PUT'], []);
 
     // Creating an account from the controller puts its credentials in Secrets Manager, which the registry's isolated
     // subnets can't reach, so this one runs outside the VPC and registers the account through the API. Cognito only,
@@ -159,6 +159,7 @@ export class ApiStack extends cdk.Stack {
       actions: [
         'secretsmanager:CreateSecret',
         'secretsmanager:DeleteSecret',
+        'secretsmanager:PutSecretValue',
         'secretsmanager:ReplicateSecretToRegions',
         'secretsmanager:TagResource',
       ],
@@ -170,6 +171,7 @@ export class ApiStack extends cdk.Stack {
     }));
     const accountCreation = new apigw.LambdaIntegration(accountCreator, { scopePermissionToMethod: false });
     this.attachIntegration('venue-accounts/create', accountCreation, [], ['POST']);
+    this.attachIntegration('venue-accounts/credentials', accountCreation, [], ['POST']);
     this.attachIntegration('venue-accounts/delete-secrets', accountCreation, [], ['POST']);
 
     // The treasury: the venue poller posts what each account holds and reads which accounts to poll (API key); an

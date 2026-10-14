@@ -11,7 +11,9 @@ import { summarize } from '../lambda/endpoints/pnl-summary';
 import { walkLifetime } from '../lambda/endpoints/pnl-walk';
 import { generateHaltUpsertQuery } from '../lambda/endpoints/risk-halts';
 import { StrategySessionHandler } from '../lambda/endpoints/strategy-sessions';
-import { AccountError, changeStatus, registerAccount, sessionAccounts } from '../lambda/endpoints/venue-accounts';
+import {
+  AccountError, changeStatus, identityChange, registerAccount, replaceSecrets, sessionAccounts,
+} from '../lambda/endpoints/venue-accounts';
 import { sweepSettlements } from '../lambda/sync/settlement-sweeper';
 
 const url = process.env.LEDGER_TEST_DB;
@@ -91,6 +93,36 @@ describeDb('venue accounts, against Postgres', () => {
     return (await client.query(
       'SELECT listing_id, account_id, net_quantity FROM ledger.position ORDER BY listing_id, account_id')).rows;
   }
+
+  it('new credentials repoint an account at its own secrets, but never at a different wallet', async () => {
+    const falcon = await register(2, 'quiet-falcon-01');
+    await client.query(`UPDATE account_master.venue_account
+      SET venue_ref = '{}', trading_secret_name = 'gnome/exchange-credentials/polymarket-intl' WHERE account_id = $1`, [falcon]);
+    const replace = (venueRef: Record<string, unknown>) => withTransaction(client, (c) => replaceSecrets(c, {
+      accountId: falcon, tradingSecretName: 'gnome/accounts/quiet-falcon-01/trading', readSecretName: null, venueRef,
+      actor: 'ops@example.com',
+    }));
+    // A seeded account had no wallet address yet: the first credentials give it one.
+    const updated = await replace({ funderAddress: '0xAbC', signerAddress: '0x1', signatureType: '3' });
+    expect(updated.trading_secret_name).toBe('gnome/accounts/quiet-falcon-01/trading');
+    expect(updated.venue_ref).toEqual({ funderAddress: '0xAbC', signerAddress: '0x1', signatureType: '3' });
+    // The same wallet again (address case aside) is a key rotation; another wallet is another account.
+    await expect(replace({ funderAddress: '0xabc', signerAddress: '0x2', signatureType: '3' })).resolves.toBeDefined();
+    await expect(replace({ funderAddress: '0xdef', signerAddress: '0x2', signatureType: '3' }))
+      .rejects.toThrow(/different funderAddress/);
+    const history = (await client.query(
+      `SELECT reason, actor FROM account_master.venue_account_history WHERE account_id = $1 AND reason = 'credentials replaced'`,
+      [falcon])).rows;
+    expect(history).toHaveLength(2);
+    await client.query(`UPDATE account_master.venue_account SET status = 'RETIRED' WHERE account_id = $1`, [falcon]);
+    await expect(replace({ funderAddress: '0xabc' })).rejects.toThrow(/retired/);
+  });
+
+  it('a Kalshi subaccount is part of the account, like a wallet', () => {
+    expect(identityChange({}, { subaccount: 2 })).toBeNull();
+    expect(identityChange({ subaccount: 2 }, { subaccount: 2 })).toBeNull();
+    expect(identityChange({ subaccount: 2 }, {})).toMatch(/different subaccount/);
+  });
 
   it('labels are gamer tags', () => {
     for (let i = 0; i < 200; i++) expect(isLabel(gamertag())).toBe(true);
