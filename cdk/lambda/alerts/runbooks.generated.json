@@ -430,6 +430,15 @@
       ],
       "url": "https://github.com/gnome-trading-group/gnome-registry/blob/main/docs/runbooks/cloudwatch/MarketData.md"
     },
+    "Pipelines": {
+      "summary": "A gnome-pipelines trigger or status function failed.",
+      "firstSteps": [
+        "Open the alarm to see which function.",
+        "Read its logs (gnome-pipelines-trigger or gnome-pipelines-status).",
+        "Re-run any scheduled pipeline that didn't start."
+      ],
+      "url": "https://github.com/gnome-trading-group/gnome-registry/blob/main/docs/runbooks/cloudwatch/Pipelines.md"
+    },
     "Registry": {
       "summary": "A registry alarm fired: its API, database, or a scheduled job.",
       "firstSteps": [

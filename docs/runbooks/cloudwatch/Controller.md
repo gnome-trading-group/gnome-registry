@@ -9,11 +9,11 @@ first_steps:
 
 ## What it means
 
-Alarms named `Controller-…`: the controller API's errors, or the research pipeline trigger and status functions failing (a scheduled pipeline run that never starts only shows here).
+Alarms named `Controller-…`: the controller API's errors. Pipeline functions alarm as `Pipelines-…`.
 
 ## Impact
 
-The UI or scheduled pipelines; trading is unaffected.
+The UI; trading is unaffected.
 
 ## Diagnose
 
@@ -21,7 +21,7 @@ The function's CloudWatch logs.
 
 ## Resolve
 
-Fix and redeploy; re-run any pipeline that didn't start.
+Fix and redeploy.
 
 ## Escalate
 
@@ -29,4 +29,4 @@ No.
 
 ## Related
 
-[PIPELINE_FAILED](../alerts/PIPELINE_FAILED.md)
+[Pipelines](Pipelines.md)

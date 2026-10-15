@@ -17,7 +17,7 @@ Whatever reads its output (a launcher rule, a model) works from stale data until
 
 ## Diagnose
 
-The run's logs in the controller or CloudWatch.
+The run's logs in the controller or CloudWatch (the `gnome-pipelines` task's log group).
 
 ## Resolve
 
@@ -29,4 +29,4 @@ No, unless a launch depends on it and the window is closing.
 
 ## Related
 
-[Controller](../cloudwatch/Controller.md)
+[Pipelines](../cloudwatch/Pipelines.md)
