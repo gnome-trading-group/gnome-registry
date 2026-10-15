@@ -237,11 +237,6 @@ async function checkPositions(
      ) ec ON TRUE
      WHERE p.account_id = $1 AND p.mode = 'live'
      GROUP BY l.exchange_security_id, l.listing_id`, [account.account_id])).rows;
-  const known = (await client.query(
-    `SELECT l.exchange_security_id, l.listing_id,
-       EXISTS (SELECT 1 FROM sm.event_contract ec WHERE ec.security_id = l.security_id AND ec.settlement_price IS NOT NULL)
-         AS settled
-     FROM sm.listing l WHERE l.exchange_id = $1`, [account.exchange_id])).rows;
 
   const ledger = new Map<string, { qty: bigint; listings: number[]; settled: boolean }>();
   for (const r of ledgerRows) {
@@ -252,14 +247,6 @@ async function checkPositions(
     entry.settled = entry.settled || r.settled;
     ledger.set(key, entry);
   }
-  const listingsByKey = new Map<string, { listings: number[]; settled: boolean }>();
-  for (const r of known) {
-    const { key } = venueKeyOf(account.exchange_code, r.exchange_security_id ?? '');
-    const entry = listingsByKey.get(key) ?? { listings: [], settled: false };
-    entry.listings.push(r.listing_id);
-    entry.settled = entry.settled || r.settled;
-    listingsByKey.set(key, entry);
-  }
   const venueByKey = new Map<string, VenuePositionInput>();
   for (const p of venue) venueByKey.set(p.venueKey, p);
 
@@ -267,11 +254,34 @@ async function checkPositions(
     `SELECT venue_key, venue_qty, ledger_qty, ledger_fingerprint, status, first_mismatch_at
      FROM treasury.position_check WHERE account_id = $1`, [account.account_id])).rows.map(r => [r.venue_key, r]));
 
-  let checked = 0;
-  let breaks = 0;
   // What was checked before too: a market closed outside the ledger leaves both sides empty, and only judging it
   // again clears what it was flagged for.
   const keys = new Set([...ledger.keys(), ...venueByKey.keys(), ...previous.keys()]);
+
+  // Only the listings behind these keys: the exchange holds hundreds of thousands. The literal part number lets the
+  // query use idx_listing_venue_market or idx_listing_venue_token; venueKeyOf still decides which key a row is.
+  const keyPart = account.exchange_code === 'POLYMARKET_INTL' ? 2 : 1;
+  const known = (await client.query(
+    `SELECT l.exchange_security_id, l.listing_id,
+       EXISTS (SELECT 1 FROM sm.event_contract ec WHERE ec.security_id = l.security_id AND ec.settlement_price IS NOT NULL)
+         AS settled
+     FROM sm.listing l
+     WHERE l.exchange_id = $1
+       AND (split_part(l.exchange_security_id, ':', ${keyPart}) = ANY($2::text[]) OR l.exchange_security_id = ANY($2::text[]))
+     ORDER BY l.listing_id`,
+    [account.exchange_id, [...keys]])).rows;
+  const listingsByKey = new Map<string, { listings: number[]; settled: boolean }>();
+  for (const r of known) {
+    const { key } = venueKeyOf(account.exchange_code, r.exchange_security_id ?? '');
+    if (!keys.has(key)) continue;
+    const entry = listingsByKey.get(key) ?? { listings: [], settled: false };
+    entry.listings.push(r.listing_id);
+    entry.settled = entry.settled || r.settled;
+    listingsByKey.set(key, entry);
+  }
+
+  let checked = 0;
+  let breaks = 0;
   for (const key of keys) {
     const held = ledger.get(key);
     const reported = venueByKey.get(key);

@@ -250,6 +250,29 @@ describeDb('treasury, against Postgres', () => {
     ]);
   });
 
+  it('finds the listings behind a position the ledger never held, by the venue\'s key and nothing like it', async () => {
+    const kalshi = await account(1, 'steady-heron-01');
+    await open(kalshi, 100);
+    await client.query(`INSERT INTO sm.security (security_id, symbol, type, contract_type)
+      VALUES (5, 'TT-YES', 4, 7), (6, 'S-YES', 4, 7)`);
+    await client.query(`INSERT INTO sm.listing (listing_id, exchange_id, security_id, exchange_security_id)
+      VALUES (502, 1, 5, 'TT:yes'), (503, 1, 6, 'S:yes')`);
+    await client.query(`INSERT INTO sm.event (event_id, title, exchange_id, native_event_id) VALUES (1, 'S?', 1, 'S')`);
+    await client.query(`INSERT INTO sm.event_contract (event_id, security_id, outcome_label, settlement_price, settled_at)
+      VALUES (1, 6, 'Yes', $1, NOW())`, [DOLLAR]);
+    const positions = [
+      { venueKey: 'T', quantity: 4 * UNIT }, { venueKey: 'S', quantity: 2 * UNIT }, { venueKey: 'U', quantity: UNIT },
+    ];
+    await snapshot(kalshi, 10000, new Date(), { positions });
+    const checks = (await client.query(
+      'SELECT venue_key, listing_ids, status FROM treasury.position_check ORDER BY venue_key')).rows;
+    // T is a market the ledger knows but holds nothing on (both sides, not TT's); S has settled, so cash checks it.
+    expect(checks).toEqual([
+      { venue_key: 'T', listing_ids: [500, 501], status: 'PENDING' },
+      { venue_key: 'U', listing_ids: [], status: 'UNKNOWN_VENUE_POSITION' },
+    ]);
+  });
+
   it('clears a flagged position once it is closed outside the ledger, or its market resolves', async () => {
     const pm = await account(2, 'quiet-falcon-01');
     await open(pm, 100);
