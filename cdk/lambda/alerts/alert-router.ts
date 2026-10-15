@@ -15,7 +15,7 @@ import { sendToIncidentIo } from './sinks/incidentio';
 //   a CloudWatch alarm changing state: the same, once it's in the alert shape
 // A sink that fails is logged, not retried here: the alert stays owed to it, and the next tick redelivers. If the
 // store can't be reached, a new alert is delivered anyway (nothing must stop a page) and the invocation fails, so
-// EventBridge's retry records it later.
+// Lambda's retry records it later. Only the first attempt delivers it unrecorded: each retry would post it again.
 
 const lambdaClient = new LambdaClient({});
 const events = new EventBridgeClient({});
@@ -26,6 +26,10 @@ const stage = () => process.env.STAGE ?? 'dev';
 const PUT_EVENTS_BATCH = 10;
 const IGNORED_ALARM_PREFIXES = ['TargetTracking', 'AlertingMeta-'];
 const ALARM_TIERS: Record<string, Severity> = { Critical: 'CRITICAL', Error: 'ERROR', Warning: 'WARNING' };
+// Lambda first retries a failed event a minute after it; anything younger is still its first attempt.
+const FIRST_ATTEMPT_MS = 50_000;
+// Events this container already delivered unrecorded, in case a retry lands here sooner than expected.
+const deliveredUnrecorded = new Set<string>();
 
 async function secret(name: string): Promise<string> {
   if (!secretCache.has(name)) {
@@ -115,12 +119,25 @@ function unrecorded(event: AlertEvent): Delivery {
   };
 }
 
-export async function handleAlert(event: AlertEvent): Promise<void> {
+/**
+ * Whether to deliver an event the store couldn't record: only on its first attempt, judged by its age, so Lambda's
+ * retries don't repost it. A first attempt that itself ran over a minute late is left to the DLQ alarm, which pages.
+ */
+export function deliverUnrecorded(eventId: string | undefined, eventTime: string | undefined, now: Date): boolean {
+  if (eventId && deliveredUnrecorded.has(eventId)) return false;
+  if (!eventTime) return true;
+  return now.getTime() - new Date(eventTime).getTime() < FIRST_ATTEMPT_MS;
+}
+
+export async function handleAlert(event: AlertEvent, envelope: { id?: string; time?: string } = {}): Promise<void> {
   let result: RecordResult;
   try {
     result = await invokeStore<RecordResult>({ op: 'record', event });
   } catch (error) {
-    if (event.action === 'FIRING') await deliver(unrecorded(event));
+    if (event.action === 'FIRING' && deliverUnrecorded(envelope.id, envelope.time, new Date())) {
+      if (envelope.id) deliveredUnrecorded.add(envelope.id);
+      await deliver(unrecorded(event));
+    }
     throw error;
   }
   if (result.notify) await deliver(result.delivery);
@@ -134,11 +151,11 @@ export const handler = async (event: any) => {
   }
   if (event.source === 'aws.cloudwatch') {
     const alert = fromAlarm(event);
-    if (alert) await handleAlert(alert);
+    if (alert) await handleAlert(alert, event);
     return;
   }
   if (event.source === ALERT_EVENT_SOURCE) {
-    await handleAlert(event.detail as AlertEvent);
+    await handleAlert(event.detail as AlertEvent, event);
     return;
   }
   console.warn('Ignoring an event the router does not handle', JSON.stringify(event).slice(0, 500));

@@ -14,7 +14,7 @@ Alarms named `AlertingMeta-…`, delivered straight to incident.io and email so 
 | Alarm | Fires when |
 |---|---|
 | router / store / ingest errors | the alerting functions failing |
-| router not running | the 1-minute tick stopped |
+| tick not running | the 1-minute tick hasn't run for 5 minutes (rule disabled or deleted, or EventBridge not invoking it) |
 | DLQ | alert events failed delivery repeatedly |
 | undelivered | an alert has owed a sink for over 10 minutes (Slack or incident.io refusing it) |
 

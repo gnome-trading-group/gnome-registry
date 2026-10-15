@@ -103,7 +103,7 @@ export class AlertingStack extends cdk.Stack {
       targets: [new targets.LambdaFunction(router, { deadLetterQueue: dlq })],
     });
     // A Rule rather than an EventBridge Scheduler schedule so the controller's System page lists it with its jobs.
-    new events.Rule(this, 'AlertTickRule', {
+    const tick = new events.Rule(this, 'AlertTickRule', {
       description: 'Alerts: runs the monitoring rules every minute',
       schedule: events.Schedule.rate(cdk.Duration.minutes(1)),
       targets: [new targets.LambdaFunction(router, { deadLetterQueue: dlq })],
@@ -144,13 +144,13 @@ export class AlertingStack extends cdk.Stack {
       description: 'The bus services in this account put alerts on (events:PutEvents)',
     });
 
-    this.alertOnAlerting(props, router, store, ingest, dlq);
+    this.alertOnAlerting(props, router, store, ingest, dlq, tick);
   }
 
   // Alerting watching itself can't go through the router: these go to incident.io's CloudWatch alert source (prod)
   // and by email.
   private alertOnAlerting(props: Props, router: lambda.NodejsFunction, store: lambda.NodejsFunction,
-    ingest: lambda.NodejsFunction, dlq: sqs.Queue) {
+    ingest: lambda.NodejsFunction, dlq: sqs.Queue, tick: events.Rule) {
     const topic = new sns.Topic(this, 'AlertingMetaTopic');
     if (props.alerting.incidentIo) {
       topic.addSubscription(new subs.UrlSubscription(
@@ -159,8 +159,9 @@ export class AlertingStack extends cdk.Stack {
     }
     for (const email of props.alerting.metaEmails) topic.addSubscription(new subs.EmailSubscription(email));
     const action = new cwActions.SnsAction(topic);
-    const alarm = (id: string, metric: cloudwatch.Metric, props: Partial<cloudwatch.CreateAlarmOptions>) => {
-      const a = metric.createAlarm(this, id, {
+    const alarm = (id: string, metric: cloudwatch.IMetric, props: Partial<cloudwatch.CreateAlarmOptions>) => {
+      const a = new cloudwatch.Alarm(this, id, {
+        metric,
         alarmName: `${META_PREFIX}${id}-Critical`,
         threshold: 1,
         evaluationPeriods: 1,
@@ -176,8 +177,22 @@ export class AlertingStack extends cdk.Stack {
     alarm('StoreErrors', store.metricErrors(fiveMinutes), {});
     alarm('IngestErrors', ingest.metricErrors(fiveMinutes), {});
     alarm('Dlq', dlq.metricApproximateNumberOfMessagesVisible({ period: cdk.Duration.minutes(5) }), {});
-    alarm('RouterNotRunning', router.metricInvocations(fiveMinutes), {
+    // The tick rule's own runs, a missing minute counted as none: judged on the router's invocations, or with missing
+    // data left to CloudWatch, any other alert passing through kept a stopped tick looking healthy for 15+ minutes.
+    alarm('TickNotRunning', new cloudwatch.MathExpression({
+      expression: 'FILL(runs, 0)',
+      usingMetrics: {
+        runs: new cloudwatch.Metric({
+          namespace: 'AWS/Events', metricName: 'Invocations', dimensionsMap: { RuleName: tick.ruleName },
+          statistic: 'Sum', period: cdk.Duration.minutes(1),
+        }),
+      },
+      label: 'Tick runs',
+      period: cdk.Duration.minutes(1),
+    }), {
       comparisonOperator: cloudwatch.ComparisonOperator.LESS_THAN_THRESHOLD,
+      evaluationPeriods: 5,
+      datapointsToAlarm: 5,
       treatMissingData: cloudwatch.TreatMissingData.BREACHING,
     });
     alarm('Undelivered', new cloudwatch.Metric({

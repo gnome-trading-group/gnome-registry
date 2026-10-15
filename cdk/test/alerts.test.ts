@@ -1,6 +1,6 @@
 import { isAutomaticActor, normalizeType, severityOf } from '../lambda/alerts/alert-types';
 import { sinksFor } from '../lambda/alerts/routes';
-import { fromAlarm } from '../lambda/alerts/alert-router';
+import { deliverUnrecorded, fromAlarm } from '../lambda/alerts/alert-router';
 import { acknowledgedMessage, escape, firingMessage, resolvedMessage } from '../lambda/alerts/sinks/slack';
 import { eventFor } from '../lambda/alerts/sinks/incidentio';
 import { parseAlert } from '../lambda/alerts/alerts-ingest';
@@ -162,5 +162,20 @@ describe('the ingest API', () => {
       { type: 'X', title: 'x', occurredAt: 'yesterday' }]) {
       expect(() => parseAlert(bad, null, now)).toThrow();
     }
+  });
+});
+
+describe('an alert the store could not record', () => {
+  const sent = '2026-10-15T11:29:10Z';
+  const at = (seconds: number) => new Date(new Date(sent).getTime() + seconds * 1000);
+
+  it('is delivered on its first attempt only, not again on each retry', () => {
+    expect(deliverUnrecorded('evt-1', sent, at(2))).toBe(true);
+    expect(deliverUnrecorded('evt-1', sent, at(65))).toBe(false);
+    expect(deliverUnrecorded('evt-1', sent, at(180))).toBe(false);
+  });
+
+  it('is delivered when its age is unknown, rather than risk dropping it', () => {
+    expect(deliverUnrecorded(undefined, undefined, at(300))).toBe(true);
   });
 });
