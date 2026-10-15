@@ -289,14 +289,15 @@ describeDb('alerts against Postgres', () => {
     await tick(at(2));
     const alertId = Number((await client.query(`SELECT alert_id FROM alert.alert WHERE type = 'SILENT'`)).rows[0].alert_id);
 
-    expect(await acknowledgeAlert(client, alertId, 'ops@gnome.group', 'prod', at(2))).toBe('ACKNOWLEDGED');
+    expect(await acknowledgeAlert(client, alertId, 'ops@gnome.group', 'prod', at(2), 'restarting it')).toBe('ACKNOWLEDGED');
     // Still silent: the next tick tells Slack and incident.io it's been taken, and pages nobody.
     expect(await tick(at(3))).toEqual([{ type: 'SILENT', status: 'FIRING', severity: 'CRITICAL', sinks: ['incidentio', 'slack'] }]);
     const row = (await client.query(`SELECT status, acknowledged_by, pending_sinks FROM alert.alert WHERE alert_id = $1`, [alertId])).rows[0];
     expect(row).toEqual({ status: 'FIRING', acknowledged_by: 'ops@gnome.group', pending_sinks: [] });
     expect(await tick(at(4))).toEqual([]);
     expect((await client.query('SELECT COUNT(*)::int AS n FROM alert.alert')).rows[0].n).toBe(1);
-    expect((await attention(client, 'live', at(4))).find(i => i.kind === 'SILENT')?.acknowledgedBy).toBe('ops@gnome.group');
+    const item = (await attention(client, 'live', at(4))).find(i => i.kind === 'SILENT');
+    expect([item?.acknowledgedBy, item?.acknowledgedReason]).toEqual(['ops@gnome.group', 'restarting it']);
 
     await client.query(`UPDATE strategy.session SET last_heartbeat_at = $1`, [at(5)]);
     expect(await tick(at(5))).toEqual([{ type: 'SILENT', status: 'RESOLVED', severity: 'CRITICAL', sinks: ['incidentio', 'slack'] }]);

@@ -75,6 +75,7 @@ export interface Delivery {
   slackTs: string | null;
   // Someone has it in hand: an open alert that's acknowledged is announced as taken, not as firing.
   acknowledgedBy: string | null;
+  acknowledgedReason: string | null;
   sinks: Sink[];
   // Set when the store couldn't be reached: delivered anyway, but nothing recorded it.
   unpersisted?: boolean;

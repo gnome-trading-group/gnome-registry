@@ -93,12 +93,14 @@ export function firingMessage(d: Delivery, target: Pick<SlackTarget, 'controller
 
 export function resolvedMessage(d: Delivery, target: Pick<SlackTarget, 'stage'>, now: Date) {
   const by = d.acknowledgedBy ? `  ·  acknowledged by ${escape(d.acknowledgedBy)}` : '';
+  const note = d.acknowledgedReason ? [{ type: 'section', text: { type: 'mrkdwn', text: reason(d.acknowledgedReason) } }] : [];
   return {
     text: `Resolved: ${d.title}`,
     attachments: [{
       color: RESOLVED_COLOR,
       blocks: [
         { type: 'section', text: { type: 'mrkdwn', text: `:white_check_mark:  *Resolved*  ·  ${escape(d.title)}` } },
+        ...note,
         {
           type: 'context',
           elements: [{ type: 'mrkdwn', text: `${SEVERITY_LABEL[d.severity]}  ·  after ${since(d.firstSeen, now)}${by}  ·  gnome alerts  ·  ${target.stage}` }],
@@ -126,6 +128,7 @@ export function acknowledgedMessage(d: Delivery, target: Pick<SlackTarget, 'stag
       color: ACKNOWLEDGED_COLOR,
       blocks: [
         { type: 'section', text: { type: 'mrkdwn', text: `:ballot_box_with_check:  *Acknowledged*  ·  ${escape(d.title)}` } },
+        ...(d.acknowledgedReason ? [{ type: 'section', text: { type: 'mrkdwn', text: reason(d.acknowledgedReason) } }] : []),
         {
           type: 'context',
           elements: [{

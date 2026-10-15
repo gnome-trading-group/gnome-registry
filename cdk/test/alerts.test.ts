@@ -13,7 +13,7 @@ const delivery = (d: Partial<Delivery> = {}): Delivery => ({
   title: 'Session s1 died', body: 'NullPointerException <!channel>', actor: null, mode: 'live', strategyId: 1,
   sessionId: 's1', listingId: null, exchangeId: null, accountId: null, labels: { strategy: 'arb' }, links: [],
   runbook: { summary: 'It died.', firstSteps: ['Check the venue.'], url: 'https://github.com/x/FATAL_ERROR.md' },
-  firstSeen: '2026-10-14T12:00:00Z', slackTs: null, acknowledgedBy: null, sinks: ['incidentio', 'slack'], ...d,
+  firstSeen: '2026-10-14T12:00:00Z', slackTs: null, acknowledgedBy: null, acknowledgedReason: null, sinks: ['incidentio', 'slack'], ...d,
 });
 
 describe('alert severity', () => {
@@ -120,11 +120,12 @@ describe('sinks', () => {
   });
 
   it('an acknowledged alert turns grey in Slack and stops the page', () => {
-    const acked = delivery({ acknowledgedBy: 'mason@gnome.group' });
+    const acked = delivery({ acknowledgedBy: 'mason@gnome.group', acknowledgedReason: 'venue maintenance <until 3pm>' });
     const message = acknowledgedMessage(acked, target, new Date('2026-10-14T12:10:00Z'));
     expect(message.attachments[0].color).toBe('#9EA0A6');
-    expect((message.attachments[0].blocks as any[])[1].elements[0].text)
+    expect((message.attachments[0].blocks as any[])[2].elements[0].text)
       .toBe('by mason@gnome.group  ·  Critical  ·  open 10m  ·  resolves when it clears  ·  prod');
+    expect((message.attachments[0].blocks as any[])[1].text.text).toBe('> venue maintenance &lt;until 3pm&gt;');
     expect(eventFor(acked, 'https://controller').status).toBe('resolved');
   });
 

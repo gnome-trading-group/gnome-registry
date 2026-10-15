@@ -38,23 +38,25 @@ export interface AttentionItem {
   since: string | null;
   // Someone has taken its alert (the alert's key is the finding's): still a problem, but not unowned.
   acknowledgedBy: string | null;
+  acknowledgedReason: string | null;
 }
 
-function toItem(f: Finding, acknowledged: Map<string, string>): AttentionItem {
+function toItem(f: Finding, acknowledged: Map<string, { by: string; reason: string | null }>): AttentionItem {
   return {
     severity: f.severity, kind: f.kind, title: f.title, detail: f.detail, strategyId: f.strategyId,
     strategyName: f.strategyName, sessionId: f.sessionId, listingId: f.listingId, symbol: f.symbol,
     exchangeId: f.exchangeId, exchangeName: f.exchangeName, accountId: f.accountId, accountLabel: f.accountLabel,
-    actor: f.actor, subject: f.subject, since: f.since, acknowledgedBy: acknowledged.get(f.key) ?? null,
+    actor: f.actor, subject: f.subject, since: f.since, acknowledgedBy: acknowledged.get(f.key)?.by ?? null,
+    acknowledgedReason: acknowledged.get(f.key)?.reason ?? null,
   };
 }
 
 export async function attention(client: PoolClient, mode: 'live' | 'paper', now: Date): Promise<AttentionItem[]> {
   const findings = (await runRules(client, now)).filter(f => f.visibleIn.includes(mode));
-  const acknowledged = new Map<string, string>((await client.query(
-    `SELECT key, acknowledged_by FROM alert.alert
+  const acknowledged = new Map<string, { by: string; reason: string | null }>((await client.query(
+    `SELECT key, acknowledged_by, acknowledged_reason FROM alert.alert
      WHERE status IN ('PENDING', 'FIRING') AND acknowledged_by IS NOT NULL AND key = ANY($1)`,
-    [findings.map(f => f.key)])).rows.map(r => [r.key, r.acknowledged_by]));
+    [findings.map(f => f.key)])).rows.map(r => [r.key, { by: r.acknowledged_by, reason: r.acknowledged_reason }]));
   const items = findings.map(f => toItem(f, acknowledged));
   // What nobody has taken first; then within a severity, the longest-standing first, and problems that are only a
   // current state (no start time) after.

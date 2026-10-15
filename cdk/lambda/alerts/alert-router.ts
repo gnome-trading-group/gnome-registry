@@ -111,7 +111,7 @@ function unrecorded(event: AlertEvent): Delivery {
     strategyId: normalized.strategyId ?? null, sessionId: normalized.sessionId ?? null,
     listingId: normalized.listingId ?? null, exchangeId: normalized.exchangeId ?? null,
     accountId: normalized.accountId ?? null, labels, links: normalized.links ?? [], runbook: runbookFor(normalized),
-    firstSeen: normalized.stateAt, slackTs: null, acknowledgedBy: null, sinks, unpersisted: true,
+    firstSeen: normalized.stateAt, slackTs: null, acknowledgedBy: null, acknowledgedReason: null, sinks, unpersisted: true,
   };
 }
 

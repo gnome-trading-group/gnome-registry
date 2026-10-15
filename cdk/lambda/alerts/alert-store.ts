@@ -199,7 +199,8 @@ function toDelivery(row: any, sinks: Sink[]): Delivery {
     strategyId: row.strategy_id, sessionId: row.session_id, listingId: row.listing_id, exchangeId: row.exchange_id,
     accountId: row.account_id, labels: row.labels, links: row.links,
     runbook: runbookFor({ type: row.type, labels: row.labels } as AlertEvent),
-    firstSeen: row.first_seen.toISOString(), slackTs: row.slack_ts, acknowledgedBy: row.acknowledged_by ?? null, sinks,
+    firstSeen: row.first_seen.toISOString(), slackTs: row.slack_ts, acknowledgedBy: row.acknowledged_by ?? null,
+    acknowledgedReason: row.acknowledged_reason ?? null, sinks,
   };
 }
 
