@@ -3,7 +3,8 @@ import { parseIdList, ResourceHandler, UNKNOWN_ACTOR, ValidationError } from './
 
 // Fee schedules (sm.fee_schedule). Writes are append-only: a venue change is a row effective from when it happened,
 // and a fix is a row with the effective_from of the row it corrects (the later recorded_at wins). Reads resolve a
-// listing's fees over time from its most specific scope in force: listing, then event, then fee group, then exchange.
+// listing's fees over time from its most specific scope in force: listing, then fee event, then fee group, then
+// exchange. Fee events and fee groups are the venue's own keys carried on sm.listing (a Kalshi event ticker, a series).
 
 const COMPONENT_KINDS = new Set(['PRICE_CURVE', 'NOTIONAL', 'PER_UNIT']);
 const SIDES = new Set(['BUY', 'SELL']);
@@ -113,9 +114,9 @@ function optionalId(name: string, value: unknown): number | null {
   return value;
 }
 
-export type FeeScope = 'LISTING' | 'EVENT' | 'FEE_GROUP' | 'EXCHANGE';
+export type FeeScope = 'LISTING' | 'FEE_EVENT' | 'FEE_GROUP' | 'EXCHANGE';
 // Most specific first: the first scope with a schedule in force decides a listing's fees.
-const SCOPE_ORDER: FeeScope[] = ['LISTING', 'EVENT', 'FEE_GROUP', 'EXCHANGE'];
+const SCOPE_ORDER: FeeScope[] = ['LISTING', 'FEE_EVENT', 'FEE_GROUP', 'EXCHANGE'];
 
 export interface IScheduleRow {
   fee_schedule_id: string;
@@ -189,7 +190,7 @@ export function resolveTimeline(rows: IScheduleRow[], from?: Date, to?: Date): I
 interface ICreateFeeSchedule {
   exchangeId?: number;
   feeGroup?: string;
-  eventId?: number;
+  feeEvent?: string;
   listingId?: number;
   effectiveFrom: string;
   definition: unknown;
@@ -198,6 +199,12 @@ interface ICreateFeeSchedule {
 }
 
 const quote = (value: string) => `'${value.replace(/'/g, "''")}'`;
+
+function optionalKey(name: string, value: unknown): string | null {
+  if (value == null) return null;
+  if (typeof value !== 'string' || value.trim() === '') throw new ValidationError(`${name} must be a non-empty string`);
+  return value.trim();
+}
 
 export class FeeScheduleHandler extends ResourceHandler {
   auditWrites(): boolean {
@@ -212,18 +219,14 @@ export class FeeScheduleHandler extends ResourceHandler {
     const to = params?.to ? new Date(isoTimestamp('to', params.to)) : undefined;
     const knownAsOf = params?.knownAsOf ? isoTimestamp('knownAsOf', params.knownAsOf) : null;
     const result = await this.client.query(
-      `WITH l AS (
-         SELECT l.listing_id, l.exchange_id, l.fee_group, ec.event_id
-         FROM sm.listing l LEFT JOIN sm.event_contract ec ON ec.security_id = l.security_id
-         WHERE l.listing_id = ANY($1::int[])
-       )
-       SELECT l.listing_id, f.fee_schedule_id, f.effective_from, f.recorded_at, f.definition,
-              CASE WHEN f.listing_id IS NOT NULL THEN 'LISTING' WHEN f.event_id IS NOT NULL THEN 'EVENT'
+      `SELECT l.listing_id, f.fee_schedule_id, f.effective_from, f.recorded_at, f.definition,
+              CASE WHEN f.listing_id IS NOT NULL THEN 'LISTING' WHEN f.fee_event IS NOT NULL THEN 'FEE_EVENT'
                    WHEN f.fee_group IS NOT NULL THEN 'FEE_GROUP' ELSE 'EXCHANGE' END AS scope
-       FROM l JOIN sm.fee_schedule f ON f.exchange_id = l.exchange_id AND (
-         f.listing_id = l.listing_id OR f.event_id = l.event_id OR f.fee_group = l.fee_group
-         OR (f.listing_id IS NULL AND f.event_id IS NULL AND f.fee_group IS NULL))
-       WHERE $2::timestamptz IS NULL OR f.recorded_at <= $2::timestamptz`,
+       FROM sm.listing l JOIN sm.fee_schedule f ON f.exchange_id = l.exchange_id AND (
+         f.listing_id = l.listing_id OR f.fee_event = l.fee_event OR f.fee_group = l.fee_group
+         OR (f.listing_id IS NULL AND f.fee_event IS NULL AND f.fee_group IS NULL))
+       WHERE l.listing_id = ANY($1::int[])
+         AND ($2::timestamptz IS NULL OR f.recorded_at <= $2::timestamptz)`,
       [listingIds, knownAsOf]);
     const byListing = new Map<number, IScheduleRow[]>(listingIds.map((id) => [id, []]));
     for (const row of result.rows) byListing.get(row.listing_id)!.push(row);
@@ -237,36 +240,38 @@ export class FeeScheduleHandler extends ResourceHandler {
     let where = '1=1';
     if (params?.exchangeId) where += ` AND exchange_id=${optionalId('exchangeId', Number(params.exchangeId))}`;
     if (params?.feeGroup) where += ` AND fee_group=${quote(params.feeGroup)}`;
-    if (params?.eventId) where += ` AND event_id=${optionalId('eventId', Number(params.eventId))}`;
+    if (params?.feeEvent) where += ` AND fee_event=${quote(params.feeEvent)}`;
     if (params?.scopeListingId) where += ` AND listing_id=${optionalId('scopeListingId', Number(params.scopeListingId))}`;
     return `SELECT * FROM sm.fee_schedule WHERE ${where} ORDER BY effective_from DESC, recorded_at DESC`;
   }
 
-  // A listing or event implies its exchange, so a row names exactly one of exchange (with an optional fee group),
-  // event or listing; the exchange is taken from the event or listing.
+  // A row names the exchange, optionally narrowed to one fee group or fee event, or names a listing (which implies
+  // its exchange).
   generateInsertQuery(body: string): string {
     const s = JSON.parse(body) as ICreateFeeSchedule;
     const exchangeId = optionalId('exchangeId', s.exchangeId);
-    const eventId = optionalId('eventId', s.eventId);
     const listingId = optionalId('listingId', s.listingId);
-    const feeGroup = s.feeGroup == null ? null : String(s.feeGroup).trim();
-    if (feeGroup === '') throw new ValidationError('feeGroup must not be empty');
-    const targets = [eventId, listingId].filter((t) => t !== null).length + (exchangeId !== null ? 1 : 0);
-    if (targets !== 1) throw new ValidationError('a schedule names exactly one of exchangeId, eventId or listingId');
-    if (feeGroup !== null && exchangeId === null) throw new ValidationError('feeGroup needs exchangeId');
+    const feeGroup = optionalKey('feeGroup', s.feeGroup);
+    const feeEvent = optionalKey('feeEvent', s.feeEvent);
+    if ((exchangeId === null) === (listingId === null)) {
+      throw new ValidationError('a schedule names exactly one of exchangeId or listingId');
+    }
+    if ((feeGroup !== null || feeEvent !== null) && exchangeId === null) {
+      throw new ValidationError('feeGroup and feeEvent need exchangeId');
+    }
+    if (feeGroup !== null && feeEvent !== null) throw new ValidationError('a schedule names feeGroup or feeEvent, not both');
     const effectiveFrom = isoTimestamp('effectiveFrom', s.effectiveFrom);
     const definition = s.definition === null ? null : validateDefinition(s.definition);
     if (!SOURCES.has(s.source)) throw new ValidationError(`source must be one of ${[...SOURCES].join(', ')}`);
-    const exchange = exchangeId !== null ? String(exchangeId)
-      : eventId !== null ? `(SELECT exchange_id FROM sm.event WHERE event_id=${eventId})`
-        : `(SELECT exchange_id FROM sm.listing WHERE listing_id=${listingId})`;
+    const exchange = exchangeId !== null ? String(exchangeId) : `(SELECT exchange_id FROM sm.listing WHERE listing_id=${listingId})`;
+    const text = (value: string | null) => (value === null ? 'NULL' : quote(value));
     const actor = this.audit && this.audit.actor !== UNKNOWN_ACTOR ? quote(this.audit.actor) : 'NULL';
     return `
-      INSERT INTO sm.fee_schedule (exchange_id, fee_group, event_id, listing_id, effective_from, definition, source,
+      INSERT INTO sm.fee_schedule (exchange_id, fee_group, fee_event, listing_id, effective_from, definition, source,
         source_ref, actor)
-      VALUES (${exchange}, ${feeGroup === null ? 'NULL' : quote(feeGroup)}, ${eventId ?? 'NULL'}, ${listingId ?? 'NULL'},
-        '${effectiveFrom}', ${definition === null ? 'NULL' : `${quote(JSON.stringify(definition))}::jsonb`},
-        '${s.source}', ${s.sourceRef == null ? 'NULL' : quote(String(s.sourceRef))}, ${actor})
+      VALUES (${exchange}, ${text(feeGroup)}, ${text(feeEvent)}, ${listingId ?? 'NULL'}, '${effectiveFrom}',
+        ${definition === null ? 'NULL' : `${quote(JSON.stringify(definition))}::jsonb`}, '${s.source}',
+        ${s.sourceRef == null ? 'NULL' : quote(String(s.sourceRef))}, ${actor})
       RETURNING *;
     `;
   }

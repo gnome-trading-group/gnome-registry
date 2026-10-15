@@ -49,6 +49,9 @@ interface IListingBase {
   exchangeSecurityId: string;
   exchangeSecuritySymbol: string;
   active?: boolean;
+  // The venue's keys that fee schedules target (sm.fee_schedule): a coarse group and the venue's own event id.
+  feeGroup?: string | null;
+  feeEvent?: string | null;
 }
 export interface ICreateListing extends IListingBase {}
 export interface IListing extends IListingBase {

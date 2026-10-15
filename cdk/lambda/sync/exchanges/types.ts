@@ -45,6 +45,8 @@ export interface ExchangeSecurityData {
   // Price units (1e9 = $1), like every money value; not price scale × size scale.
   minNotional: number;
   contractMultiplier: number;
+  // The venue's group fee schedules target (sm.listing.fee_group), when it prices this kind of market apart.
+  feeGroup?: string;
 }
 
 export interface ExchangeAdapter {

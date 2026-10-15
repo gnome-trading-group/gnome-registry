@@ -2,6 +2,8 @@ import { APIGatewayProxyEvent, APIGatewayProxyEventQueryStringParameters } from 
 import { parseIdList, ResourceHandler } from './base';
 import { ICreateListing, IDeleteListing } from '../types';
 
+const sqlText = (value: string | null | undefined) => (value == null ? 'NULL' : `'${value.replace(/'/g, "''")}'`);
+
 export class ListingHandler extends ResourceHandler {
   getPrimaryKey(): string { return 'listing_id'; }
   getCamelPrimaryKey(): string { return 'listingId'; }
@@ -21,8 +23,8 @@ export class ListingHandler extends ResourceHandler {
   generateInsertQuery(body: string): string {
     const listing = JSON.parse(body) as ICreateListing;
     return `
-      INSERT INTO sm.listing (exchange_id,security_id,exchange_security_id,exchange_security_symbol)
-      VALUES (${listing.exchangeId},${listing.securityId},'${listing.exchangeSecurityId.replace(/'/g, "''")}','${listing.exchangeSecuritySymbol.replace(/'/g, "''")}')
+      INSERT INTO sm.listing (exchange_id,security_id,exchange_security_id,exchange_security_symbol,fee_group,fee_event)
+      VALUES (${listing.exchangeId},${listing.securityId},'${listing.exchangeSecurityId.replace(/'/g, "''")}','${listing.exchangeSecuritySymbol.replace(/'/g, "''")}',${sqlText(listing.feeGroup)},${sqlText(listing.feeEvent)})
       RETURNING *;
     `;
   }
@@ -92,6 +94,13 @@ export class ListingHandler extends ResourceHandler {
     }
     if (listing.active != null) {
       updates.push(`active=${listing.active}`);
+    }
+    // Present-but-null clears a fee key: a venue that stops grouping a listing's fees.
+    if ('feeGroup' in listing) {
+      updates.push(`fee_group=${sqlText(listing.feeGroup)}`);
+    }
+    if ('feeEvent' in listing) {
+      updates.push(`fee_event=${sqlText(listing.feeEvent)}`);
     }
     updates.push(`date_modified=NOW()`);
     const updateString = updates.join(", ");

@@ -51,13 +51,13 @@ describe('resolveTimeline', () => {
     const timeline = resolveTimeline([
       row('EXCHANGE', '2025-01-01T00:00:00Z', curve(0.07)),
       row('FEE_GROUP', '2026-08-07T00:00:00Z', curve(0.035)),
-      row('EVENT', '2026-10-10T00:00:00Z', curve(0.07)),
-      row('EVENT', '2026-10-18T00:00:00Z', null),
+      row('FEE_EVENT', '2026-10-10T00:00:00Z', curve(0.07)),
+      row('FEE_EVENT', '2026-10-18T00:00:00Z', null),
     ]);
     expect(timeline.map((e) => [e.effectiveFrom, e.effectiveTo, e.scope, taker(e.definition)])).toEqual([
       ['2025-01-01T00:00:00.000Z', '2026-08-07T00:00:00.000Z', 'EXCHANGE', 0.07],
       ['2026-08-07T00:00:00.000Z', '2026-10-10T00:00:00.000Z', 'FEE_GROUP', 0.035],
-      ['2026-10-10T00:00:00.000Z', '2026-10-18T00:00:00.000Z', 'EVENT', 0.07],
+      ['2026-10-10T00:00:00.000Z', '2026-10-18T00:00:00.000Z', 'FEE_EVENT', 0.07],
       ['2026-10-18T00:00:00.000Z', null, 'FEE_GROUP', 0.035],
     ]);
   });
@@ -79,7 +79,7 @@ describe('resolveTimeline', () => {
 
   it('merges change points that leave the same schedule in force', () => {
     const exchange = row('EXCHANGE', '2025-01-01T00:00:00Z', curve(0.07));
-    const timeline = resolveTimeline([exchange, row('EVENT', '2026-10-18T00:00:00Z', null)]);
+    const timeline = resolveTimeline([exchange, row('FEE_EVENT', '2026-10-18T00:00:00Z', null)]);
     expect(timeline).toEqual([expect.objectContaining({ feeScheduleId: exchange.fee_schedule_id, effectiveTo: null })]);
   });
 

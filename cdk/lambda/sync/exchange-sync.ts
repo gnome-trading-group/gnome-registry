@@ -232,6 +232,7 @@ export const handler = async () => {
           securityId: security.security_id,
           exchangeSecurityId: sec.exchangeSecurityId,
           exchangeSecuritySymbol: sec.exchangeSecuritySymbol,
+          feeGroup: sec.feeGroup ?? null,
         });
         listingByKey.set(key, created);
         newListings.push({ exchangeName: exchangeNameById.get(exchangeId) ?? String(exchangeId), symbol: sec.exchangeSecuritySymbol });

@@ -144,6 +144,7 @@ export class HyperliquidAdapter implements ExchangeAdapter {
         lotSize,
         minNotional: 0,
         contractMultiplier: CONTRACT_MULTIPLIER,
+        feeGroup: 'spot',
       });
     }
 
