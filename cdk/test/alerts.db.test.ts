@@ -4,6 +4,7 @@ import { detect, markDelivered, MASS_SILENCE, record } from '../lambda/alerts/al
 import { AlertEvent, RecordResult } from '../lambda/alerts/model';
 import { recordHeartbeat } from '../lambda/endpoints/strategy-session-heartbeat';
 import { acknowledgeAlert } from '../lambda/endpoints/alerts';
+import { attention } from '../lambda/endpoints/monitoring-attention';
 import { StrategySessionHandler } from '../lambda/endpoints/strategy-sessions';
 
 const url = process.env.LEDGER_TEST_DB;
@@ -295,6 +296,7 @@ describeDb('alerts against Postgres', () => {
     expect(row).toEqual({ status: 'FIRING', acknowledged_by: 'ops@gnome.group', pending_sinks: [] });
     expect(await tick(at(4))).toEqual([]);
     expect((await client.query('SELECT COUNT(*)::int AS n FROM alert.alert')).rows[0].n).toBe(1);
+    expect((await attention(client, 'live', at(4))).find(i => i.kind === 'SILENT')?.acknowledgedBy).toBe('ops@gnome.group');
 
     await client.query(`UPDATE strategy.session SET last_heartbeat_at = $1`, [at(5)]);
     expect(await tick(at(5))).toEqual([{ type: 'SILENT', status: 'RESOLVED', severity: 'CRITICAL', sinks: ['incidentio', 'slack'] }]);

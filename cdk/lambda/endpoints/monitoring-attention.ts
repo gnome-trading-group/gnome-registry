@@ -36,21 +36,30 @@ export interface AttentionItem {
   actor: string | null;
   subject: string | null;
   since: string | null;
+  // Someone has taken its alert (the alert's key is the finding's): still a problem, but not unowned.
+  acknowledgedBy: string | null;
 }
 
-function toItem(f: Finding): AttentionItem {
+function toItem(f: Finding, acknowledged: Map<string, string>): AttentionItem {
   return {
     severity: f.severity, kind: f.kind, title: f.title, detail: f.detail, strategyId: f.strategyId,
     strategyName: f.strategyName, sessionId: f.sessionId, listingId: f.listingId, symbol: f.symbol,
     exchangeId: f.exchangeId, exchangeName: f.exchangeName, accountId: f.accountId, accountLabel: f.accountLabel,
-    actor: f.actor, subject: f.subject, since: f.since,
+    actor: f.actor, subject: f.subject, since: f.since, acknowledgedBy: acknowledged.get(f.key) ?? null,
   };
 }
 
 export async function attention(client: PoolClient, mode: 'live' | 'paper', now: Date): Promise<AttentionItem[]> {
-  const items = (await runRules(client, now)).filter(f => f.visibleIn.includes(mode)).map(toItem);
-  // Within a severity, the longest-standing first; problems that are only a current state (no start time) after.
-  return items.sort((a, b) => ORDER[a.severity] - ORDER[b.severity]
+  const findings = (await runRules(client, now)).filter(f => f.visibleIn.includes(mode));
+  const acknowledged = new Map<string, string>((await client.query(
+    `SELECT key, acknowledged_by FROM alert.alert
+     WHERE status IN ('PENDING', 'FIRING') AND acknowledged_by IS NOT NULL AND key = ANY($1)`,
+    [findings.map(f => f.key)])).rows.map(r => [r.key, r.acknowledged_by]));
+  const items = findings.map(f => toItem(f, acknowledged));
+  // What nobody has taken first; then within a severity, the longest-standing first, and problems that are only a
+  // current state (no start time) after.
+  return items.sort((a, b) => Number(a.acknowledgedBy !== null) - Number(b.acknowledgedBy !== null)
+    || ORDER[a.severity] - ORDER[b.severity]
     || (a.since === null ? 1 : 0) - (b.since === null ? 1 : 0)
     || (a.since ?? '').localeCompare(b.since ?? ''));
 }
