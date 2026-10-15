@@ -137,13 +137,15 @@ export async function record(client: PoolClient, raw: AlertEvent, now: Date): Pr
           [latest.alert_id, now, event.stateAt]);
         return { notify: false };
       }
-      const sinks = sinksFor(severity, stage(), latest.labels);
+      // Acknowledged while it was still pending: it fires, but someone already has it, so nobody is paged.
+      const sinks: Sink[] = latest.acknowledged_by ? [] : sinksFor(severity, stage(), latest.labels);
       const fired = (await client.query(
         `UPDATE alert.alert SET status = 'FIRING', pending_ticks = pending_ticks + 1, fire_count = 1, severity = $4,
-           last_seen = $2, state_at = $3, pending_sinks = $5, notified_at = $2
+           last_seen = $2, state_at = $3, pending_sinks = $5,
+           notified_at = CASE WHEN $5 = '{}'::text[] THEN notified_at ELSE $2 END
          WHERE alert_id = $1 RETURNING *`,
       [latest.alert_id, now, event.stateAt, severity, sinks])).rows[0];
-      return { notify: true, delivery: toDelivery(fired, sinks) };
+      return sinks.length > 0 ? { notify: true, delivery: toDelivery(fired, sinks) } : { notify: false };
     }
 
     // Something a session reports while it's being stopped is the stop itself (its agents closing, its gateways
@@ -197,7 +199,7 @@ function toDelivery(row: any, sinks: Sink[]): Delivery {
     strategyId: row.strategy_id, sessionId: row.session_id, listingId: row.listing_id, exchangeId: row.exchange_id,
     accountId: row.account_id, labels: row.labels, links: row.links,
     runbook: runbookFor({ type: row.type, labels: row.labels } as AlertEvent),
-    firstSeen: row.first_seen.toISOString(), slackTs: row.slack_ts, sinks,
+    firstSeen: row.first_seen.toISOString(), slackTs: row.slack_ts, acknowledgedBy: row.acknowledged_by ?? null, sinks,
   };
 }
 

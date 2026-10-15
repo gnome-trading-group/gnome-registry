@@ -89,6 +89,7 @@ export class ApiStack extends cdk.Stack {
       memorySize: 512,
       environment: {
         DATABASE_SECRET_JSON: props.rootUserSecret.secretValue.unsafeUnwrap(),
+        STAGE: props.stage,
       },
     };
 

@@ -1,7 +1,7 @@
 import { isAutomaticActor, normalizeType, severityOf } from '../lambda/alerts/alert-types';
 import { sinksFor } from '../lambda/alerts/routes';
 import { fromAlarm } from '../lambda/alerts/alert-router';
-import { escape, firingMessage, resolvedMessage } from '../lambda/alerts/sinks/slack';
+import { acknowledgedMessage, escape, firingMessage, resolvedMessage } from '../lambda/alerts/sinks/slack';
 import { eventFor } from '../lambda/alerts/sinks/incidentio';
 import { parseAlert } from '../lambda/alerts/alerts-ingest';
 import { AlertEvent, Delivery } from '../lambda/alerts/model';
@@ -13,7 +13,7 @@ const delivery = (d: Partial<Delivery> = {}): Delivery => ({
   title: 'Session s1 died', body: 'NullPointerException <!channel>', actor: null, mode: 'live', strategyId: 1,
   sessionId: 's1', listingId: null, exchangeId: null, accountId: null, labels: { strategy: 'arb' }, links: [],
   runbook: { summary: 'It died.', firstSteps: ['Check the venue.'], url: 'https://github.com/x/FATAL_ERROR.md' },
-  firstSeen: '2026-10-14T12:00:00Z', slackTs: null, sinks: ['incidentio', 'slack'], ...d,
+  firstSeen: '2026-10-14T12:00:00Z', slackTs: null, acknowledgedBy: null, sinks: ['incidentio', 'slack'], ...d,
 });
 
 describe('alert severity', () => {
@@ -117,6 +117,15 @@ describe('sinks', () => {
     expect(resolved.attachments[0].color).toBe('#2EB67D');
     expect(blocks[0].text.text).toBe(':white_check_mark:  *Resolved*  ·  Session s1 died');
     expect(blocks[1].elements[0].text).toBe('Critical  ·  after 3m  ·  gnome alerts  ·  prod');
+  });
+
+  it('an acknowledged alert turns grey in Slack and stops the page', () => {
+    const acked = delivery({ acknowledgedBy: 'mason@gnome.group' });
+    const message = acknowledgedMessage(acked, target, new Date('2026-10-14T12:10:00Z'));
+    expect(message.attachments[0].color).toBe('#9EA0A6');
+    expect((message.attachments[0].blocks as any[])[1].elements[0].text)
+      .toBe('by mason@gnome.group  ·  Critical  ·  open 10m  ·  resolves when it clears  ·  prod');
+    expect(eventFor(acked, 'https://controller').status).toBe('resolved');
   });
 
   it('sends incident.io the key it deduplicates on and the runbook', () => {

@@ -27,8 +27,12 @@ down is recorded but not sent.
 
 ## On call
 
-- Pages come from incident.io; acknowledge and resolve them there. Closing an alert in the controller
-  (`/system/alerts`) only ends its row.
+- Pages come from incident.io. Most alerts resolve on their own once the problem is gone (the session recovers, the
+  kill switch is turned off, the alarm returns to OK), and that resolves them in Slack and incident.io too.
+- **Acknowledge** an alert in the controller (`/system/alerts`) to say you have it: the page stops, the Slack message
+  turns grey with your name, and an ongoing problem stays open, without paging again, until it clears. For a reported
+  event (a fatal error, a failed launch) the button is **Close**, which resolves it everywhere.
+- Resolving a page in incident.io only stops the page; it doesn't reach the controller or Slack.
 - On-call rotation and escalation: TODO(owner): name the primary and secondary, and how to reach them.
 - Venue support contacts: TODO(owner).
 

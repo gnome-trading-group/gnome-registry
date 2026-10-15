@@ -3,6 +3,7 @@ import { connectExclusive, LOCK_TIMEOUT_MS, release } from './ledger-db';
 import { detect, markDelivered, MASS_SILENCE, record } from '../lambda/alerts/alert-store';
 import { AlertEvent, RecordResult } from '../lambda/alerts/model';
 import { recordHeartbeat } from '../lambda/endpoints/strategy-session-heartbeat';
+import { acknowledgeAlert } from '../lambda/endpoints/alerts';
 import { StrategySessionHandler } from '../lambda/endpoints/strategy-sessions';
 
 const url = process.env.LEDGER_TEST_DB;
@@ -280,6 +281,47 @@ describeDb('alerts against Postgres', () => {
     await session('s1', { status: 'STARTING', heartbeatAt: null });
     expect(await recordHeartbeat(client, 's1', JSON.stringify({ sessionId: 's1', ...HEALTHY }))).toBe(200);
     expect((await client.query(`SELECT status FROM strategy.session`)).rows[0].status).toBe('RUNNING');
+  });
+
+  it('acknowledging an ongoing problem stops the page without re-paging, and it resolves once it clears', async () => {
+    await session('s1');
+    await tick(at(2));
+    const alertId = Number((await client.query(`SELECT alert_id FROM alert.alert WHERE type = 'SILENT'`)).rows[0].alert_id);
+
+    expect(await acknowledgeAlert(client, alertId, 'ops@gnome.group', 'prod', at(2))).toBe('ACKNOWLEDGED');
+    // Still silent: the next tick tells Slack and incident.io it's been taken, and pages nobody.
+    expect(await tick(at(3))).toEqual([{ type: 'SILENT', status: 'FIRING', severity: 'CRITICAL', sinks: ['incidentio', 'slack'] }]);
+    const row = (await client.query(`SELECT status, acknowledged_by, pending_sinks FROM alert.alert WHERE alert_id = $1`, [alertId])).rows[0];
+    expect(row).toEqual({ status: 'FIRING', acknowledged_by: 'ops@gnome.group', pending_sinks: [] });
+    expect(await tick(at(4))).toEqual([]);
+    expect((await client.query('SELECT COUNT(*)::int AS n FROM alert.alert')).rows[0].n).toBe(1);
+
+    await client.query(`UPDATE strategy.session SET last_heartbeat_at = $1`, [at(5)]);
+    expect(await tick(at(5))).toEqual([{ type: 'SILENT', status: 'RESOLVED', severity: 'CRITICAL', sinks: ['incidentio', 'slack'] }]);
+  });
+
+  it('an alert acknowledged while still pending fires quietly', async () => {
+    const stalled = { ...HEALTHY, agents: [{ name: 'OmsAgent', hotPath: true, stalledMs: 5_000, exited: false }] };
+    await session('s1', { health: stalled, heartbeatAt: at(0) });
+    await tick(at(0));
+    const alertId = Number((await client.query(`SELECT alert_id FROM alert.alert`)).rows[0].alert_id);
+    expect(await acknowledgeAlert(client, alertId, 'ops@gnome.group', 'prod', at(0))).toBe('ACKNOWLEDGED');
+    await client.query(`UPDATE strategy.session SET last_heartbeat_at = $1`, [at(1)]);
+    expect(await tick(at(1))).toEqual([]);
+    expect((await client.query(`SELECT status FROM alert.alert`)).rows[0].status).toBe('FIRING');
+  });
+
+  it('closing a reported event resolves it everywhere it was announced', async () => {
+    await session('s1');
+    const first = await record(client, ingest({ type: 'FATAL_ERROR', sessionId: 's1' }), t0) as Extract<RecordResult, { notify: true }>;
+    for (const sink of first.delivery.sinks) await markDelivered(client, first.delivery.alertId!, sink, 'ts-1');
+
+    expect(await acknowledgeAlert(client, first.delivery.alertId!, 'ops@gnome.group', 'prod', t0)).toBe('CLOSED');
+    const redeliver = (await detect(client, at(1))).find(e => e.action === 'REDELIVER')!;
+    const sent = await record(client, redeliver, at(1)) as Extract<RecordResult, { notify: true }>;
+    expect([sent.delivery.status, sent.delivery.sinks, sent.delivery.acknowledgedBy])
+      .toEqual(['RESOLVED', ['incidentio', 'slack'], 'ops@gnome.group']);
+    expect(await acknowledgeAlert(client, first.delivery.alertId!, 'ops@gnome.group', 'prod', at(1))).toBeNull();
   });
 
   it('a session stuck starting or stopping is flagged', async () => {

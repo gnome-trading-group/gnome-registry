@@ -1,10 +1,15 @@
 import { APIGatewayProxyEvent } from 'aws-lambda';
 import { PoolClient } from 'pg';
-import { getActor, parseIdList } from './base';
+import { getActor, parseIdList, withTransaction } from './base';
+import { sinksFor } from '../alerts/routes';
 import { connectLedgerDatabase, createResponse, isSessionId, parsePositiveInt } from './ledger-common';
 
-// The controller's view of alerts: what's open now and what fired before, newest first. Closing one here only ends
-// its row; a page is acknowledged and resolved in incident.io, and an alert whose problem persists opens again.
+// The controller's view of alerts: what's open now and what fired before, newest first, and taking one in hand.
+//   acknowledge  an ongoing problem (a monitoring rule's finding, a CloudWatch alarm): it stays open while the problem
+//                lasts, so it can't page again, and resolves on its own once it clears
+//   close        a reported event: it has nothing left to wait for, so it resolves
+// Either way Slack and incident.io are told within a minute: this Lambda can't reach them from the VPC, so the
+// alert is left owing them the update, and the next tick delivers it.
 
 const DEFAULT_LIMIT = 100;
 const MAX_LIMIT = 500;
@@ -37,7 +42,8 @@ export async function listAlerts(client: PoolClient, params: Record<string, stri
   args.push(limit, offset);
   const rows = (await client.query(
     `SELECT alert_id, key, type, source, severity, status, title, body, actor, labels, links, runbook_url, strategy_id,
-       session_id, listing_id, exchange_id, account_id, mode, fire_count, first_seen, last_seen, resolved_at
+       session_id, listing_id, exchange_id, account_id, mode, fire_count, first_seen, last_seen, resolved_at,
+       acknowledged_by, acknowledged_at
      FROM alert.alert WHERE ${where.join(' AND ')}
      ORDER BY alert_id DESC LIMIT $${args.length - 1} OFFSET $${args.length}`, args)).rows;
   return rows.map(r => ({
@@ -46,16 +52,37 @@ export async function listAlerts(client: PoolClient, params: Record<string, stri
     strategyId: r.strategy_id, sessionId: r.session_id, listingId: r.listing_id, exchangeId: r.exchange_id,
     accountId: r.account_id, mode: r.mode, fireCount: r.fire_count, firstSeen: r.first_seen.toISOString(),
     lastSeen: r.last_seen.toISOString(), resolvedAt: r.resolved_at?.toISOString() ?? null,
+    acknowledgedBy: r.acknowledged_by, acknowledgedAt: r.acknowledged_at?.toISOString() ?? null,
   }));
 }
 
-/** @return false when there is no open alert with that id */
-export async function closeAlert(client: PoolClient, alertId: number, actor: string): Promise<boolean> {
-  const closed = await client.query(
-    `UPDATE alert.alert SET status = 'RESOLVED', resolved_at = NOW(), pending_sinks = '{}',
-       labels = labels || jsonb_build_object('closedBy', $2::text)
-     WHERE alert_id = $1 AND status IN ('PENDING', 'FIRING')`, [alertId, actor]);
-  return closed.rowCount === 1;
+// Owed now, and stamped as sent just over a minute ago, so the next tick's redelivery picks it up at once.
+const DELIVER_NEXT_TICK_MS = 61_000;
+
+/** @return what happened to the alert, or null when there is no open alert with that id */
+export async function acknowledgeAlert(
+  client: PoolClient, alertId: number, actor: string, stage: string, now = new Date(),
+): Promise<'ACKNOWLEDGED' | 'CLOSED' | null> {
+  const owedSince = new Date(now.getTime() - DELIVER_NEXT_TICK_MS);
+  return withTransaction(client, async () => {
+    const row = (await client.query(
+      `SELECT * FROM alert.alert WHERE alert_id = $1 AND status IN ('PENDING', 'FIRING') FOR UPDATE`, [alertId])).rows[0];
+    if (!row) return null;
+    // Only where it was announced; an alert never sent anywhere has no one to tell.
+    const sinks = row.notified_at ? sinksFor(row.severity, stage, row.labels) : [];
+    if (row.source === 'ingest') {
+      await client.query(
+        `UPDATE alert.alert SET status = 'RESOLVED', resolved_at = $4, acknowledged_by = $2, acknowledged_at = $4,
+           pending_sinks = $3, notified_at = CASE WHEN $3 = '{}'::text[] THEN notified_at ELSE $5 END
+         WHERE alert_id = $1`, [alertId, actor, sinks, now, owedSince]);
+      return 'CLOSED';
+    }
+    await client.query(
+      `UPDATE alert.alert SET acknowledged_by = $2, acknowledged_at = $4, pending_sinks = $3,
+         notified_at = CASE WHEN $3 = '{}'::text[] THEN notified_at ELSE $5 END
+       WHERE alert_id = $1`, [alertId, actor, sinks, now, owedSince]);
+    return 'ACKNOWLEDGED';
+  });
 }
 
 export const handler = async (event: APIGatewayProxyEvent) => {
@@ -68,8 +95,9 @@ export const handler = async (event: APIGatewayProxyEvent) => {
     if (event.httpMethod === 'PATCH') {
       const alertId = JSON.parse(event.body ?? '{}')?.alertId;
       if (!Number.isInteger(alertId) || alertId <= 0) return createResponse(400, { message: 'alertId is required' });
-      return await closeAlert(client, alertId, getActor(event))
-        ? createResponse(200, { alertId, status: 'RESOLVED' })
+      const outcome = await acknowledgeAlert(client, alertId, getActor(event), process.env.STAGE ?? 'dev');
+      return outcome
+        ? createResponse(200, { alertId, outcome })
         : createResponse(404, { message: `No open alert ${alertId}` });
     }
     return createResponse(400, { message: 'Invalid HTTP method' });

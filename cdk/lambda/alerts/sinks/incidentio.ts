@@ -26,7 +26,8 @@ export function eventFor(d: Delivery, controllerUrl: string) {
     title: d.title,
     description: lines.join('\n'),
     deduplication_key: d.key,
-    status: d.status === 'FIRING' ? 'firing' : 'resolved',
+    // Acknowledged in the controller: someone has it, so the page stops.
+    status: d.status === 'FIRING' && !d.acknowledgedBy ? 'firing' : 'resolved',
     source_url: d.sessionId ? `${controllerUrl}/sessions/${encodeURIComponent(d.sessionId)}` : `${controllerUrl}/system/alerts`,
     metadata,
   };

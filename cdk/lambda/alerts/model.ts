@@ -73,6 +73,8 @@ export interface Delivery {
   runbook: Runbook | null;
   firstSeen: string;
   slackTs: string | null;
+  // Someone has it in hand: an open alert that's acknowledged is announced as taken, not as firing.
+  acknowledgedBy: string | null;
   sinks: Sink[];
   // Set when the store couldn't be reached: delivered anyway, but nothing recorded it.
   unpersisted?: boolean;

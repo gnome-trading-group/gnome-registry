@@ -7,6 +7,8 @@ import { sendWithRetry } from './http';
 
 const COLOR: Record<Severity, string> = { CRITICAL: '#E01E5A', ERROR: '#A4262C', WARNING: '#ECB22E', INFO: '#36C5F0' };
 const RESOLVED_COLOR = '#2EB67D';
+// Taken in hand but not over: muted until it clears.
+const ACKNOWLEDGED_COLOR = '#9EA0A6';
 const ICON: Record<Severity, string> = {
   CRITICAL: ':rotating_light:', ERROR: ':x:', WARNING: ':warning:', INFO: ':information_source:',
 };
@@ -90,6 +92,7 @@ export function firingMessage(d: Delivery, target: Pick<SlackTarget, 'controller
 }
 
 export function resolvedMessage(d: Delivery, target: Pick<SlackTarget, 'stage'>, now: Date) {
+  const by = d.acknowledgedBy ? `  ·  acknowledged by ${escape(d.acknowledgedBy)}` : '';
   return {
     text: `Resolved: ${d.title}`,
     attachments: [{
@@ -98,7 +101,7 @@ export function resolvedMessage(d: Delivery, target: Pick<SlackTarget, 'stage'>,
         { type: 'section', text: { type: 'mrkdwn', text: `:white_check_mark:  *Resolved*  ·  ${escape(d.title)}` } },
         {
           type: 'context',
-          elements: [{ type: 'mrkdwn', text: `${SEVERITY_LABEL[d.severity]}  ·  after ${since(d.firstSeen, now)}  ·  gnome alerts  ·  ${target.stage}` }],
+          elements: [{ type: 'mrkdwn', text: `${SEVERITY_LABEL[d.severity]}  ·  after ${since(d.firstSeen, now)}${by}  ·  gnome alerts  ·  ${target.stage}` }],
         },
       ],
     }],
@@ -116,17 +119,38 @@ async function call(method: string, token: string, payload: unknown): Promise<an
   return json;
 }
 
+export function acknowledgedMessage(d: Delivery, target: Pick<SlackTarget, 'stage'>, now: Date) {
+  return {
+    text: `Acknowledged: ${d.title}`,
+    attachments: [{
+      color: ACKNOWLEDGED_COLOR,
+      blocks: [
+        { type: 'section', text: { type: 'mrkdwn', text: `:ballot_box_with_check:  *Acknowledged*  ·  ${escape(d.title)}` } },
+        {
+          type: 'context',
+          elements: [{
+            type: 'mrkdwn',
+            text: `by ${escape(d.acknowledgedBy ?? 'someone')}  ·  ${SEVERITY_LABEL[d.severity]}  ·  open ${since(d.firstSeen, now)}`
+              + `  ·  resolves when it clears  ·  ${target.stage}`,
+          }],
+        },
+      ],
+    }],
+  };
+}
+
 /** @return the message's ts, so resolving the alert can edit it */
 export async function sendToSlack(d: Delivery, target: SlackTarget, now = new Date()): Promise<string | null> {
   const { token, channel } = target;
-  if (d.status === 'FIRING') {
+  if (d.status === 'FIRING' && !d.acknowledgedBy) {
     const posted = await call('chat.postMessage', token, { channel, ...firingMessage(d, target) });
     return posted.ts ?? null;
   }
+  const message = d.status === 'FIRING' ? acknowledgedMessage(d, target, now) : resolvedMessage(d, target, now);
   if (!d.slackTs) {
-    const posted = await call('chat.postMessage', token, { channel, ...resolvedMessage(d, target, now) });
+    const posted = await call('chat.postMessage', token, { channel, ...message });
     return posted.ts ?? null;
   }
-  await call('chat.update', token, { channel, ts: d.slackTs, ...resolvedMessage(d, target, now) });
+  await call('chat.update', token, { channel, ts: d.slackTs, ...message });
   return d.slackTs;
 }
