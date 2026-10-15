@@ -95,6 +95,8 @@ export class DatabaseStack extends cdk.Stack {
       databaseName: this.databaseName,
       credentials: rds.Credentials.fromSecret(this.rootUserSecret),
       parameterGroup,
+      deletionProtection: true,
+      backupRetention: cdk.Duration.days(14),
     });
 
     new DatabaseInitLambda(this, 'DatabaseInitLambda', {
