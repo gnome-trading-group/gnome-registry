@@ -334,4 +334,25 @@ describeDb('alerts against Postgres', () => {
     const sent = await tick(at(0));
     expect(sent.map(s => [s.type, s.severity]).sort()).toEqual([['START_STUCK', 'ERROR'], ['STOP_STUCK', 'ERROR']]);
   });
+  it('needs attention shows open reported alerts in their mode, beside the findings, and leaves out INFO', async () => {
+    await session('live1');
+    await session('paper1', { mode: 'paper', heartbeatAt: at(-10) });
+    await tick(at(0));
+    const pipeline = (trigger: string, run: string) => ingest({ type: 'PIPELINE_FAILED', key: `PIPELINE_FAILED:p:${run}`,
+      title: 'Pipeline p failed', body: 'exit 1', labels: { pipeline: 'p', runId: run, trigger } });
+    await record(client, pipeline('scheduled', 'r1'), at(0));
+    await record(client, pipeline('manual', 'r2'), at(0));
+    await record(client, ingest({ type: 'FATAL_ERROR', sessionId: 'paper1', body: 'boom' }), at(0));
+
+    const live = await attention(client, 'live', at(0));
+    expect(live.map(i => [i.kind, i.severity])).toEqual([['PIPELINE_FAILED', 'warning']]);
+    expect(live[0]).toMatchObject({ source: 'alert', title: 'Pipeline p failed', detail: 'exit 1', since: at(0).toISOString() });
+    expect(live[0].alertId).not.toBeNull();
+
+    // The silent paper session's alert is shown once, as its finding.
+    const paper = await attention(client, 'paper', at(0));
+    expect(paper.map(i => i.kind).sort()).toEqual(['FATAL_ERROR', 'PIPELINE_FAILED', 'SILENT']);
+    expect(paper.find(i => i.kind === 'FATAL_ERROR')).toMatchObject({ sessionId: 'paper1', strategyName: 'arb' });
+    expect(paper.find(i => i.kind === 'SILENT')).toMatchObject({ source: 'finding', alertId: expect.any(Number) });
+  });
 });

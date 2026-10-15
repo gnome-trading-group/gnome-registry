@@ -31,7 +31,7 @@ describeDb('monitoring rules against Postgres', () => {
   });
 
   beforeEach(async () => {
-    await client.query(`TRUNCATE ledger.fill, ledger.position, ledger.order, ledger.mark, strategy.session_listing,
+    await client.query(`TRUNCATE alert.alert, ledger.fill, ledger.position, ledger.order, ledger.mark, strategy.session_listing,
       risk.policy, risk.policy_history, strategy.session, strategy.strategy, sm.listing_spec, sm.listing, sm.security,
       sm.exchange RESTART IDENTITY CASCADE`);
     await client.query(`INSERT INTO sm.exchange (exchange_id, exchange_name, region, schema_type, exchange_code)
