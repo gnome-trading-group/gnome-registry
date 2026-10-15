@@ -9,7 +9,11 @@ first_steps:
 
 ## What it means
 
-Alarms named `Pipelines-…`: the `gnome-pipelines-trigger` function failed to start a run (ECS refused the task, or the definition is broken), or `gnome-pipelines-status` failed while recording a stopped task. A scheduled run that never starts only shows here, never as `PIPELINE_FAILED`.
+Alarms named `Pipelines-…`, one per gnome-pipelines function:
+- `Trigger`: a run couldn't start (ECS refused the task, or a schedule names a pipeline or parameters the code no longer accepts). A scheduled run that never starts only shows here, never as `PIPELINE_FAILED`.
+- `Status`: recording a stopped task failed, so a failed run may not be marked or alerted.
+- `Sync`: making the EventBridge schedules match the published manifest failed; schedules keep the previous manifest's expressions and parameters.
+- `Api` (warning): the Pipelines page's API returned an error.
 
 ## Impact
 
@@ -21,7 +25,7 @@ The function's CloudWatch logs. A trigger failure names ECS's reason; the run it
 
 ## Resolve
 
-Fix the cause in gnome-pipelines (its `cdk/lambda` handlers or `RunStack`), then trigger the run again from the Pipelines page.
+Fix the cause in gnome-pipelines (its `cdk/lambda` handlers or `RunStack`), then start the run again from the Pipelines page. A failed sync is retried by re-running the image workflow (it can be started by hand), which republishes the manifest.
 
 ## Escalate
 

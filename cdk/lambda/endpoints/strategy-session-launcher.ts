@@ -113,12 +113,13 @@ function toEnvVarName(key: string): string {
   return key.replace(/\./g, '_').toUpperCase();
 }
 
+// The listings and exchanges endpoints return their rows as stored, in snake_case.
 async function resolveRegion(listingIds: number[]): Promise<string> {
   const exchangeIds = new Set<number>();
   for (const listingId of listingIds) {
     const listings = await registryFetch('/listings', 'GET', undefined, { listingId: String(listingId) });
     if (!listings?.length) throw new Error(`Listing not found: ${listingId}`);
-    exchangeIds.add(listings[0].exchangeId);
+    exchangeIds.add(listings[0].exchange_id);
   }
   const regions = new Set<string>();
   for (const exchangeId of exchangeIds) {

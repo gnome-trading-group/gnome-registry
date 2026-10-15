@@ -149,6 +149,10 @@ beforeEach(() => {
       haltBodies.push(JSON.parse(init.body));
       return haltFails ? jsonResponse({ message: 'db down' }, 500) : jsonResponse({ policyId: 9 });
     }
+    if (method === 'GET' && path === '/listings') return jsonResponse([{ listing_id: 1, exchange_id: 5 }]);
+    if (method === 'GET' && path === '/exchanges') {
+      return jsonResponse(url.includes('exchangeId=5') ? [{ exchange_id: 5, region: 'us-east-1' }] : []);
+    }
     if (method === 'GET') return jsonResponse([sessionRow]);
     if (method === 'POST') {
       postBodies.push(JSON.parse(init.body));
@@ -560,5 +564,14 @@ describe('orchestrator overrides', () => {
     };
     expect((await get('1.10.0')).version).toBe('1.10.0');
     expect((await get()).version).toBe('1.12.2');
+  });
+});
+
+describe('launch region', () => {
+  it("is its listings' exchange's region when none is given", async () => {
+    const { region: _region, ...body } = launchBody();
+    const res = await launcher.handler(apiEvent('/strategy-sessions/launch', body));
+    expect(res.statusCode).toBe(200);
+    expect(ec2Calls.find(c => c.kind === 'RunInstances')!.region).toBe('us-east-1');
   });
 });
