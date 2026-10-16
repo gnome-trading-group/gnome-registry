@@ -23,6 +23,8 @@ interface IUpdateSession {
   status?: string;
   failureReason?: string;
   stoppedAt?: string;
+  stopReason?: string;
+  stoppedBy?: string;
   instanceId?: string;
   instanceType?: string;
   launchRegion?: string;
@@ -30,6 +32,10 @@ interface IUpdateSession {
   // Only update when the session is currently in one of these statuses. Lets concurrent writers (launcher,
   // EC2 monitor, the orchestrator itself) race without a late event dragging a session backwards.
   expectedStatus?: string | string[];
+}
+
+function quoted(value: string): string {
+  return `'${value.replace(/'/g, "''")}'`;
 }
 
 function sqlList(values: string[]): string {
@@ -100,6 +106,10 @@ export class StrategySessionHandler extends ResourceHandler {
     if (s.status != null) updates.push(`status='${s.status}'`);
     if (s.failureReason != null) updates.push(`failure_reason='${s.failureReason.replace(/'/g, "''")}'`);
     if (s.stoppedAt != null) updates.push(`stopped_at='${s.stoppedAt}'`);
+    // The first stop wins: a strategy exiting on its own and then a launcher or operator stopping it again should
+    // still read as the strategy's exit.
+    if (s.stopReason != null) updates.push(`stop_reason=COALESCE(stop_reason, ${quoted(s.stopReason)})`);
+    if (s.stoppedBy != null) updates.push(`stopped_by=COALESCE(stopped_by, ${quoted(s.stoppedBy)})`);
     if (s.instanceId != null) updates.push(`instance_id='${s.instanceId}'`);
     if (s.instanceType != null) updates.push(`instance_type='${s.instanceType}'`);
     if (s.launchRegion != null) updates.push(`launch_region='${s.launchRegion}'`);

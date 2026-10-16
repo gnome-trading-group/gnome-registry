@@ -76,6 +76,8 @@ export const ALERT_TYPES: Record<string, AlertType> = {
   LAUNCH_FAILED: { severity: 'ERROR', debounce: 1 },
   LAUNCH_SUCCEEDED: { severity: 'INFO', debounce: 1 },
   SESSION_STOPPED_AUTO: { severity: 'INFO', debounce: 1, aboutStopping: true },
+  // A strategy ending its own session; WARNING when it couldn't close everything it held before its time ran out.
+  SESSION_EXITED: { severity: e => e.severity === 'WARNING' ? 'WARNING' : 'INFO', debounce: 1, aboutStopping: true },
   // A scheduled run's output feeds trading (a launcher rule reads it); whoever started a run by hand saw it fail.
   PIPELINE_FAILED: { severity: e => e.labels?.trigger === 'scheduled' ? 'ERROR' : 'INFO', debounce: 1 },
   CUSTOM: { severity: e => e.severity ?? 'WARNING', debounce: 1 },

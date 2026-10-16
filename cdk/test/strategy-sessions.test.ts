@@ -38,6 +38,15 @@ describe('strategy session queries', () => {
     expect(query).toContain("failure_reason='can''t launch'");
   });
 
+  it('keeps the first stop reason and stopper, escaping quotes', () => {
+    const query = handler.generateModifyQuery(
+      { session_id: 's1' },
+      JSON.stringify({ status: 'STOPPING', stopReason: "match's live", stoppedBy: 'strategy' }),
+    );
+    expect(query).toContain("stop_reason=COALESCE(stop_reason, 'match''s live')");
+    expect(query).toContain("stopped_by=COALESCE(stopped_by, 'strategy')");
+  });
+
   it('parses statuses from a list or a comma-separated string', () => {
     expect(parseStatuses(['A', 'B'])).toEqual(['A', 'B']);
     expect(parseStatuses(' A, B ,')).toEqual(['A', 'B']);

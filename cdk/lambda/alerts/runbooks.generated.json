@@ -310,6 +310,14 @@
       ],
       "url": "https://github.com/gnome-trading-group/gnome-registry/blob/main/docs/runbooks/alerts/SESSIONS_SILENT_MULTIPLE.md"
     },
+    "SESSION_EXITED": {
+      "summary": "A strategy ended its own session; a WARNING means it couldn't close everything it held.",
+      "firstSteps": [
+        "INFO needs nothing; it is a record.",
+        "On a WARNING, the body lists each listing still held. Check the venue and close or keep them."
+      ],
+      "url": "https://github.com/gnome-trading-group/gnome-registry/blob/main/docs/runbooks/alerts/SESSION_EXITED.md"
+    },
     "SESSION_HALT": {
       "summary": "A running session is halted by a kill switch.",
       "firstSteps": [

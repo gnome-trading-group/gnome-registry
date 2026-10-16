@@ -35,6 +35,9 @@ describe('alert severity', () => {
   it('pages a failed pipeline only when it was scheduled', () => {
     expect(severityOf({ ...base, type: 'PIPELINE_FAILED', labels: { trigger: 'scheduled' } }, null, 'prod')).toBe('ERROR');
     expect(severityOf({ ...base, type: 'PIPELINE_FAILED', labels: { trigger: 'manual' } }, null, 'prod')).toBe('INFO');
+    expect(severityOf({ ...base, type: 'SESSION_EXITED' }, 'live', 'prod')).toBe('INFO');
+    expect(severityOf({ ...base, type: 'SESSION_EXITED', severity: 'WARNING' }, 'live', 'prod')).toBe('WARNING');
+    expect(severityOf({ ...base, type: 'SESSION_EXITED', severity: 'CRITICAL' }, 'live', 'prod')).toBe('INFO');
   });
 
   it('keeps an unknown type as a CUSTOM warning', () => {

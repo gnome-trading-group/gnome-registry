@@ -573,11 +573,13 @@ async function handleStop(event: APIGatewayProxyEvent) {
   const body = event.body;
   if (!body) return createResponse(400, { message: 'Missing body' });
 
-  const { sessionId, stopGraceMs, actor: requestedActor } = JSON.parse(body) as {
+  const { sessionId, stopGraceMs, actor: requestedActor, reason: requestedReason } = JSON.parse(body) as {
     sessionId: string;
     stopGraceMs?: number;
     actor?: unknown;
+    reason?: unknown;
   };
+  const reason = typeof requestedReason === 'string' && requestedReason.trim() ? requestedReason.trim() : undefined;
   // A person's identity comes only from their Cognito token, never the body, so nobody can stop as someone else.
   // Only API-key callers (services) have no token, and they say who they are in `actor`.
   const claimsEmail: string | undefined = event.requestContext?.authorizer?.claims?.email;
@@ -595,6 +597,8 @@ async function handleStop(event: APIGatewayProxyEvent) {
   // retry of a stop that died part-way finds the session already STOPPING and carries on.
   const stopping = await registryRequest('/strategy-sessions', 'PATCH', {
     status: 'STOPPING',
+    stoppedBy: actor,
+    ...(reason ? { stopReason: reason } : {}),
     expectedStatus: [...ACTIVE_STATUSES, 'STOPPING'],
   }, { sessionId });
   if (stopping.status === 409) {
@@ -615,7 +619,7 @@ async function handleStop(event: APIGatewayProxyEvent) {
     // Only this session: a stop must not halt other running sessions of the same strategy.
     await registryFetch('/risk/halts', 'POST', {
       sessionId,
-      reason: STOP_KILL_REASON,
+      reason: reason ? `${STOP_KILL_REASON}: ${reason}` : STOP_KILL_REASON,
       actor,
     });
     killed = true;

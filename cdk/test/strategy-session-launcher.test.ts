@@ -371,7 +371,9 @@ describe('POST /strategy-sessions/stop', () => {
       'TerminateInstances',
     ]);
     expect(haltBodies).toEqual([{ sessionId: 's1', reason: 'session stop', actor: 'alice@example.com' }]);
-    expect(patchBodies).toEqual([{ status: 'STOPPING', expectedStatus: ['SUBMITTED', 'STARTING', 'RUNNING', 'STOPPING'] }]);
+    expect(patchBodies).toEqual([{
+      status: 'STOPPING', stoppedBy: 'alice@example.com', expectedStatus: ['SUBMITTED', 'STARTING', 'RUNNING', 'STOPPING'],
+    }]);
     const terminate = ec2Calls.find(c => c.kind === 'TerminateInstances')!;
     expect(terminate.input).toEqual({ InstanceIds: ['i-123'] });
     expect(terminate.region).toBe('eu-west-1');
@@ -388,6 +390,18 @@ describe('POST /strategy-sessions/stop', () => {
   it('attributes a service stop (API key, no token) to the actor it names', async () => {
     await launcher.handler(apiEvent('/strategy-sessions/stop', { sessionId: 's1', actor: 'launcher:cs2-prematch' }));
     expect(haltBodies[0].actor).toBe('launcher:cs2-prematch');
+  });
+
+  it('records the reason on the session and in the kill', async () => {
+    await launcher.handler(apiEvent('/strategy-sessions/stop', { sessionId: 's1', reason: ' match started ', actor: 'launcher:cs2' }));
+    expect(patchBodies[0]).toMatchObject({ status: 'STOPPING', stoppedBy: 'launcher:cs2', stopReason: 'match started' });
+    expect(haltBodies[0].reason).toBe('session stop: match started');
+  });
+
+  it('leaves the reason out when none is given', async () => {
+    await launcher.handler(apiEvent('/strategy-sessions/stop', { sessionId: 's1', reason: '  ' }));
+    expect(patchBodies[0]).not.toHaveProperty('stopReason');
+    expect(haltBodies[0].reason).toBe('session stop');
   });
 
   it('ignores a body actor when the caller has a Cognito identity', async () => {
