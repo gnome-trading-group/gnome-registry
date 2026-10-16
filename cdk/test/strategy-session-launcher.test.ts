@@ -283,17 +283,14 @@ describe('POST /strategy-sessions/launch', () => {
     expect(sessionEnv().GNOMEPY_VERSION).toBe('2.18.1');
   });
 
-  it.each([
-    ['paper', 't3.small'],
-    ['live', 'c7i.large'],
-  ])('runs a standard-profile %s session on the standard AMI, defaulting to %s', async (mode, instanceType) => {
+  it.each(['paper', 'live'])('runs a standard-profile %s session on the standard AMI, defaulting to t3.small', async (mode) => {
     const body = launchBody({ mode }, { 'latency.profile': 'standard' });
     delete (body as any).instanceType;
 
     await launcher.handler(apiEvent('/strategy-sessions/launch', body));
 
     expect(runInstancesInput().ImageId).toBe('ami-std');
-    expect(runInstancesInput().InstanceType).toBe(instanceType);
+    expect(runInstancesInput().InstanceType).toBe('t3.small');
     expect(sessionEnv().LATENCY_PROFILE).toBe('standard');
   });
 

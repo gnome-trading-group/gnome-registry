@@ -50,12 +50,12 @@ export const INSTANCE_VCPUS: Record<string, number> = {
   'c7i.8xlarge': 32,
   'c7i.12xlarge': 48,
 };
-// c7i.large measured at ~2-7% CPU and ~370 MB with five listings on the standard profile (2026-10). t3.small ran a
-// one-listing session at ~9% CPU (under its 20% baseline, so credits grew) and ~630 MB used of 1.9 GB (2026-10-16).
-export function defaultInstanceType(mode: string, profile: string): string {
-  if (profile === LOW_LATENCY) return 'c7i.4xlarge';
-  return mode === 'paper' ? 't3.small' : 'c7i.large';
-}
+// t3.small ran a live one-listing session at ~9% CPU (under its 20% baseline, so credits grew) and ~630 MB used of
+// 1.9 GB (2026-10-16). Sessions that care about latency run the low-latency profile on dedicated cores instead.
+const DEFAULT_INSTANCE_TYPE: Record<string, string> = {
+  [STANDARD]: 't3.small',
+  [LOW_LATENCY]: 'c7i.4xlarge',
+};
 
 export const ACTIVE_STATUSES = ['SUBMITTED', 'STARTING', 'RUNNING'];
 
@@ -397,7 +397,7 @@ async function handleLaunch(body: string | null) {
   // Written back so the instance, the stored session and a relaunch all see the profile actually chosen, rather
   // than each applying its own default.
   s.config['latency.profile'] = profile;
-  const instanceType = s.instanceType ?? defaultInstanceType(s.mode, profile);
+  const instanceType = s.instanceType ?? DEFAULT_INSTANCE_TYPE[profile];
   if (!(instanceType in INSTANCE_VCPUS)) {
     return createResponse(400, {
       message: `Unsupported instanceType ${instanceType}; expected one of ${Object.keys(INSTANCE_VCPUS).join(', ')}`,
