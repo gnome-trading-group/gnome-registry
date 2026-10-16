@@ -1,6 +1,6 @@
 import { Pool, PoolClient } from 'pg';
 import { connectExclusive, LOCK_TIMEOUT_MS, release } from './ledger-db';
-import { fees } from '../lambda/monitoring/rules/fees';
+import { fees, feeScheduleChanges } from '../lambda/monitoring/rules/fees';
 
 const url = process.env.LEDGER_TEST_DB;
 const describeDb = url ? describe : describe.skip;
@@ -112,5 +112,72 @@ describeDb('fee mismatch rule, against Postgres', () => {
     await fill(3, 500, '1', '0.55', dollars('9'), 'TAKER', '2026-10-12T10:00:00Z');
 
     expect(await fees(client, now)).toEqual([]);
+  });
+});
+
+describeDb('fee schedule change rule, against Postgres', () => {
+  let pool: Pool;
+  let client: PoolClient;
+
+  beforeAll(async () => {
+    ({ pool, client } = await connectExclusive(url as string));
+  }, LOCK_TIMEOUT_MS);
+
+  afterAll(async () => {
+    await release(pool, client);
+  });
+
+  beforeEach(async () => {
+    await client.query(`TRUNCATE sm.fee_schedule, sm.exchange RESTART IDENTITY CASCADE`);
+    await client.query(`INSERT INTO sm.exchange (exchange_id, exchange_name, region, schema_type, exchange_code) VALUES
+      (1, 'K', 'us-east-1', 'mbp-10', 'KALSHI'), (3, 'I', 'us-east-1', 'mbp-10', 'POLYMARKET_INTL')`);
+  });
+
+  async function schedule(exchangeId: number, scope: { group?: string; event?: string }, effectiveFrom: string,
+    definition: object | null, sourceRef: string, recordedAt = '2026-10-14T06:00:00Z', source = 'VENUE_API') {
+    await client.query(`INSERT INTO sm.fee_schedule (exchange_id, fee_group, fee_event, effective_from, recorded_at,
+      definition, source, source_ref) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+    [exchangeId, scope.group ?? null, scope.event ?? null, effectiveFrom, recordedAt,
+      definition && JSON.stringify(definition), source, sourceRef]);
+  }
+
+  const INTL = (taker: number) => ({
+    currency: 'USD', components: [{ kind: 'PRICE_CURVE', taker, maker: 0, exponent: 1 }],
+    rounding: { mode: 'HALF_UP', increment: 0.00001, scope: 'FILL' },
+  });
+
+  it('reports fee groups the venues changed in the last day, one finding per exchange', async () => {
+    await schedule(3, { group: 'politics_fees' }, '2026-03-30T00:00:00Z', INTL(0.04), 'polymarket_intl:fee_type:politics_fees:a');
+    await schedule(3, { group: 'new_fees' }, '2026-10-14T06:00:00Z', INTL(0.05), 'polymarket_intl:fee_type:new_fees:b');
+    await schedule(1, { group: 'KXNBA' }, '2025-07-01T00:00:00Z', KALSHI, 'kalshi:series_fee_change:unrecorded-KXNBA');
+    await schedule(1, { group: 'KXNBA' }, '2026-03-03T00:00:00Z', KALSHI, 'kalshi:series_fee_change:unrecorded-KXNBA:accumulator');
+    await schedule(1, { event: 'KXMLB-G' }, '2026-10-18T00:00:00Z', KALSHI, 'kalshi:event_fee_change:e');
+    await schedule(1, { group: 'KXOLD' }, '2026-01-01T00:00:00Z', KALSHI, 'kalshi:series_fee_change:old', '2026-10-01T00:00:00Z');
+    await schedule(1, { group: 'KXHAND' }, '2026-01-01T00:00:00Z', KALSHI, 'manual', undefined, 'MANUAL');
+
+    const findings = await feeScheduleChanges(client, now);
+    expect(findings.map((f) => [f.kind, f.key, f.facts])).toEqual([
+      ['FEE_SCHEDULE_CHANGED', 'FEE_SCHEDULE_CHANGED:KALSHI', { groups: 1, schedules: 1 }],
+      ['FEE_SCHEDULE_CHANGED', 'FEE_SCHEDULE_CHANGED:POLYMARKET_INTL', { groups: 2, schedules: 2 }],
+    ]);
+    expect(findings[1].detail).toBe('New schedules in the last day: new_fees since 2026-10-14 (taker 0.05, maker 0), '
+      + 'dated from when first seen; politics_fees since 2026-03-30 (taker 0.04, maker 0)');
+  });
+
+  it('reports a fee type no schedule expresses until a real schedule replaces it', async () => {
+    await schedule(1, { group: 'KXFLAT' }, '2026-08-07T00:00:00Z', null, 'kalshi:series_fee_change:a:unsupported:flat',
+      '2026-09-01T00:00:00Z');
+    await schedule(1, { event: 'KXOK-G' }, '2026-08-07T00:00:00Z', null, 'kalshi:event_fee_change:b:unsupported:flat',
+      '2026-09-01T00:00:00Z');
+    await schedule(1, { event: 'KXOK-G' }, '2026-09-07T00:00:00Z', KALSHI, 'kalshi:event_fee_change:c', '2026-09-01T00:00:00Z');
+
+    const [flat, ...rest] = await feeScheduleChanges(client, now);
+    expect(rest).toEqual([]);
+    expect(flat).toMatchObject({ kind: 'FEE_TYPE_UNSUPPORTED', key: 'FEE_TYPE_UNSUPPORTED:KALSHI:KXFLAT',
+      since: '2026-08-07T00:00:00.000Z' });
+    expect(flat.title).toContain('(flat)');
+
+    await schedule(1, { group: 'KXFLAT' }, '2026-08-07T00:00:00Z', KALSHI, 'fixed by hand', '2026-09-02T00:00:00Z', 'MANUAL');
+    expect(await feeScheduleChanges(client, now)).toEqual([]);
   });
 });

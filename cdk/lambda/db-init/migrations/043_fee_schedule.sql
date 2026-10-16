@@ -39,8 +39,7 @@ ALTER TABLE sm.listing ADD COLUMN fee_group VARCHAR;
 ALTER TABLE sm.listing ADD COLUMN fee_event VARCHAR;
 
 -- Hyperliquid prices spot and outcome tokens apart from perps. New listings get their group from the exchange sync and
--- the classifier; these are the ones already listed. Kalshi and Polymarket listings get theirs from the classifier,
--- and resolved ones from its backfill-fees script.
+-- the classifier; these are the ones already listed. Kalshi and Polymarket listings get theirs from the classifier.
 UPDATE sm.listing l SET fee_group = CASE s.type WHEN 0 THEN 'spot' ELSE 'outcome' END
 FROM sm.exchange e, sm.security s
 WHERE e.exchange_id = l.exchange_id AND e.exchange_code = 'HYPERLIQUID' AND s.security_id = l.security_id
@@ -77,14 +76,15 @@ CREATE INDEX idx_fee_schedule_listing ON sm.fee_schedule (listing_id, effective_
 -- 2026-04-03 isn't known.
 --
 -- Kalshi publishes per-series and per-event changes (the classifier syncs them) but only since 2025-10-04; a series
--- with no recorded change is on the original schedule, 0.07 taker and no maker fee. Kalshi rounded each fee up to the
+-- with no recorded change is on its current fee from 2025-07-01 (the classifier writes those too), and before that on
+-- the original schedule, 0.07 taker and no maker fee. Kalshi rounded each fee up to the
 -- cent until it moved to rounding balances to $0.0001 with the overpayment carried across an order's fills
 -- (docs.kalshi.com/getting_started/fee_rounding; checked against our fills 2026-10-15). The cutover date is the
 -- changelog's, not confirmed. The S&P and Nasdaq index series paid half (0.035) from 2022-09-22 until 2026-07-03,
 -- where their recorded history starts.
 --
--- Polymarket International fees are set per market when it lists (the classifier records them per listing);
--- markets without a schedule trade free.
+-- Polymarket International fees are set by each market's fee type (the classifier records one schedule per type);
+-- markets without one trade free.
 INSERT INTO sm.fee_schedule (exchange_id, fee_group, effective_from, definition, source, source_ref, actor)
 SELECT e.exchange_id, s.fee_group, s.effective_from::timestamptz, s.definition::jsonb, 'MANUAL', s.source_ref, 'migration 043'
 FROM sm.exchange e

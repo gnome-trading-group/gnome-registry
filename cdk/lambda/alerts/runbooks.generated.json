@@ -126,6 +126,14 @@
       ],
       "url": "https://github.com/gnome-trading-group/gnome-registry/blob/main/docs/runbooks/alerts/FEE_MISMATCH.md"
     },
+    "FEE_SCHEDULE_CHANGED": {
+      "summary": "A venue's API changed the fees of some fee groups (Kalshi series, Polymarket International fee types).",
+      "firstSteps": [
+        "Read the finding's detail for the groups, dates and rates.",
+        "Check any \"dated from when first seen\" entry against the venue's announcements."
+      ],
+      "url": "https://github.com/gnome-trading-group/gnome-registry/blob/main/docs/runbooks/alerts/FEE_SCHEDULE_CHANGED.md"
+    },
     "FEE_SCHEDULE_MISSING": {
       "summary": "A live fill landed where the registry knows no fee schedule for its listing.",
       "firstSteps": [
@@ -133,6 +141,14 @@
         "Record the venue's schedule for that time."
       ],
       "url": "https://github.com/gnome-trading-group/gnome-registry/blob/main/docs/runbooks/alerts/FEE_SCHEDULE_MISSING.md"
+    },
+    "FEE_TYPE_UNSUPPORTED": {
+      "summary": "Kalshi charges a series or event a fee type no fee schedule can express, so its fees fall through to the default.",
+      "firstSteps": [
+        "Look up the series or event's fee type on Kalshi.",
+        "Record its real schedule in Security Master → Fees."
+      ],
+      "url": "https://github.com/gnome-trading-group/gnome-registry/blob/main/docs/runbooks/alerts/FEE_TYPE_UNSUPPORTED.md"
     },
     "GLOBAL_HALT": {
       "summary": "All trading is halted by a global kill switch.",

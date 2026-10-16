@@ -115,14 +115,14 @@ describeDb('monitoring rules against Postgres', () => {
       'FAILED', 'START_STUCK', 'STOP_STUCK', 'NEEDS_REVIEW', 'NO_PRICE', 'SETTLEMENT_PENDING', 'SETTLEMENT_BLOCKED',
       'RECON_MISMATCH', 'RECON_STALE', 'BALANCE_LOW', 'SHARD_BALANCE_LOW', 'ALLOCATION_EXCEEDS_BALANCE',
       'DRAINING_EXPOSURE', 'ACCOUNT_DUE_FOR_ROTATION', 'ACCOUNT_READY_TO_RETIRE', 'FEE_MISMATCH',
-      'FEE_SCHEDULE_MISSING'];
+      'FEE_SCHEDULE_MISSING', 'FEE_SCHEDULE_CHANGED', 'FEE_TYPE_UNSUPPORTED'];
     const rulesDir = path.join(__dirname, '..', 'lambda', 'monitoring', 'rules');
     const source = fs.readdirSync(rulesDir).filter(f => f.endsWith('.ts'))
       .map(f => fs.readFileSync(path.join(rulesDir, f), 'utf8')).join('\n');
     const produced = new Set([...source.matchAll(/'([A-Z][A-Z_]+[A-Z])'/g)].map(m => m[1])
       .filter(k => !['SUBMITTED', 'STARTING', 'RUNNING', 'STOPPING', 'FAILED_', 'KILL_SWITCH', 'DRAINING', 'ACTIVE',
         'RETIRED', 'BREAK', 'UNKNOWN_VENUE_POSITION', 'ERROR', 'OPEN', 'KALSHI', 'POLYMARKET_US', 'VENUE', 'MAKER',
-        'TAKER'].includes(k)));
+        'TAKER', 'VENUE_API'].includes(k)));
     for (const kind of produced) expect(kinds).toContain(kind);
     for (const kind of kinds) expect(ALERT_TYPES[kind]).toBeDefined();
   });

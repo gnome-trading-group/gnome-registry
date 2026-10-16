@@ -64,6 +64,8 @@ export const ALERT_TYPES: Record<string, AlertType> = {
   ACCOUNT_READY_TO_RETIRE: { severity: 'INFO', debounce: 1 },
   FEE_MISMATCH: { severity: 'INFO', debounce: 1 },
   FEE_SCHEDULE_MISSING: { severity: 'INFO', debounce: 1 },
+  FEE_SCHEDULE_CHANGED: { severity: 'INFO', debounce: 1 },
+  FEE_TYPE_UNSUPPORTED: { severity: 'INFO', debounce: 1 },
   // The tick's own: several sessions going silent at once is more likely the heartbeat path than the sessions.
   SESSIONS_SILENT_MULTIPLE: { severity: 'CRITICAL', debounce: 1 },
 
