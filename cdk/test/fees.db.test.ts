@@ -3,7 +3,8 @@ import { join } from 'path';
 import { Pool, PoolClient } from 'pg';
 import { connectExclusive, LOCK_TIMEOUT_MS, release } from './ledger-db';
 import { ValidationError } from '../lambda/endpoints/base';
-import { FeeScheduleHandler, validateDefinition } from '../lambda/endpoints/fees';
+import { FeeScheduleHandler } from '../lambda/endpoints/fees';
+import { validateDefinition } from '../lambda/fees/definition';
 import { ListingSpecHandler } from '../lambda/endpoints/listing-specs';
 import { ListingHandler } from '../lambda/endpoints/listings';
 

@@ -17,3 +17,7 @@ export const START_STUCK_AFTER_MS = 15 * 60_000;
 export const STOP_STUCK_AFTER_MS = 10 * 60_000;
 // Each bad-book resync forces a reconnect, and ten gateway errors a minute exit the session.
 export const BOOK_RESYNCS_PER_5M = 3;
+// Orders with a fill in this window have their venue fees checked against the registry's schedules; a cent per order
+// covers the one Polymarket US rounding we couldn't explain (2026-10-15).
+export const FEE_LOOKBACK_MS = 24 * 3_600_000;
+export const FEE_TOLERANCE_UNITS = 10_000_000n;

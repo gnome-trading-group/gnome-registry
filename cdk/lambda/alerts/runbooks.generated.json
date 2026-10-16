@@ -117,6 +117,23 @@
       ],
       "url": "https://github.com/gnome-trading-group/gnome-registry/blob/main/docs/runbooks/alerts/FATAL_ERROR.md"
     },
+    "FEE_MISMATCH": {
+      "summary": "A venue charged different fees than the schedule the registry holds for the listing.",
+      "firstSteps": [
+        "Open the listing in Security Master and check its Fees timeline.",
+        "Compare with the venue's published fees for that market.",
+        "Record the venue's new schedule, or fix the listing's fee group or event."
+      ],
+      "url": "https://github.com/gnome-trading-group/gnome-registry/blob/main/docs/runbooks/alerts/FEE_MISMATCH.md"
+    },
+    "FEE_SCHEDULE_MISSING": {
+      "summary": "A live fill landed where the registry knows no fee schedule for its listing.",
+      "firstSteps": [
+        "Open the listing in Security Master and check its Fees timeline.",
+        "Record the venue's schedule for that time."
+      ],
+      "url": "https://github.com/gnome-trading-group/gnome-registry/blob/main/docs/runbooks/alerts/FEE_SCHEDULE_MISSING.md"
+    },
     "GLOBAL_HALT": {
       "summary": "All trading is halted by a global kill switch.",
       "firstSteps": [

@@ -6,6 +6,7 @@ import { failed } from './failed';
 import { positions } from './positions';
 import { settlement } from './settlement';
 import { treasury } from './treasury';
+import { fees } from './fees';
 import { lifecycle } from './lifecycle';
 
 export * from './types';
@@ -21,5 +22,6 @@ export async function runRules(client: PoolClient, now: Date): Promise<Finding[]
     ...await failed(client, now),
     ...await settlement(client, now),
     ...await treasury(client, now),
+    ...await fees(client, now),
   ];
 }

@@ -1,4 +1,5 @@
-import { FeeScope, IFeeDefinition, IScheduleRow, resolveTimeline, validateDefinition } from '../lambda/endpoints/fees';
+import { IFeeDefinition, validateDefinition } from '../lambda/fees/definition';
+import { FeeScope, IScheduleRow, resolveTimeline } from '../lambda/fees/timeline';
 import { ValidationError } from '../lambda/endpoints/base';
 
 const curve = (taker: number, maker = 0): IFeeDefinition => ({

@@ -12,6 +12,7 @@ import group.gnometrading.sm.Listing;
 import group.gnometrading.sm.ListingSpec;
 import group.gnometrading.sm.Security;
 import group.gnometrading.sm.SecurityType;
+import group.gnometrading.sm.fee.FeeTimeline;
 import group.gnometrading.strings.ViewString;
 import java.nio.ByteBuffer;
 import java.util.stream.Stream;
@@ -317,7 +318,8 @@ class SecurityMasterTest {
     @ParameterizedTest
     @MethodSource("testGetListingSpecArguments")
     void testGetListingSpec(final int listingId, final String jsonResponse, final ListingSpec expected) {
-        when(registryConnection.get(new ViewString("/api/listing-specs?listingId=" + listingId)))
+        when(registryConnection.get(
+                        new ViewString("/api/listing-specs?listingId=" + listingId + "&from=1970-01-01T00:00:00Z")))
                 .thenReturn(ByteBuffer.wrap(jsonResponse.getBytes()));
         assertEquals(expected, securityMaster.getListingSpec(listingId));
         verify(registryConnection, times(1)).get(any());
@@ -340,12 +342,77 @@ class SecurityMasterTest {
 
     @Test
     void testGetListingSpecCaching() {
-        when(registryConnection.get(new ViewString("/api/listing-specs?listingId=42")))
+        when(registryConnection.get(new ViewString("/api/listing-specs?listingId=42&from=1970-01-01T00:00:00Z")))
                 .thenReturn(ByteBuffer.wrap(
                         "[{\"listing_id\": 42, \"tick_size\": 100, \"lot_size\": 1000, \"min_notional\": 0, \"contract_multiplier\": 1000000000}]"
                                 .getBytes()));
         assertSame(securityMaster.getListingSpec(42), securityMaster.getListingSpec(42));
         verify(registryConnection, times(1)).get(any());
+    }
+
+    @Test
+    void testGetListingSpecAtATime() {
+        when(registryConnection.get(new ViewString("/api/listing-specs?listingId=42&from=1970-01-01T00:00:00Z")))
+                .thenReturn(ByteBuffer.wrap(
+                        """
+                        [{"listing_id": 42, "tick_size": 10, "lot_size": 1, "effective_from": "1970-01-01T00:00:00.000Z"},
+                         {"listing_id": 42, "tick_size": 100, "lot_size": 1, "effective_from": "2026-07-01T00:00:00.000Z"}]"""
+                                .getBytes()));
+        final long july = java.time.Instant.parse("2026-07-01T00:00:00Z").getEpochSecond() * 1_000_000_000L;
+
+        assertEquals(10L, securityMaster.getListingSpec(42, july - 1).tickSize());
+        assertEquals(100L, securityMaster.getListingSpec(42, july).tickSize());
+        assertEquals(100L, securityMaster.getListingSpec(42).tickSize());
+        verify(registryConnection, times(1)).get(any());
+    }
+
+    @Test
+    void testGetListingSpecBeforeItsFirstIsNull() {
+        when(registryConnection.get(new ViewString("/api/listing-specs?listingId=42&from=1970-01-01T00:00:00Z")))
+                .thenReturn(ByteBuffer.wrap(
+                        """
+                        [{"listing_id": 42, "tick_size": 10, "lot_size": 1, "effective_from": "2026-07-01T00:00:00.000Z"}]"""
+                                .getBytes()));
+
+        assertNull(securityMaster.getListingSpec(42, 0));
+    }
+
+    @Test
+    void testGetFeeTimeline() {
+        when(registryConnection.get(new ViewString("/api/fees?listingIds=7")))
+                .thenReturn(ByteBuffer.wrap(
+                        """
+                        [{"listingId": 7, "timeline": [
+                          {"effectiveFrom": "2026-04-03T04:00:00.000Z", "effectiveTo": "2026-07-01T04:00:00.000Z",
+                           "scope": "EXCHANGE", "feeScheduleId": "1",
+                           "definition": {"currency": "USD",
+                             "components": [{"kind": "PRICE_CURVE", "taker": 0.05, "maker": -0.0125, "exponent": 1}],
+                             "rounding": {"mode": "HALF_EVEN", "increment": 0.01, "scope": "FILL"}}},
+                          {"effectiveFrom": "2026-07-01T04:00:00.000Z", "effectiveTo": null,
+                           "scope": "EXCHANGE", "feeScheduleId": "2",
+                           "definition": {"currency": "USD",
+                             "components": [{"kind": "NOTIONAL", "taker": 0.00045, "maker": 0.00015}],
+                             "rounding": {"mode": "NONE"}}}]}]"""
+                                .getBytes()));
+        final long april = java.time.Instant.parse("2026-04-03T04:00:00Z").getEpochSecond() * 1_000_000_000L;
+        final long july = java.time.Instant.parse("2026-07-01T04:00:00Z").getEpochSecond() * 1_000_000_000L;
+
+        final FeeTimeline timeline = securityMaster.getFeeTimeline(7);
+
+        assertNull(timeline.at(april - 1));
+        // 1 contract at $0.436, taker: 0.05 × 0.436 × 0.564 = $0.0123, half-even to the cent.
+        assertEquals(10_000_000L, timeline.at(april).fee(true, 436_000_000L, 1_000_000L, false, null));
+        assertEquals(45_000_000L, timeline.at(july).fee(true, 100_000_000_000L, 1_000_000L, false, null));
+        assertSame(timeline, securityMaster.getFeeTimeline(7));
+        verify(registryConnection, times(1)).get(any());
+    }
+
+    @Test
+    void testGetFeeTimelineForAListingWithNoFees() {
+        when(registryConnection.get(new ViewString("/api/fees?listingIds=7")))
+                .thenReturn(ByteBuffer.wrap("[{\"listingId\": 7, \"timeline\": []}]".getBytes()));
+
+        assertEquals(0, securityMaster.getFeeTimeline(7).size());
     }
 
     @Test
@@ -370,7 +437,7 @@ class SecurityMasterTest {
 
     @Test
     void testGetListingSpecEmptyCaching() {
-        when(registryConnection.get(new ViewString("/api/listing-specs?listingId=1")))
+        when(registryConnection.get(new ViewString("/api/listing-specs?listingId=1&from=1970-01-01T00:00:00Z")))
                 .thenReturn(ByteBuffer.wrap("[]".getBytes()));
 
         assertNull(securityMaster.getListingSpec(1));

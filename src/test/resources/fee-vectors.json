@@ -1,0 +1,112 @@
+{
+  "about": "Fee cases both gnome-registry (FeeVectorsTest) and gnomepy (tests/test_fees.py) must reproduce exactly; keep the two copies identical. Prices and fees in price units (1e9 = $1), quantities in size units (1e6 = 1 contract). Fills in a case with sharedOrderState belong to one order.",
+  "cases": [
+    {
+      "name": "Kalshi: one taker order matching a 10-lot then a 1-lot (real demo fill, 2026-10-14)",
+      "definition": {"currency": "USD", "components": [{"kind": "PRICE_CURVE", "taker": 0.07, "maker": 0.0175, "exponent": 1}],
+                     "rounding": {"mode": "CEIL", "increment": 0.0001, "scope": "ORDER_ACCUMULATOR"}},
+      "sharedOrderState": true,
+      "fills": [
+        {"buy": true, "price": 550000000, "qty": 10000000, "maker": false, "fee": 173300000},
+        {"buy": true, "price": 550000000, "qty": 1000000, "maker": false, "fee": 17300000}
+      ]
+    },
+    {
+      "name": "Kalshi: taker then resting maker fill on one order",
+      "definition": {"currency": "USD", "components": [{"kind": "PRICE_CURVE", "taker": 0.07, "maker": 0.0175, "exponent": 1}],
+                     "rounding": {"mode": "CEIL", "increment": 0.0001, "scope": "ORDER_ACCUMULATOR"}},
+      "sharedOrderState": true,
+      "fills": [
+        {"buy": true, "price": 560000000, "qty": 5000000, "maker": false, "fee": 86300000},
+        {"buy": true, "price": 560000000, "qty": 3000000, "maker": true, "fee": 12900000}
+      ]
+    },
+    {
+      "name": "Kalshi: lone fills, buy and maker sell",
+      "definition": {"currency": "USD", "components": [{"kind": "PRICE_CURVE", "taker": 0.07, "maker": 0.0175, "exponent": 1}],
+                     "rounding": {"mode": "CEIL", "increment": 0.0001, "scope": "ORDER_ACCUMULATOR"}},
+      "sharedOrderState": false,
+      "fills": [
+        {"buy": true, "price": 550000000, "qty": 1000000, "maker": false, "fee": 17400000},
+        {"buy": false, "price": 500000000, "qty": 10000000, "maker": true, "fee": 43800000}
+      ]
+    },
+    {
+      "name": "Kalshi before 2026-03-03: each fee rounded up to the cent",
+      "definition": {"currency": "USD", "components": [{"kind": "PRICE_CURVE", "taker": 0.07, "maker": 0, "exponent": 1}],
+                     "rounding": {"mode": "CEIL", "increment": 0.01, "scope": "FILL"}},
+      "sharedOrderState": false,
+      "fills": [
+        {"buy": true, "price": 550000000, "qty": 1000000, "maker": false, "fee": 20000000},
+        {"buy": true, "price": 550000000, "qty": 1000000, "maker": true, "fee": 0}
+      ]
+    },
+    {
+      "name": "Polymarket US: real fills on our account, 2026-10-08 to 2026-10-14",
+      "definition": {"currency": "USD", "components": [{"kind": "PRICE_CURVE", "taker": 0.0695, "maker": -0.0125, "exponent": 1}],
+                     "rounding": {"mode": "HALF_EVEN", "increment": 0.01, "scope": "FILL"}},
+      "sharedOrderState": false,
+      "fills": [
+        {"buy": true, "price": 436000000, "qty": 1000000, "maker": false, "fee": 20000000},
+        {"buy": true, "price": 219000000, "qty": 1000000, "maker": false, "fee": 10000000},
+        {"buy": true, "price": 50000000, "qty": 1000000, "maker": false, "fee": 0},
+        {"buy": true, "price": 850000000, "qty": 21360000, "maker": false, "fee": 190000000},
+        {"buy": true, "price": 340000000, "qty": 3000000, "maker": true, "fee": -10000000},
+        {"buy": false, "price": 900000000, "qty": 15470000, "maker": true, "fee": -20000000}
+      ]
+    },
+    {
+      "name": "Half to even: exact halves go to the even cent",
+      "definition": {"currency": "USD", "components": [{"kind": "PER_UNIT", "taker": 0.005, "maker": 0}],
+                     "rounding": {"mode": "HALF_EVEN", "increment": 0.01, "scope": "FILL"}},
+      "sharedOrderState": false,
+      "fills": [
+        {"buy": true, "price": 1000000000, "qty": 1000000, "maker": false, "fee": 0},
+        {"buy": true, "price": 1000000000, "qty": 3000000, "maker": false, "fee": 20000000}
+      ]
+    },
+    {
+      "name": "Polymarket International: taker buys decoded from Polygon OrderFilled events",
+      "definition": {"currency": "USD", "components": [{"kind": "PRICE_CURVE", "taker": 0.07, "maker": 0, "exponent": 1}],
+                     "rounding": {"mode": "HALF_UP", "increment": 0.00001, "scope": "FILL"}},
+      "sharedOrderState": false,
+      "fills": [
+        {"buy": true, "price": 370000000, "qty": 54054055, "maker": false, "fee": 882000000},
+        {"buy": true, "price": 640000000, "qty": 570000000, "maker": false, "fee": 9192960000},
+        {"buy": true, "price": 370000000, "qty": 54054055, "maker": true, "fee": 0}
+      ]
+    },
+    {
+      "name": "Curve with exponent 2, unrounded",
+      "definition": {"currency": "USD", "components": [{"kind": "PRICE_CURVE", "taker": 0.25, "maker": 0, "exponent": 2}],
+                     "rounding": {"mode": "NONE"}},
+      "sharedOrderState": false,
+      "fills": [
+        {"buy": true, "price": 500000000, "qty": 100000000, "maker": false, "fee": 1562500000},
+        {"buy": false, "price": 150000000, "qty": 7000000, "maker": false, "fee": 28448437}
+      ]
+    },
+    {
+      "name": "Hyperliquid perps base tier: a share of notional",
+      "definition": {"currency": "USD", "components": [{"kind": "NOTIONAL", "taker": 0.00045, "maker": 0.00015}],
+                     "rounding": {"mode": "NONE"}},
+      "sharedOrderState": false,
+      "fills": [
+        {"buy": true, "price": 60000000000000, "qty": 2000000, "maker": false, "fee": 54000000000},
+        {"buy": false, "price": 60000000000000, "qty": 2000000, "maker": true, "fee": 18000000000},
+        {"buy": true, "price": 3123456789012, "qty": 1234567, "maker": false, "fee": 1735252504}
+      ]
+    },
+    {
+      "name": "A sells-only component on top of a per-contract fee",
+      "definition": {"currency": "USD", "components": [{"kind": "PER_UNIT", "taker": 0.01, "maker": 0.01},
+                                                       {"kind": "NOTIONAL", "taker": 0.0000206, "maker": 0.0000206, "side": "SELL"}],
+                     "rounding": {"mode": "NONE"}},
+      "sharedOrderState": false,
+      "fills": [
+        {"buy": true, "price": 100000000000, "qty": 100000000, "maker": false, "fee": 1000000000},
+        {"buy": false, "price": 100000000000, "qty": 100000000, "maker": false, "fee": 1206000000}
+      ]
+    }
+  ]
+}

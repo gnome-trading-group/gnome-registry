@@ -18,6 +18,8 @@ import group.gnometrading.sm.Listing;
 import group.gnometrading.sm.ListingSpec;
 import group.gnometrading.sm.Security;
 import group.gnometrading.sm.SecurityType;
+import group.gnometrading.sm.fee.FeeTimeline;
+import group.gnometrading.sm.fee.FeeTimelineJson;
 import group.gnometrading.strings.ExpandingMutableString;
 import group.gnometrading.strings.MutableString;
 import java.io.IOException;
@@ -36,10 +38,35 @@ public final class SecurityMaster {
     private static final String EVENT_ENDPOINT = "/api/events?";
     private static final String EVENT_CONTRACT_ENDPOINT = "/api/event-contracts?";
     private static final String CONTRACT_RELATIONSHIP_ENDPOINT = "/api/contract-relationships?";
+    private static final String FEE_ENDPOINT = "/api/fees?";
+    // Every spec a listing has had, each from when it held at the venue.
+    private static final String SPEC_HISTORY_PARAMETER = "&from=1970-01-01T00:00:00Z";
+    private static final long NANOS_PER_MILLI = 1_000_000L;
 
     private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper()
             .setPropertyNamingStrategy(PropertyNamingStrategies.SNAKE_CASE)
             .configure(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false);
+
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    private record ListingSpecRow(
+            int listingId,
+            long tickSize,
+            long lotSize,
+            long minNotional,
+            long contractMultiplier,
+            long minSize,
+            String effectiveFrom) {}
+
+    /** A listing's specs in effective order; each holds from its start until the next one's. */
+    private record ListingSpecHistory(long[] startNanos, ListingSpec[] specs) {
+        ListingSpec at(final long nanos) {
+            ListingSpec spec = null;
+            for (int i = 0; i < this.startNanos.length && this.startNanos[i] <= nanos; i++) {
+                spec = this.specs[i];
+            }
+            return spec;
+        }
+    }
 
     @JsonIgnoreProperties(ignoreUnknown = true)
     private record ListingResponse(
@@ -61,7 +88,7 @@ public final class SecurityMaster {
             false,
             0);
     private static final Exchange EMPTY_EXCHANGE = new Exchange(-1, null, null, null, null);
-    private static final ListingSpec EMPTY_LISTING_SPEC = new ListingSpec(-1, -1, -1, -1, 0L, 0L);
+    private static final ListingSpecHistory NO_SPECS = new ListingSpecHistory(new long[0], new ListingSpec[0]);
     private static final Event EMPTY_EVENT = new Event(-1, null, null, null, false, 0L, 0L);
     private static final EventContract EMPTY_EVENT_CONTRACT = new EventContract(-1, -1, -1, null);
 
@@ -74,12 +101,14 @@ public final class SecurityMaster {
     private final MutableString eventPath;
     private final MutableString eventContractPath;
     private final MutableString contractRelationshipPath;
+    private final MutableString feePath;
 
     private final IntMap<Security> securityCache;
     private final IntMap<Exchange> exchangeCache;
     private final IntMap<Listing> listingCache;
     private final LongMap<Listing> listingByExchangeSecurity;
-    private final IntMap<ListingSpec> listingSpecCache;
+    private final IntMap<ListingSpecHistory> listingSpecCache;
+    private final IntMap<FeeTimeline> feeTimelineCache;
     private final IntMap<Event> eventCache;
     private final IntMap<EventContract> eventContractBySecurityCache;
 
@@ -95,12 +124,14 @@ public final class SecurityMaster {
         this.eventPath = new ExpandingMutableString(EVENT_ENDPOINT);
         this.eventContractPath = new ExpandingMutableString(EVENT_CONTRACT_ENDPOINT);
         this.contractRelationshipPath = new ExpandingMutableString(CONTRACT_RELATIONSHIP_ENDPOINT);
+        this.feePath = new ExpandingMutableString(FEE_ENDPOINT);
 
         this.securityCache = new IntHashMap<>();
         this.exchangeCache = new IntHashMap<>();
         this.listingCache = new IntHashMap<>();
         this.listingByExchangeSecurity = new LongHashMap<>();
         this.listingSpecCache = new IntHashMap<>();
+        this.feeTimelineCache = new IntHashMap<>();
         this.eventCache = new IntHashMap<>();
         this.eventContractBySecurityCache = new IntHashMap<>();
     }
@@ -198,24 +229,68 @@ public final class SecurityMaster {
         return ((long) exchangeId << Integer.SIZE) | Integer.toUnsignedLong(securityId);
     }
 
+    /** The listing's spec in force now. */
     public ListingSpec getListingSpec(final int listingId) {
-        if (this.listingSpecCache.containsKey(listingId)) {
-            final ListingSpec cached = this.listingSpecCache.get(listingId);
-            return cached == EMPTY_LISTING_SPEC ? null : cached;
-        }
+        return getListingSpec(listingId, System.currentTimeMillis() * NANOS_PER_MILLI);
+    }
 
+    /**
+     * The listing's spec in force at {@code epochNanos}, or null if it had none yet. A listing's whole history is
+     * fetched once, so a backtest sees each spec only from when it held at the venue.
+     */
+    public ListingSpec getListingSpec(final int listingId, final long epochNanos) {
+        ListingSpecHistory history = this.listingSpecCache.get(listingId);
+        if (history == null) {
+            history = fetchListingSpecs(listingId);
+            this.listingSpecCache.put(listingId, history);
+        }
+        return history.at(epochNanos);
+    }
+
+    private ListingSpecHistory fetchListingSpecs(final int listingId) {
         final int originalLength = addParameters(this.listingSpecPath, "listingId", listingId);
+        this.listingSpecPath.appendString(SPEC_HISTORY_PARAMETER);
         final ByteBuffer response = this.registryConnection.get(this.listingSpecPath);
         this.listingSpecPath.setLength(originalLength);
 
         try {
-            final ListingSpec[] result = OBJECT_MAPPER.readValue(toByteArray(response), ListingSpec[].class);
-            if (result.length == 0) {
-                this.listingSpecCache.put(listingId, EMPTY_LISTING_SPEC);
-                return null;
+            final ListingSpecRow[] rows = OBJECT_MAPPER.readValue(toByteArray(response), ListingSpecRow[].class);
+            if (rows.length == 0) {
+                return NO_SPECS;
             }
-            this.listingSpecCache.put(listingId, result[0]);
-            return this.listingSpecCache.get(listingId);
+            final long[] starts = new long[rows.length];
+            final ListingSpec[] specs = new ListingSpec[rows.length];
+            for (int i = 0; i < rows.length; i++) {
+                final ListingSpecRow row = rows[i];
+                starts[i] = row.effectiveFrom() == null ? 0 : FeeTimelineJson.epochNanos(row.effectiveFrom());
+                specs[i] = new ListingSpec(
+                        row.listingId(),
+                        row.tickSize(),
+                        row.lotSize(),
+                        row.minNotional(),
+                        row.contractMultiplier(),
+                        row.minSize());
+            }
+            return new ListingSpecHistory(starts, specs);
+        } catch (IOException e) {
+            throw new RuntimeException(e);
+        }
+    }
+
+    /** The listing's fee schedules over time, as the registry resolves them; empty if it has none. */
+    public FeeTimeline getFeeTimeline(final int listingId) {
+        final FeeTimeline cached = this.feeTimelineCache.get(listingId);
+        if (cached != null) {
+            return cached;
+        }
+        final int originalLength = addParameters(this.feePath, "listingIds", listingId);
+        final ByteBuffer response = this.registryConnection.get(this.feePath);
+        this.feePath.setLength(originalLength);
+
+        try {
+            final FeeTimeline timeline = FeeTimelineJson.parse(toByteArray(response), listingId);
+            this.feeTimelineCache.put(listingId, timeline);
+            return timeline;
         } catch (IOException e) {
             throw new RuntimeException(e);
         }
