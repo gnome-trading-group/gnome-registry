@@ -40,19 +40,22 @@ const STANDARD = 'standard';
 const LOW_LATENCY = 'low_latency';
 
 // vCPUs per supported size. Each low-latency size has an AMI whose isolcpus range matches it; c7i.large and
-// c7i.xlarge have too few cores to isolate any, so they only run the standard profile.
+// c7i.xlarge have too few cores to isolate any, so they only run the standard profile. t3.small is burstable (2 GB):
+// for paper sessions that mostly wait, at about a quarter of c7i.large's price.
 export const INSTANCE_VCPUS: Record<string, number> = {
+  't3.small': 2,
   'c7i.large': 2,
   'c7i.xlarge': 4,
   'c7i.4xlarge': 16,
   'c7i.8xlarge': 32,
   'c7i.12xlarge': 48,
 };
-// c7i.large measured at ~2-7% CPU and ~370 MB with five listings on the standard profile (2026-10).
-const DEFAULT_INSTANCE_TYPE: Record<string, string> = {
-  [STANDARD]: 'c7i.large',
-  [LOW_LATENCY]: 'c7i.4xlarge',
-};
+// c7i.large measured at ~2-7% CPU and ~370 MB with five listings on the standard profile (2026-10). t3.small ran a
+// one-listing session at ~9% CPU (under its 20% baseline, so credits grew) and ~630 MB used of 1.9 GB (2026-10-16).
+export function defaultInstanceType(mode: string, profile: string): string {
+  if (profile === LOW_LATENCY) return 'c7i.4xlarge';
+  return mode === 'paper' ? 't3.small' : 'c7i.large';
+}
 
 export const ACTIVE_STATUSES = ['SUBMITTED', 'STARTING', 'RUNNING'];
 
@@ -394,7 +397,7 @@ async function handleLaunch(body: string | null) {
   // Written back so the instance, the stored session and a relaunch all see the profile actually chosen, rather
   // than each applying its own default.
   s.config['latency.profile'] = profile;
-  const instanceType = s.instanceType ?? DEFAULT_INSTANCE_TYPE[profile];
+  const instanceType = s.instanceType ?? defaultInstanceType(s.mode, profile);
   if (!(instanceType in INSTANCE_VCPUS)) {
     return createResponse(400, {
       message: `Unsupported instanceType ${instanceType}; expected one of ${Object.keys(INSTANCE_VCPUS).join(', ')}`,

@@ -283,14 +283,17 @@ describe('POST /strategy-sessions/launch', () => {
     expect(sessionEnv().GNOMEPY_VERSION).toBe('2.18.1');
   });
 
-  it('runs the standard profile on the standard AMI and defaults to c7i.large', async () => {
-    const body = launchBody({}, { 'latency.profile': 'standard' });
+  it.each([
+    ['paper', 't3.small'],
+    ['live', 'c7i.large'],
+  ])('runs a standard-profile %s session on the standard AMI, defaulting to %s', async (mode, instanceType) => {
+    const body = launchBody({ mode }, { 'latency.profile': 'standard' });
     delete (body as any).instanceType;
 
     await launcher.handler(apiEvent('/strategy-sessions/launch', body));
 
     expect(runInstancesInput().ImageId).toBe('ami-std');
-    expect(runInstancesInput().InstanceType).toBe('c7i.large');
+    expect(runInstancesInput().InstanceType).toBe(instanceType);
     expect(sessionEnv().LATENCY_PROFILE).toBe('standard');
   });
 
@@ -316,6 +319,14 @@ describe('POST /strategy-sessions/launch', () => {
     expect(runInstancesInput().InstanceType).toBe('c7i.large');
   });
 
+  it('runs t3.small on the standard AMI', async () => {
+    await launcher.handler(apiEvent('/strategy-sessions/launch',
+      launchBody({ instanceType: 't3.small' }, { 'latency.profile': 'standard' })));
+
+    expect(runInstancesInput().ImageId).toBe('ami-std');
+    expect(runInstancesInput().InstanceType).toBe('t3.small');
+  });
+
   it('places the instance in the requested availability zone', async () => {
     await launcher.handler(apiEvent('/strategy-sessions/launch', launchBody({ availabilityZone: 'us-east-1b' })));
     expect(runInstancesInput().SubnetId).toBe('subnet-b');
@@ -325,6 +336,7 @@ describe('POST /strategy-sessions/launch', () => {
     [{ instanceType: 'm5.large' }, {}, 'Unsupported instanceType'],
     [{ instanceType: 'c7i.xlarge' }, {}, 'too small to isolate'],
     [{ instanceType: 'c7i.large' }, {}, 'too small to isolate'],
+    [{ instanceType: 't3.small' }, {}, 'too small to isolate'],
     [{}, { 'latency.profile': 'turbo' }, 'Unknown latency.profile'],
     [{ availabilityZone: 'us-east-1z' }, {}, 'No orchestrator subnet'],
   ])('rejects %p %p before creating anything', async (overrides, config, message) => {
