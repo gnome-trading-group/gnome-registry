@@ -10,6 +10,7 @@ import { SSMClient, GetParameterCommand } from '@aws-sdk/client-ssm';
 import { APIGatewayClient, GetApiKeyCommand } from '@aws-sdk/client-api-gateway';
 import { CloudWatchLogsClient, GetLogEventsCommand } from '@aws-sdk/client-cloudwatch-logs';
 import { EventBridgeClient, PutEventsCommand } from '@aws-sdk/client-eventbridge';
+import { ISessionSimulation, PAPER_BLOCKS, validateSessionSimulation } from '../simulation/parameters';
 import { ALERT_BUS_NAME, ALERT_DETAIL_TYPE, ALERT_EVENT_SOURCE, AlertEvent } from '../alerts/model';
 
 const REGISTRY_API_URL = (process.env.REGISTRY_API_URL ?? '').replace(/\/$/, '');
@@ -114,22 +115,69 @@ function toEnvVarName(key: string): string {
 }
 
 // The listings and exchanges endpoints return their rows as stored, in snake_case.
-async function resolveRegion(listingIds: number[]): Promise<string> {
-  const exchangeIds = new Set<number>();
+async function listingExchanges(listingIds: number[]): Promise<Map<number, number>> {
+  const exchangeOf = new Map<number, number>();
   for (const listingId of listingIds) {
     const listings = await registryFetch('/listings', 'GET', undefined, { listingId: String(listingId) });
     if (!listings?.length) throw new Error(`Listing not found: ${listingId}`);
-    exchangeIds.add(listings[0].exchange_id);
+    exchangeOf.set(listingId, listings[0].exchange_id);
   }
-  const regions = new Set<string>();
+  return exchangeOf;
+}
+
+interface ExchangeRow {
+  exchange_id: number;
+  exchange_code: string;
+  region: string;
+}
+
+async function exchangeRows(exchangeIds: Set<number>): Promise<Map<number, ExchangeRow>> {
+  const rows = new Map<number, ExchangeRow>();
   for (const exchangeId of exchangeIds) {
     const exchanges = await registryFetch('/exchanges', 'GET', undefined, { exchangeId: String(exchangeId) });
     if (!exchanges?.length) throw new Error(`Exchange not found: ${exchangeId}`);
-    regions.add(exchanges[0].region);
+    rows.set(exchangeId, exchanges[0]);
   }
+  return rows;
+}
+
+function resolveRegion(exchanges: Map<number, ExchangeRow>): string {
+  const regions = new Set([...exchanges.values()].map((e) => e.region));
   if (regions.size === 0) throw new Error('No listings provided');
   if (regions.size > 1) throw new Error(`Listings span multiple regions: ${[...regions].join(', ')}`);
   return [...regions][0];
+}
+
+// Refuses a paper session that would fail on its instance or quietly not simulate as asked: overrides for an exchange
+// that doesn't exist (a misspelt code would leave that exchange's listings on the registry's parameters), or a listing
+// whose exchange has no simulation parameters as of the session's pinned time and which the config doesn't fully
+// override. Overrides for a real exchange the session doesn't trade are fine: a rule launching one session per venue
+// carries every venue's.
+export async function simulationProblem(
+  simulation: ISessionSimulation, exchangeOf: Map<number, number>, exchanges: Map<number, ExchangeRow>,
+): Promise<string | null> {
+  const traded = new Set([...exchanges.values()].map((e) => e.exchange_code));
+  const unknown: string[] = [];
+  for (const code of Object.keys(simulation.exchanges ?? {}).filter((c) => !traded.has(c))) {
+    const found = await registryFetch('/exchanges', 'GET', undefined, { exchangeCode: code });
+    if (!found?.length) unknown.push(code);
+  }
+  if (unknown.length) return `simulation.exchanges ${unknown.join(', ')} are not exchanges`;
+  const strayListings = Object.keys(simulation.listings ?? {}).filter((id) => !exchangeOf.has(Number(id)));
+  if (strayListings.length) return `simulation.listings ${strayListings.join(', ')} are not listings of the session`;
+
+  const rows: { exchange_id: number }[] = await registryFetch(
+    '/simulation-parameters', 'GET', undefined, { knownAsOf: simulation.as_of as string });
+  const covered = new Set(rows.map((r) => r.exchange_id));
+  const uncovered: number[] = [];
+  for (const [listingId, exchangeId] of exchangeOf) {
+    if (covered.has(exchangeId)) continue;
+    const layers = [simulation.exchanges?.[exchanges.get(exchangeId)!.exchange_code], simulation.listings?.[String(listingId)]];
+    if (!PAPER_BLOCKS.every((block) => layers.some((layer) => layer && block in layer))) uncovered.push(listingId);
+  }
+  if (uncovered.length === 0) return null;
+  return `No simulation parameters for the exchange of listing(s) ${uncovered.join(', ')} as of ${simulation.as_of}:`
+    + ' record them in the Security Master, or set every block for those listings in simulation';
 }
 
 interface NetworkConfig {
@@ -261,6 +309,11 @@ export function buildSessionEnvironment(
   for (const [key, value] of Object.entries(s.config)) {
     // The registry binds the session's accounts when it is created; the orchestrator reads them from there.
     if (key === 'accounts') continue;
+    // One JSON value, in the shape a backtest config takes (gnome-simulation SessionSimulationConfig).
+    if (key === 'simulation') {
+      env.SIMULATION_JSON = JSON.stringify(value);
+      continue;
+    }
     if (key.startsWith('strategy.args.')) {
       args[key.substring('strategy.args.'.length)] = value;
     } else if (key.startsWith(OVERRIDE_PREFIX)) {
@@ -371,7 +424,30 @@ async function handleLaunch(body: string | null) {
     }
   }
 
-  const region = s.region ?? await resolveRegion(listingIds);
+  const exchangeOf = await listingExchanges(listingIds);
+  const exchanges = await exchangeRows(new Set(exchangeOf.values()));
+  if (s.mode === 'paper') {
+    let simulation: ISessionSimulation;
+    try {
+      simulation = validateSessionSimulation(s.config.simulation);
+    } catch (e) {
+      return createResponse(400, { message: (e as Error).message });
+    }
+    // Pinned so the instance, the stored session and a replay all simulate with the parameters and fees recorded by
+    // then, whatever is recorded later.
+    const asOf = simulation.as_of ?? new Date().toISOString();
+    if (typeof asOf !== 'string' || Number.isNaN(Date.parse(asOf))) {
+      return createResponse(400, { message: 'simulation.as_of must be an ISO-8601 timestamp' });
+    }
+    simulation.as_of = new Date(asOf).toISOString();
+    s.config.simulation = simulation;
+    const problem = await simulationProblem(simulation, exchangeOf, exchanges);
+    if (problem) return createResponse(400, { message: problem });
+  } else {
+    delete s.config.simulation;
+  }
+
+  const region = s.region ?? resolveRegion(exchanges);
   const network = await discoverNetworkConfig(region);
   const subnet = s.availabilityZone
     ? network.subnets.find(n => n.availabilityZone === s.availabilityZone)

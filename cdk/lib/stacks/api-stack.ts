@@ -116,6 +116,7 @@ export class ApiStack extends cdk.Stack {
 
     // Fee schedules are append-only, so there is no DELETE or PATCH: a fix is a new row.
     this.attachMethods('fees', 'fees.ts', ['GET', 'POST'], ['GET', 'POST']);
+    this.attachMethods('simulation-parameters', 'simulation-parameters.ts', ['GET', 'POST'], ['GET', 'POST']);
 
     // The controller's PnL, ledger and monitoring reads (PnL is derived from the ledger's fills and marks; nothing
     // about it is stored). One Lambda serves them all, for people only.

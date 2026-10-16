@@ -112,6 +112,10 @@ function runInstancesInput() {
   return ec2Calls.find(c => c.kind === 'RunInstances')!.input;
 }
 
+// The exchanges with simulation parameters as of the queried time, and the queries made.
+let simulationRows: { exchange_id: number }[] = [];
+let simulationQueries: string[] = [];
+
 function sessionEnv(): Record<string, string> {
   const script = Buffer.from(runInstancesInput().UserData, 'base64').toString();
   const payload = /echo '([^']+)' \| base64 -d/.exec(script)![1];
@@ -126,6 +130,8 @@ beforeEach(() => {
   patchBodies = [];
   postBodies = [];
   sleeps = [];
+  simulationRows = [{ exchange_id: 5 }];
+  simulationQueries = [];
   patchStatus = 200;
   patchStatusQueue = [];
   postStatus = 200;
@@ -149,9 +155,14 @@ beforeEach(() => {
       haltBodies.push(JSON.parse(init.body));
       return haltFails ? jsonResponse({ message: 'db down' }, 500) : jsonResponse({ policyId: 9 });
     }
+    if (method === 'GET' && path === '/simulation-parameters') {
+      simulationQueries.push(url);
+      return jsonResponse(simulationRows);
+    }
     if (method === 'GET' && path === '/listings') return jsonResponse([{ listing_id: 1, exchange_id: 5 }]);
     if (method === 'GET' && path === '/exchanges') {
-      return jsonResponse(url.includes('exchangeId=5') ? [{ exchange_id: 5, region: 'us-east-1' }] : []);
+      if (url.includes('exchangeCode=POLYMARKET_US')) return jsonResponse([{ exchange_id: 6, exchange_code: 'POLYMARKET_US' }]);
+      return jsonResponse(url.includes('exchangeId=5') ? [{ exchange_id: 5, exchange_code: 'KALSHI', region: 'us-east-1' }] : []);
     }
     if (method === 'GET') return jsonResponse([sessionRow]);
     if (method === 'POST') {
@@ -182,6 +193,9 @@ describe('POST /strategy-sessions/launch', () => {
     expect(response.statusCode).toBe(200);
     expect(events).toEqual([
       'SSM /gnome/orchestrator/latest-version',
+      'GET /listings',
+      'GET /exchanges',
+      'GET /simulation-parameters',
       'PyPI',
       'SSM /gnome/orchestrator/ami/16core',
       // Read once per container.
@@ -564,6 +578,77 @@ describe('orchestrator overrides', () => {
     };
     expect((await get('1.10.0')).version).toBe('1.10.0');
     expect((await get()).version).toBe('1.12.2');
+  });
+});
+
+describe('paper simulation', () => {
+  const pinned = (body: any) => postBodies[0].config.simulation;
+
+  it('pins the time the session reads the registry at, in its stored config and on the instance', async () => {
+    const res = await launcher.handler(apiEvent('/strategy-sessions/launch', launchBody()));
+    expect(res.statusCode).toBe(200);
+    const asOf = pinned(postBodies[0]).as_of;
+    expect(Date.parse(asOf)).not.toBeNaN();
+    expect(JSON.parse(sessionEnv().SIMULATION_JSON)).toEqual({ as_of: asOf });
+    expect(simulationQueries[0]).toContain(`knownAsOf=${encodeURIComponent(asOf)}`);
+  });
+
+  it('keeps a pinned time and the overrides, so a replay simulates as the original run did', async () => {
+    const simulation = {
+      as_of: '2026-10-01T00:00:00Z', seed: 7,
+      exchanges: { KALSHI: { queue_model: { type: 'optimistic' } } },
+      listings: { 1: { network_latency: { type: 'static', latency_nanos: 1 } } },
+    };
+    await launcher.handler(apiEvent('/strategy-sessions/launch', launchBody({}, { simulation })));
+    expect(pinned(postBodies[0])).toEqual({ ...simulation, as_of: '2026-10-01T00:00:00.000Z' });
+    expect(JSON.parse(sessionEnv().SIMULATION_JSON).exchanges.KALSHI.queue_model.type).toBe('optimistic');
+  });
+
+  it("refuses a listing whose exchange has no parameters, before anything is recorded or launched", async () => {
+    simulationRows = [];
+    const res = await launcher.handler(apiEvent('/strategy-sessions/launch', launchBody()));
+    expect(res.statusCode).toBe(400);
+    expect(JSON.parse(res.body).message).toContain('No simulation parameters for the exchange of listing(s) 1');
+    expect(postBodies).toHaveLength(0);
+    expect(ec2Calls).toHaveLength(0);
+  });
+
+  it('accepts such a listing when the session sets every block for it', async () => {
+    simulationRows = [];
+    const simulation = {
+      exchanges: { KALSHI: { network_latency: { type: 'static', latency_nanos: 0 }, queue_model: { type: 'risk_averse' } } },
+      listings: { 1: { order_processing_latency: { type: 'static', latency_nanos: 0 }, self_trade_prevention: 'CANCEL_INCOMING' } },
+    };
+    const res = await launcher.handler(apiEvent('/strategy-sessions/launch', launchBody({}, { simulation })));
+    expect(res.statusCode).toBe(200);
+  });
+
+  it('refuses overrides for an unknown exchange or a listing the session does not trade', async () => {
+    let res = await launcher.handler(apiEvent('/strategy-sessions/launch',
+      launchBody({}, { simulation: { exchanges: { POLYMARKET: { queue_model: { type: 'optimistic' } } } } })));
+    expect(JSON.parse(res.body).message).toBe('simulation.exchanges POLYMARKET are not exchanges');
+    res = await launcher.handler(apiEvent('/strategy-sessions/launch',
+      launchBody({}, { simulation: { listings: { 2: { queue_model: { type: 'optimistic' } } } } })));
+    expect(JSON.parse(res.body).message).toBe('simulation.listings 2 are not listings of the session');
+  });
+
+  it("keeps overrides for a real exchange the session doesn't trade, as a rule launching every venue sends", async () => {
+    const res = await launcher.handler(apiEvent('/strategy-sessions/launch',
+      launchBody({}, { simulation: { exchanges: { POLYMARKET_US: { queue_model: { type: 'optimistic' } } } } })));
+    expect(res.statusCode).toBe(200);
+  });
+
+  it('refuses a block the orchestrator could not read', async () => {
+    const res = await launcher.handler(apiEvent('/strategy-sessions/launch',
+      launchBody({}, { simulation: { exchanges: { KALSHI: { network_latency: { latency_nanos: 5 } } } } })));
+    expect(res.statusCode).toBe(400);
+    expect(JSON.parse(res.body).message).toContain('simulation.exchanges.KALSHI.network_latency.type');
+  });
+
+  it('is not part of a live session', async () => {
+    simulationRows = [];
+    await launcher.handler(apiEvent('/strategy-sessions/launch', launchBody({ mode: 'live' }, { simulation: { seed: 1 } })));
+    expect(simulationQueries).toHaveLength(0);
   });
 });
 

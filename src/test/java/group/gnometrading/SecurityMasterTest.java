@@ -12,6 +12,7 @@ import group.gnometrading.sm.Listing;
 import group.gnometrading.sm.ListingSpec;
 import group.gnometrading.sm.Security;
 import group.gnometrading.sm.SecurityType;
+import group.gnometrading.sm.SimulationParameters;
 import group.gnometrading.sm.fee.FeeTimeline;
 import group.gnometrading.strings.ViewString;
 import java.nio.ByteBuffer;
@@ -413,6 +414,66 @@ class SecurityMasterTest {
                 .thenReturn(ByteBuffer.wrap("[{\"listingId\": 7, \"timeline\": []}]".getBytes()));
 
         assertEquals(0, securityMaster.getFeeTimeline(7).size());
+    }
+
+    @Test
+    void testGetFeeTimelineAsKnownAtAPinnedTime() {
+        when(registryConnection.get(new ViewString("/api/fees?listingIds=7&knownAsOf=2026-10-01T00:00:00.000Z")))
+                .thenReturn(ByteBuffer.wrap("[{\"listingId\": 7, \"timeline\": []}]".getBytes()));
+
+        final FeeTimeline timeline = securityMaster.getFeeTimeline(7, "2026-10-01T00:00:00.000Z");
+
+        assertEquals(0, timeline.size());
+        assertSame(timeline, securityMaster.getFeeTimeline(7, "2026-10-01T00:00:00.000Z"));
+        verify(registryConnection, times(1)).get(any());
+    }
+
+    @Test
+    void testGetSimulationParameters() {
+        when(registryConnection.get(
+                        new ViewString("/api/simulation-parameters?exchangeId=3&knownAsOf=2026-10-01T00:00:00.000Z")))
+                .thenReturn(ByteBuffer.wrap(
+                        """
+                        [{"simulation_parameters_id": "12", "exchange_id": 3, "recorded_at": "2026-09-30T00:00:00.000Z",
+                          "note": null, "actor": "migration 044",
+                          "definition": {"queue_model": {"type": "risk_averse"}}}]"""
+                                .getBytes()));
+
+        final SimulationParameters parameters = securityMaster.getSimulationParameters(3, "2026-10-01T00:00:00.000Z");
+
+        assertEquals(12L, parameters.simulationParametersId());
+        assertEquals(3, parameters.exchangeId());
+        assertEquals("2026-09-30T00:00:00.000Z", parameters.recordedAt());
+        assertEquals("{\"queue_model\":{\"type\":\"risk_averse\"}}", parameters.definition());
+        assertSame(parameters, securityMaster.getSimulationParameters(3, "2026-10-01T00:00:00.000Z"));
+        verify(registryConnection, times(1)).get(any());
+    }
+
+    @Test
+    void testGetExchangeByCode() {
+        when(registryConnection.get(new ViewString("/api/exchanges?exchangeCode=KALSHI")))
+                .thenReturn(ByteBuffer.wrap(
+                        "[{\"exchange_id\": 3, \"exchange_code\": \"KALSHI\", \"exchange_name\": \"Kalshi\"}]"
+                                .getBytes()));
+        when(registryConnection.get(new ViewString("/api/exchanges?exchangeCode=POLYMARKET")))
+                .thenReturn(ByteBuffer.wrap("[]".getBytes()));
+
+        assertEquals(3, securityMaster.getExchange("KALSHI").exchangeId());
+        assertNull(securityMaster.getExchange("POLYMARKET"));
+        assertNull(securityMaster.getExchange("POLYMARKET"));
+        securityMaster.getExchange("KALSHI");
+        verify(registryConnection, times(2)).get(any());
+    }
+
+    @Test
+    void testGetSimulationParametersForAnExchangeWithNone() {
+        when(registryConnection.get(
+                        new ViewString("/api/simulation-parameters?exchangeId=3&knownAsOf=2026-10-01T00:00:00.000Z")))
+                .thenReturn(ByteBuffer.wrap("[]".getBytes()));
+
+        assertNull(securityMaster.getSimulationParameters(3, "2026-10-01T00:00:00.000Z"));
+        assertNull(securityMaster.getSimulationParameters(3, "2026-10-01T00:00:00.000Z"));
+        verify(registryConnection, times(1)).get(any());
     }
 
     @Test

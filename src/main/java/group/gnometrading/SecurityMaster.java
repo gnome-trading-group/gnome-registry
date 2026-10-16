@@ -2,6 +2,7 @@ package group.gnometrading;
 
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import com.fasterxml.jackson.databind.DeserializationFeature;
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.PropertyNamingStrategies;
 import group.gnometrading.collections.IntHashMap;
@@ -18,12 +19,15 @@ import group.gnometrading.sm.Listing;
 import group.gnometrading.sm.ListingSpec;
 import group.gnometrading.sm.Security;
 import group.gnometrading.sm.SecurityType;
+import group.gnometrading.sm.SimulationParameters;
 import group.gnometrading.sm.fee.FeeTimeline;
 import group.gnometrading.sm.fee.FeeTimelineJson;
 import group.gnometrading.strings.ExpandingMutableString;
 import group.gnometrading.strings.MutableString;
 import java.io.IOException;
 import java.nio.ByteBuffer;
+import java.util.HashMap;
+import java.util.Map;
 
 /**
  * SecurityMaster is an abstraction for the database security master layer.
@@ -39,6 +43,7 @@ public final class SecurityMaster {
     private static final String EVENT_CONTRACT_ENDPOINT = "/api/event-contracts?";
     private static final String CONTRACT_RELATIONSHIP_ENDPOINT = "/api/contract-relationships?";
     private static final String FEE_ENDPOINT = "/api/fees?";
+    private static final String SIMULATION_PARAMETERS_ENDPOINT = "/api/simulation-parameters?";
     // Every spec a listing has had, each from when it held at the venue.
     private static final String SPEC_HISTORY_PARAMETER = "&from=1970-01-01T00:00:00Z";
     private static final long NANOS_PER_MILLI = 1_000_000L;
@@ -69,6 +74,10 @@ public final class SecurityMaster {
     }
 
     @JsonIgnoreProperties(ignoreUnknown = true)
+    private record SimulationParametersRow(
+            long simulationParametersId, int exchangeId, String recordedAt, JsonNode definition) {}
+
+    @JsonIgnoreProperties(ignoreUnknown = true)
     private record ListingResponse(
             int listingId, int exchangeId, int securityId, String exchangeSecurityId, String exchangeSecuritySymbol) {}
 
@@ -90,6 +99,7 @@ public final class SecurityMaster {
     private static final Exchange EMPTY_EXCHANGE = new Exchange(-1, null, null, null, null);
     private static final ListingSpecHistory NO_SPECS = new ListingSpecHistory(new long[0], new ListingSpec[0]);
     private static final Event EMPTY_EVENT = new Event(-1, null, null, null, false, 0L, 0L);
+    private static final SimulationParameters NO_SIMULATION_PARAMETERS = new SimulationParameters(-1, -1, null, null);
     private static final EventContract EMPTY_EVENT_CONTRACT = new EventContract(-1, -1, -1, null);
 
     private final RegistryConnection registryConnection;
@@ -102,6 +112,7 @@ public final class SecurityMaster {
     private final MutableString eventContractPath;
     private final MutableString contractRelationshipPath;
     private final MutableString feePath;
+    private final MutableString simulationParametersPath;
 
     private final IntMap<Security> securityCache;
     private final IntMap<Exchange> exchangeCache;
@@ -109,6 +120,10 @@ public final class SecurityMaster {
     private final LongMap<Listing> listingByExchangeSecurity;
     private final IntMap<ListingSpecHistory> listingSpecCache;
     private final IntMap<FeeTimeline> feeTimelineCache;
+    // Keyed by the knowledge time a run pinned, then by listing or exchange: one process normally pins one time.
+    private final Map<String, IntMap<FeeTimeline>> pinnedFeeTimelineCache;
+    private final Map<String, IntMap<SimulationParameters>> simulationParametersCache;
+    private final Map<String, Exchange> exchangeByCodeCache;
     private final IntMap<Event> eventCache;
     private final IntMap<EventContract> eventContractBySecurityCache;
 
@@ -125,6 +140,7 @@ public final class SecurityMaster {
         this.eventContractPath = new ExpandingMutableString(EVENT_CONTRACT_ENDPOINT);
         this.contractRelationshipPath = new ExpandingMutableString(CONTRACT_RELATIONSHIP_ENDPOINT);
         this.feePath = new ExpandingMutableString(FEE_ENDPOINT);
+        this.simulationParametersPath = new ExpandingMutableString(SIMULATION_PARAMETERS_ENDPOINT);
 
         this.securityCache = new IntHashMap<>();
         this.exchangeCache = new IntHashMap<>();
@@ -132,6 +148,9 @@ public final class SecurityMaster {
         this.listingByExchangeSecurity = new LongHashMap<>();
         this.listingSpecCache = new IntHashMap<>();
         this.feeTimelineCache = new IntHashMap<>();
+        this.pinnedFeeTimelineCache = new HashMap<>();
+        this.simulationParametersCache = new HashMap<>();
+        this.exchangeByCodeCache = new HashMap<>();
         this.eventCache = new IntHashMap<>();
         this.eventContractBySecurityCache = new IntHashMap<>();
     }
@@ -177,6 +196,28 @@ public final class SecurityMaster {
             }
             this.exchangeCache.put(exchangeId, result[0]);
             return this.exchangeCache.get(exchangeId);
+        } catch (IOException e) {
+            throw new RuntimeException(e);
+        }
+    }
+
+    /** The exchange with this code (e.g. KALSHI), or null if there is none. */
+    public Exchange getExchange(final String exchangeCode) {
+        final Exchange cached = this.exchangeByCodeCache.get(exchangeCode);
+        if (cached != null) {
+            return cached == EMPTY_EXCHANGE ? null : cached;
+        }
+        final int originalLength = this.exchangePath.length();
+        this.exchangePath.appendString("exchangeCode=");
+        this.exchangePath.appendString(exchangeCode);
+        final ByteBuffer response = this.registryConnection.get(this.exchangePath);
+        this.exchangePath.setLength(originalLength);
+
+        try {
+            final Exchange[] result = OBJECT_MAPPER.readValue(toByteArray(response), Exchange[].class);
+            final Exchange exchange = result.length == 0 ? EMPTY_EXCHANGE : result[0];
+            this.exchangeByCodeCache.put(exchangeCode, exchange);
+            return exchange == EMPTY_EXCHANGE ? null : exchange;
         } catch (IOException e) {
             throw new RuntimeException(e);
         }
@@ -277,20 +318,79 @@ public final class SecurityMaster {
         }
     }
 
-    /** The listing's fee schedules over time, as the registry resolves them; empty if it has none. */
+    /** The listing's fee schedules over time, as the registry resolves them now; empty if it has none. */
     public FeeTimeline getFeeTimeline(final int listingId) {
         final FeeTimeline cached = this.feeTimelineCache.get(listingId);
         if (cached != null) {
             return cached;
         }
+        final FeeTimeline timeline = fetchFeeTimeline(listingId, null);
+        this.feeTimelineCache.put(listingId, timeline);
+        return timeline;
+    }
+
+    /**
+     * The listing's fee schedules over time as the registry knew them at {@code knownAsOf} (ISO-8601), ignoring
+     * corrections recorded later, so a replayed run charges the fees the original did.
+     */
+    public FeeTimeline getFeeTimeline(final int listingId, final String knownAsOf) {
+        final IntMap<FeeTimeline> pinned =
+                this.pinnedFeeTimelineCache.computeIfAbsent(knownAsOf, k -> new IntHashMap<>());
+        FeeTimeline timeline = pinned.get(listingId);
+        if (timeline == null) {
+            timeline = fetchFeeTimeline(listingId, knownAsOf);
+            pinned.put(listingId, timeline);
+        }
+        return timeline;
+    }
+
+    private FeeTimeline fetchFeeTimeline(final int listingId, final String knownAsOf) {
         final int originalLength = addParameters(this.feePath, "listingIds", listingId);
+        if (knownAsOf != null) {
+            this.feePath.appendString("&knownAsOf=");
+            this.feePath.appendString(knownAsOf);
+        }
         final ByteBuffer response = this.registryConnection.get(this.feePath);
         this.feePath.setLength(originalLength);
 
         try {
-            final FeeTimeline timeline = FeeTimelineJson.parse(toByteArray(response), listingId);
-            this.feeTimelineCache.put(listingId, timeline);
-            return timeline;
+            return FeeTimelineJson.parse(toByteArray(response), listingId);
+        } catch (IOException e) {
+            throw new RuntimeException(e);
+        }
+    }
+
+    /**
+     * The exchange's simulation parameters in force at {@code knownAsOf} (ISO-8601): the latest version recorded by
+     * then. Null if none had been recorded.
+     */
+    public SimulationParameters getSimulationParameters(final int exchangeId, final String knownAsOf) {
+        final IntMap<SimulationParameters> pinned =
+                this.simulationParametersCache.computeIfAbsent(knownAsOf, k -> new IntHashMap<>());
+        final SimulationParameters cached = pinned.get(exchangeId);
+        if (cached != null) {
+            return cached == NO_SIMULATION_PARAMETERS ? null : cached;
+        }
+        final int originalLength = addParameters(this.simulationParametersPath, "exchangeId", exchangeId);
+        this.simulationParametersPath.appendString("&knownAsOf=");
+        this.simulationParametersPath.appendString(knownAsOf);
+        final ByteBuffer response = this.registryConnection.get(this.simulationParametersPath);
+        this.simulationParametersPath.setLength(originalLength);
+
+        try {
+            final SimulationParametersRow[] rows =
+                    OBJECT_MAPPER.readValue(toByteArray(response), SimulationParametersRow[].class);
+            if (rows.length == 0) {
+                pinned.put(exchangeId, NO_SIMULATION_PARAMETERS);
+                return null;
+            }
+            final SimulationParameters parameters = new SimulationParameters(
+                    rows[0].simulationParametersId(),
+                    rows[0].exchangeId(),
+                    rows[0].recordedAt(),
+                    rows[0].definition().toString());
+            pinned.put(exchangeId, parameters);
+            return parameters;
         } catch (IOException e) {
             throw new RuntimeException(e);
         }
