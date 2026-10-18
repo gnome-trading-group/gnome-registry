@@ -1,3 +1,4 @@
+import { fetchWithRetry } from './http';
 import { kalshiHeaders } from './signers';
 import { PollTarget, PRICE_SCALE, scaleDecimal, SIZE_SCALE, VenueReading } from './types';
 
@@ -13,8 +14,9 @@ interface Credentials {
 }
 
 async function get(baseUrl: string, credentials: Credentials, path: string): Promise<any> {
-  const headers = kalshiHeaders(credentials.apiKey, credentials.privateKey, 'GET', path, Date.now());
-  const res = await fetch(`${baseUrl}${path}`, { headers });
+  const res = await fetchWithRetry(`${baseUrl}${path}`, () => ({
+    headers: kalshiHeaders(credentials.apiKey, credentials.privateKey, 'GET', path, Date.now()),
+  }));
   if (!res.ok) throw new Error(`Kalshi GET ${path.split('?')[0]} failed: ${res.status} ${await res.text()}`);
   return res.json();
 }

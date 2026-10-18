@@ -1,3 +1,4 @@
+import { fetchWithRetry } from './http';
 import { polymarketUsHeaders, polymarketUsKey } from './signers';
 import { PollTarget, PRICE_SCALE, scaleDecimal, SIZE_SCALE, VenueReading } from './types';
 
@@ -37,8 +38,10 @@ export function parseBalances(body: unknown): { total: bigint; available: bigint
 }
 
 async function get(baseUrl: string, credentials: Credentials, path: string): Promise<any> {
-  const headers = polymarketUsHeaders(credentials.apiKey, polymarketUsKey(credentials.secret), 'GET', path, Date.now());
-  const res = await fetch(`${baseUrl}${path}`, { headers });
+  const key = polymarketUsKey(credentials.secret);
+  const res = await fetchWithRetry(`${baseUrl}${path}`, () => ({
+    headers: polymarketUsHeaders(credentials.apiKey, key, 'GET', path, Date.now()),
+  }));
   if (!res.ok) throw new Error(`Polymarket US GET ${path.split('?')[0]} failed: ${res.status} ${await res.text()}`);
   return res.json();
 }

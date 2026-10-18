@@ -1,3 +1,4 @@
+import { fetchWithRetry } from './http';
 import { PollTarget, PRICE_SCALE, scaleDecimal, SIZE_SCALE, VenueReading } from './types';
 
 // Polymarket Intl holds everything on chain, so an account is read with no credentials: its collateral is the
@@ -17,11 +18,11 @@ async function collateral(funder: string): Promise<bigint> {
   const token = process.env.PUSD_TOKEN_ADDRESS;
   if (!rpc || !token) throw new Error('POLYGON_RPC_URL and PUSD_TOKEN_ADDRESS must be set to read Polymarket Intl cash');
   const data = `${BALANCE_OF}${funder.toLowerCase().replace(/^0x/, '').padStart(64, '0')}`;
-  const res = await fetch(rpc, {
+  const res = await fetchWithRetry(rpc, () => ({
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'User-Agent': USER_AGENT },
     body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'eth_call', params: [{ to: token, data }, 'latest'] }),
-  });
+  }), async answer => !(await answer.json().catch(() => ({})) as { result?: string }).result);
   const body = await res.json() as { result?: string; error?: { message: string } };
   if (!res.ok || !body.result) throw new Error(`Polygon balanceOf failed: ${res.status} ${body.error?.message ?? ''}`);
   return BigInt(body.result) * PUSD_TO_PRICE;
@@ -38,8 +39,8 @@ export async function readPolymarketIntl(target: PollTarget): Promise<VenueReadi
   let redeemableValue = 0n;
   let portfolioValue = 0n;
   for (let offset = 0; ; offset += PAGE_LIMIT) {
-    const res = await fetch(`${DATA_API}/positions?user=${funder}&sizeThreshold=0&limit=${PAGE_LIMIT}&offset=${offset}`,
-      { headers: { 'User-Agent': USER_AGENT } });
+    const res = await fetchWithRetry(`${DATA_API}/positions?user=${funder}&sizeThreshold=0&limit=${PAGE_LIMIT}&offset=${offset}`,
+      () => ({ headers: { 'User-Agent': USER_AGENT } }));
     if (!res.ok) throw new Error(`Polymarket positions failed: ${res.status} ${await res.text()}`);
     const page = await res.json() as { asset: string; size: number | string; redeemable?: boolean; currentValue?: number }[];
     for (const p of page) {

@@ -1,6 +1,7 @@
 import { constants, createPublicKey, generateKeyPairSync, verify } from 'crypto';
 import { readFileSync } from 'fs';
 import { join } from 'path';
+import { fetchWithRetry } from '../lambda/sync/venues/http';
 import { readKalshi } from '../lambda/sync/venues/kalshi';
 import { readPolymarketIntl } from '../lambda/sync/venues/polymarket-intl';
 import { kalshiHeaders, polymarketUsHeaders, polymarketUsKey } from '../lambda/sync/venues/signers';
@@ -65,14 +66,14 @@ describe('venue keys', () => {
 describe('venue readers on captured answers', () => {
   const fixture = (name: string) =>
     JSON.parse(readFileSync(join(__dirname, 'fixtures', 'venues', name), 'utf8'));
-  const respond = (body: unknown) => ({ ok: true, status: 200, json: async () => body, text: async () => '' });
+  const respond = (body: unknown) => new Response(JSON.stringify(body));
 
   afterEach(() => jest.restoreAllMocks());
 
   it('reads Kalshi cash to the sub-cent from its dollars field', async () => {
     const { privateKey } = generateKeyPairSync('rsa', { modulusLength: 2048 });
     jest.spyOn(global, 'fetch').mockImplementation(async (url) => respond(String(url).includes('/balance')
-      ? fixture('kalshi-balance.json') : { market_positions: [], cursor: '' }) as unknown as Response);
+      ? fixture('kalshi-balance.json') : { market_positions: [], cursor: '' }));
     const reading = await readKalshi(
       { account_id: 1, exchange_id: 1, exchange_code: 'KALSHI', label: 'x', venue_ref: {}, read_secret_name: null },
       { apiKey: 'k', privateKey: privateKey.export({ type: 'pkcs8', format: 'pem' }).toString() });
@@ -85,7 +86,7 @@ describe('venue readers on captured answers', () => {
     process.env.PUSD_TOKEN_ADDRESS = '0xC011a7E12a19f7B1f670d46F03B03f3342E82DFB';
     jest.spyOn(global, 'fetch').mockImplementation(async (url) => respond(String(url).includes('rpc.example')
       ? { result: '0x0000000000000000000000000000000000000000000000000000000000f38054' }
-      : fixture('polymarket-intl-positions.json')) as unknown as Response);
+      : fixture('polymarket-intl-positions.json')));
     const reading = await readPolymarketIntl({
       account_id: 2, exchange_id: 2, exchange_code: 'POLYMARKET_INTL', label: 'x', read_secret_name: null,
       venue_ref: { funderAddress: '0xe65019f319d3b20a9883b43283c91ca9d8c81cfb' },
@@ -114,5 +115,97 @@ describe('Polymarket US positions, as captured in Phase 0', () => {
     expect(parseBalances(captured.balancesWithShort)).toEqual({
       total: 10_674_000_000n, available: 9_674_000_000n, margin: 1_000_000_000n,
     });
+  });
+});
+
+describe('venue reads that fail transiently', () => {
+  const url = 'https://venue.example/positions';
+  const answers = (...responses: (() => Response)[]) => {
+    const fetch = jest.spyOn(global, 'fetch');
+    for (const r of responses) fetch.mockImplementationOnce(async () => r());
+    return fetch;
+  };
+  const settle = async <T>(read: Promise<T>) => {
+    const settled = read.catch(error => error);
+    await jest.advanceTimersByTimeAsync(30_000);
+    return settled;
+  };
+
+  beforeEach(() => jest.useFakeTimers());
+  afterEach(() => {
+    jest.useRealTimers();
+    jest.restoreAllMocks();
+  });
+
+  it('retries a rate limit and a server fault, then reads', async () => {
+    const fetch = answers(
+      () => new Response('{"error":"Too Many Requests"}', { status: 429 }),
+      () => new Response('broker: node error', { status: 500 }),
+      () => new Response('[]'));
+    const res = await settle(fetchWithRetry(url));
+    expect(res.status).toBe(200);
+    expect(fetch).toHaveBeenCalledTimes(3);
+  });
+
+  it('retries a dropped connection', async () => {
+    const fetch = jest.spyOn(global, 'fetch')
+      .mockRejectedValueOnce(new TypeError('fetch failed'))
+      .mockResolvedValueOnce(new Response('[]'));
+    expect((await settle(fetchWithRetry(url))).status).toBe(200);
+    expect(fetch).toHaveBeenCalledTimes(2);
+  });
+
+  it('gives back the last answer once its attempts run out', async () => {
+    const fetch = answers(...Array(3).fill(() => new Response('slow down', { status: 429 })));
+    const res = await settle(fetchWithRetry(url));
+    expect(res.status).toBe(429);
+    expect(await res.text()).toBe('slow down');
+    expect(fetch).toHaveBeenCalledTimes(3);
+  });
+
+  it('doesn\'t retry a client error, or a rate limit that asks for too long a wait', async () => {
+    const fetch = answers(
+      () => new Response('bad key', { status: 401 }),
+      () => new Response('', { status: 429, headers: { 'Retry-After': '60' } }));
+    expect((await settle(fetchWithRetry(url))).status).toBe(401);
+    expect((await settle(fetchWithRetry(url))).status).toBe(429);
+    expect(fetch).toHaveBeenCalledTimes(2);
+  });
+
+  it('signs every attempt afresh', async () => {
+    const fetch = answers(() => new Response('', { status: 503 }), () => new Response('[]'));
+    let signed = 0;
+    await settle(fetchWithRetry(url, () => ({ headers: { 'X-Signed': String(++signed) } })));
+    expect(fetch.mock.calls.map(([, init]) => (init?.headers as Record<string, string>)['X-Signed'])).toEqual(['1', '2']);
+  });
+
+  it('retries a Polygon node that reports its fault inside a 200, and reads the cash it then gives', async () => {
+    process.env.POLYGON_RPC_URL = 'https://rpc.example';
+    process.env.PUSD_TOKEN_ADDRESS = '0xC011a7E12a19f7B1f670d46F03B03f3342E82DFB';
+    const fetch = jest.spyOn(global, 'fetch').mockImplementation(async (target) => {
+      if (!String(target).includes('rpc.example')) return new Response('[]');
+      const faulted = fetch.mock.calls.filter(([u]) => String(u).includes('rpc.example')).length === 1;
+      return new Response(JSON.stringify(faulted
+        ? { jsonrpc: '2.0', id: 1, error: { message: 'header not found' } }
+        : { jsonrpc: '2.0', id: 1, result: '0x00000000000000000000000000000000000000000000000000000000000f4240' }));
+    });
+    const reading = await settle(readPolymarketIntl({
+      account_id: 2, exchange_id: 2, exchange_code: 'POLYMARKET_INTL', label: 'x', read_secret_name: null,
+      venue_ref: { funderAddress: '0xe65019f319d3b20a9883b43283c91ca9d8c81cfb' },
+    }));
+    expect(reading.cashTotal).toBe(1_000_000_000n);
+  });
+
+  it('fails a Polymarket Intl read with the venue\'s own error once retries run out', async () => {
+    process.env.POLYGON_RPC_URL = 'https://rpc.example';
+    process.env.PUSD_TOKEN_ADDRESS = '0xC011a7E12a19f7B1f670d46F03B03f3342E82DFB';
+    jest.spyOn(global, 'fetch').mockImplementation(async (target) => String(target).includes('rpc.example')
+      ? new Response(JSON.stringify({ result: '0x0' }))
+      : new Response('{"error":"Too Many Requests"}', { status: 429 }));
+    const error = await settle(readPolymarketIntl({
+      account_id: 2, exchange_id: 2, exchange_code: 'POLYMARKET_INTL', label: 'x', read_secret_name: null,
+      venue_ref: { funderAddress: '0xe65019f319d3b20a9883b43283c91ca9d8c81cfb' },
+    }));
+    expect((error as Error).message).toBe('Polymarket positions failed: 429 {"error":"Too Many Requests"}');
   });
 });
