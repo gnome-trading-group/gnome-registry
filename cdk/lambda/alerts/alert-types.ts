@@ -47,6 +47,13 @@ export const ALERT_TYPES: Record<string, AlertType> = {
   RECONNECTING: { severity: 'WARNING', debounce: 2 },
   BOOK_RESYNCS: { severity: 'WARNING', debounce: 1 },
   RATE_LIMIT_THROTTLING: { severity: 'WARNING', debounce: 3 },
+  // Sustained for ten minutes: a busy minute is normal, a busy ten is an undersized instance or a runaway loop.
+  HOST_CPU_HIGH: { severity: 'WARNING', debounce: 10 },
+  // Running out kills the process, which pages as FAILED; this is the warning before it.
+  HOST_MEMORY_LOW: { severity: 'ERROR', debounce: 2 },
+  // A full disk crashes a live session.
+  DISK_LOW: { severity: 'CRITICAL', debounce: 1 },
+  JOURNAL_BACKLOG: { severity: 'WARNING', debounce: 2 },
   FAILED: { severity: 'CRITICAL', debounce: 1 },
   START_STUCK: { severity: 'ERROR', debounce: 1 },
   STOP_STUCK: { severity: 'ERROR', debounce: 1, aboutStopping: true },

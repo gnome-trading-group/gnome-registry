@@ -72,6 +72,57 @@ describeDb('monitoring rules against Postgres', () => {
     ]);
   });
 
+  const GB = 1024 ** 3;
+  const host = (f: Record<string, number> = {}) => ({
+    cpuBusyPermille: 400, cpuStealPermille: 0, memAvailableBytes: GB, memTotalBytes: 2 * GB,
+    processRssBytes: GB / 2, heapUsedBytes: 64 * 1024 ** 2, heapMaxBytes: GB / 2, diskFreeBytes: 20 * GB, ...f,
+  });
+  const journal = (f: Record<string, number> = {}) =>
+    ({ pendingSegments: 0, oldestPendingMs: 0, segmentBytes: 256 * 1024 ** 2, ...f });
+  const hostKinds = async (h: unknown, j: unknown) => {
+    await client.query('TRUNCATE strategy.session CASCADE');
+    await session('s1', { health: { ...HEALTHY, host: h, journal: j } });
+    return (await runRules(client, now)).map(f => f.kind).sort();
+  };
+
+  it('reads the host and the journal: busy or throttled CPU, low memory, a filling disk and a shipping backlog', async () => {
+    expect(await hostKinds(host(), journal())).toEqual([]);
+    expect(await hostKinds(host({ cpuBusyPermille: 899, cpuStealPermille: 199 }), journal())).toEqual([]);
+    expect(await hostKinds(host({ cpuBusyPermille: 900 }), journal())).toEqual(['HOST_CPU_HIGH']);
+    expect(await hostKinds(host({ cpuStealPermille: 200 }), journal())).toEqual(['HOST_CPU_HIGH']);
+    expect(await hostKinds(host({ memAvailableBytes: 0.1 * 2 * GB }), journal())).toEqual([]);
+    expect(await hostKinds(host({ memAvailableBytes: 0.09 * 2 * GB }), journal())).toEqual(['HOST_MEMORY_LOW']);
+    expect(await hostKinds(host({ diskFreeBytes: GB }), journal({ segmentBytes: 256 * 1024 ** 2 }))).toEqual([]);
+    expect(await hostKinds(host({ diskFreeBytes: GB - 1 }), journal())).toEqual(['DISK_LOW']);
+    // Two segments' room when they're bigger than the 1 GB floor.
+    expect(await hostKinds(host({ diskFreeBytes: 3 * GB }), journal({ segmentBytes: 2 * GB }))).toEqual(['DISK_LOW']);
+    expect(await hostKinds(host(), journal({ pendingSegments: 2, oldestPendingMs: 299_999 }))).toEqual([]);
+    expect(await hostKinds(host(), journal({ pendingSegments: 3 }))).toEqual(['JOURNAL_BACKLOG']);
+    expect(await hostKinds(host(), journal({ pendingSegments: 1, oldestPendingMs: 300_000 }))).toEqual(['JOURNAL_BACKLOG']);
+  });
+
+  it('skips what a session can\'t read or doesn\'t send', async () => {
+    const unread = host({ cpuBusyPermille: -1, cpuStealPermille: -1, memAvailableBytes: -1, memTotalBytes: -1,
+      processRssBytes: -1 });
+    expect(await hostKinds(unread, null)).toEqual([]);
+    expect(await hostKinds(undefined, undefined)).toEqual([]);
+    expect(await hostKinds(null, null)).toEqual([]);
+  });
+
+  it('titles the host findings with their numbers', async () => {
+    await session('s1', { health: { ...HEALTHY,
+      host: host({ cpuBusyPermille: 963, cpuStealPermille: 312, memAvailableBytes: 120 * 1024 ** 2,
+        processRssBytes: 1.7 * GB, diskFreeBytes: 800 * 1024 ** 2 }),
+      journal: journal({ pendingSegments: 5, oldestPendingMs: 361_000 }) } });
+    const titles = Object.fromEntries((await runRules(client, now)).map(f => [f.kind, f.title]));
+    expect(titles).toEqual({
+      HOST_CPU_HIGH: 'CPU 96% busy (steal 31%)',
+      HOST_MEMORY_LOW: 'Memory 5% available (120 MB of 2.0 GB); process RSS 1.7 GB',
+      DISK_LOW: 'Disk 800 MB free',
+      JOURNAL_BACKLOG: '5 journal segments not shipped, oldest 6m',
+    });
+  });
+
   it('unguarded outranks stale: either way nothing trades, and unguarded says why', async () => {
     await session('s1', { health: { ...HEALTHY, risk: { stale: true, unguarded: true, unbuildablePolicies: 0, droppedLatches: 0 } } });
     expect((await runRules(client, now)).map(f => f.kind)).toEqual(['RISK_UNGUARDED']);
@@ -115,7 +166,8 @@ describeDb('monitoring rules against Postgres', () => {
       'FAILED', 'START_STUCK', 'STOP_STUCK', 'NEEDS_REVIEW', 'NO_PRICE', 'SETTLEMENT_PENDING', 'SETTLEMENT_BLOCKED',
       'RECON_MISMATCH', 'RECON_STALE', 'BALANCE_LOW', 'SHARD_BALANCE_LOW', 'ALLOCATION_EXCEEDS_BALANCE',
       'DRAINING_EXPOSURE', 'ACCOUNT_DUE_FOR_ROTATION', 'ACCOUNT_READY_TO_RETIRE', 'FEE_MISMATCH',
-      'FEE_SCHEDULE_MISSING', 'FEE_SCHEDULE_CHANGED', 'FEE_TYPE_UNSUPPORTED'];
+      'FEE_SCHEDULE_MISSING', 'FEE_SCHEDULE_CHANGED', 'FEE_TYPE_UNSUPPORTED', 'HOST_CPU_HIGH', 'HOST_MEMORY_LOW',
+      'DISK_LOW', 'JOURNAL_BACKLOG'];
     const rulesDir = path.join(__dirname, '..', 'lambda', 'monitoring', 'rules');
     const source = fs.readdirSync(rulesDir).filter(f => f.endsWith('.ts'))
       .map(f => fs.readFileSync(path.join(rulesDir, f), 'utf8')).join('\n');

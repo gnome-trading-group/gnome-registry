@@ -81,6 +81,14 @@
       ],
       "url": "https://github.com/gnome-trading-group/gnome-registry/blob/main/docs/runbooks/alerts/CUSTOM.md"
     },
+    "DISK_LOW": {
+      "summary": "The session's disk is nearly full; the session crashes when the journal can't start its next segment.",
+      "firstSteps": [
+        "Check for a JOURNAL_BACKLOG on the same session; it's the usual cause.",
+        "Stop the session before the disk fills."
+      ],
+      "url": "https://github.com/gnome-trading-group/gnome-registry/blob/main/docs/runbooks/alerts/DISK_LOW.md"
+    },
     "DRAINING_EXPOSURE": {
       "summary": "A strategy holds a listing on a draining account while trading it on another.",
       "firstSteps": [
@@ -158,6 +166,33 @@
         "Fix the cause, then disable the kill switch on Risk Policies."
       ],
       "url": "https://github.com/gnome-trading-group/gnome-registry/blob/main/docs/runbooks/alerts/GLOBAL_HALT.md"
+    },
+    "HOST_CPU_HIGH": {
+      "summary": "The session's instance has been close to fully busy, or throttled, for ten minutes.",
+      "firstSteps": [
+        "Open the session page; check busy against steal.",
+        "High steal on a t3 instance means it's out of CPU credits.",
+        "If orders are slow, stop the session and relaunch on a bigger instance."
+      ],
+      "url": "https://github.com/gnome-trading-group/gnome-registry/blob/main/docs/runbooks/alerts/HOST_CPU_HIGH.md"
+    },
+    "HOST_MEMORY_LOW": {
+      "summary": "The session's instance has under 10% of its memory available; the kernel will kill the process if it runs out.",
+      "firstSteps": [
+        "Open the session page; compare process RSS with the JVM heap.",
+        "If it keeps falling, stop the session before it's killed.",
+        "Relaunch on an instance with more memory."
+      ],
+      "url": "https://github.com/gnome-trading-group/gnome-registry/blob/main/docs/runbooks/alerts/HOST_MEMORY_LOW.md"
+    },
+    "JOURNAL_BACKLOG": {
+      "summary": "The session's journal segments aren't reaching S3; they wait on the instance's disk.",
+      "firstSteps": [
+        "Read the shipper's log stream ec2/<instance>/journal-shipper in CloudWatch.",
+        "Check gnome-journal-shipper is running (systemctl status, over SSM).",
+        "Watch disk space; a long backlog ends in DISK_LOW."
+      ],
+      "url": "https://github.com/gnome-trading-group/gnome-registry/blob/main/docs/runbooks/alerts/JOURNAL_BACKLOG.md"
     },
     "LATCHES_DROPPED": {
       "summary": "The OMS halted something it couldn't record in the registry.",

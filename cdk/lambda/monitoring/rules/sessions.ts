@@ -1,6 +1,10 @@
 import { PoolClient } from 'pg';
 import { Finding, finding, Mode, seconds } from './types';
-import { BOOK_RESYNCS_PER_5M, HOT_PATH_STALL_MS, NO_HEARTBEAT_AFTER_MS, SILENT_AFTER_MS } from './thresholds';
+import {
+  BOOK_RESYNCS_PER_5M, DISK_FREE_MIN_BYTES, DISK_FREE_MIN_SEGMENTS, HOST_CPU_BUSY_PERMILLE, HOST_CPU_STEAL_PERMILLE,
+  HOST_MEM_AVAILABLE_MIN_PERCENT, HOT_PATH_STALL_MS, JOURNAL_BACKLOG_AGE_MS, JOURNAL_BACKLOG_SEGMENTS,
+  NO_HEARTBEAT_AFTER_MS, SILENT_AFTER_MS,
+} from './thresholds';
 
 // The heartbeat's health (see the orchestrator's SessionHeartbeatAgent). Older sessions omit the newer parts.
 interface Health {
@@ -9,6 +13,13 @@ interface Health {
   ledger?: { consecutiveFailures: number; fenced: boolean } | null;
   risk?: { stale: boolean; unguarded: boolean; unbuildablePolicies: number; droppedLatches: number } | null;
   rateLimit?: { account: string; throttling: boolean }[];
+  // A reading the host can't give (no /proc off Linux, no CPU share before the second sample) is -1.
+  host?: {
+    cpuBusyPermille: number; cpuStealPermille: number; memAvailableBytes: number; memTotalBytes: number;
+    processRssBytes: number; heapUsedBytes: number; heapMaxBytes: number; diskFreeBytes: number;
+  } | null;
+  // Null with the journal off.
+  journal?: { pendingSegments: number; oldestPendingMs: number; segmentBytes: number } | null;
 }
 
 // Running sessions: silent ones, then the parts of the rest that are in trouble. A stopping session goes quiet on
@@ -81,6 +92,47 @@ export async function sessions(client: PoolClient, now: Date): Promise<Finding[]
     for (const limiter of health.rateLimit ?? []) {
       if (limiter.throttling) on('warning', 'RATE_LIMIT_THROTTLING', limiter.account, `${limiter.account} is rate limited`);
     }
+    hostFindings(health, on);
   }
   return findings;
+}
+
+type On = (severity: 'critical' | 'warning', kind: string, subject: string | null, title: string,
+  extra?: Partial<Finding>) => void;
+
+function hostFindings(health: Health, on: On): void {
+  const host = health.host;
+  const journal = health.journal;
+  if (host && (host.cpuBusyPermille >= HOST_CPU_BUSY_PERMILLE || host.cpuStealPermille >= HOST_CPU_STEAL_PERMILLE)) {
+    const steal = host.cpuStealPermille > 0 ? ` (steal ${percent(host.cpuStealPermille)})` : '';
+    on('warning', 'HOST_CPU_HIGH', null, `CPU ${percent(host.cpuBusyPermille)} busy${steal}`,
+      { facts: { cpuBusyPermille: host.cpuBusyPermille, cpuStealPermille: host.cpuStealPermille } });
+  }
+  if (host && host.memAvailableBytes >= 0 && host.memTotalBytes > 0
+      && host.memAvailableBytes * 100 < host.memTotalBytes * HOST_MEM_AVAILABLE_MIN_PERCENT) {
+    const rss = host.processRssBytes >= 0 ? `; process RSS ${bytes(host.processRssBytes)}` : '';
+    on('warning', 'HOST_MEMORY_LOW', null, `Memory ${Math.floor(host.memAvailableBytes * 100 / host.memTotalBytes)}% `
+      + `available (${bytes(host.memAvailableBytes)} of ${bytes(host.memTotalBytes)})${rss}`,
+    { facts: { memAvailableBytes: host.memAvailableBytes, memTotalBytes: host.memTotalBytes,
+      processRssBytes: host.processRssBytes, heapUsedBytes: host.heapUsedBytes, heapMaxBytes: host.heapMaxBytes } });
+  }
+  const diskMin = Math.max(DISK_FREE_MIN_BYTES, (journal?.segmentBytes ?? 0) * DISK_FREE_MIN_SEGMENTS);
+  if (host && host.diskFreeBytes >= 0 && host.diskFreeBytes < diskMin) {
+    on('critical', 'DISK_LOW', null, `Disk ${bytes(host.diskFreeBytes)} free`,
+      { facts: { diskFreeBytes: host.diskFreeBytes, diskMinBytes: diskMin } });
+  }
+  if (journal && (journal.pendingSegments >= JOURNAL_BACKLOG_SEGMENTS || journal.oldestPendingMs >= JOURNAL_BACKLOG_AGE_MS)) {
+    const segments = journal.pendingSegments === 1 ? 'segment' : 'segments';
+    on('warning', 'JOURNAL_BACKLOG', null,
+      `${journal.pendingSegments} journal ${segments} not shipped, oldest ${seconds(journal.oldestPendingMs)}`,
+      { facts: { pendingSegments: journal.pendingSegments, oldestPendingMs: journal.oldestPendingMs } });
+  }
+}
+
+function percent(permille: number): string {
+  return `${Math.round(permille / 10)}%`;
+}
+
+function bytes(n: number): string {
+  return n >= 1024 ** 3 ? `${(n / 1024 ** 3).toFixed(1)} GB` : `${Math.round(n / 1024 ** 2)} MB`;
 }

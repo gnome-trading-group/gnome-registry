@@ -21,3 +21,15 @@ export const BOOK_RESYNCS_PER_5M = 3;
 // covers the one Polymarket US rounding we couldn't explain (2026-10-15).
 export const FEE_LOOKBACK_MS = 24 * 3_600_000;
 export const FEE_TOLERANCE_UNITS = 10_000_000n;
+// Host readings from the heartbeat (gnome-core's HostReadings). CPU is in tenths of a percent of every core; stolen time
+// is what a burstable instance out of CPU credits loses to throttling.
+export const HOST_CPU_BUSY_PERMILLE = 900;
+export const HOST_CPU_STEAL_PERMILLE = 200;
+export const HOST_MEM_AVAILABLE_MIN_PERCENT = 10;
+// A full disk crashes the session the next time the journal maps a segment; two segments' room leaves time to act.
+export const DISK_FREE_MIN_BYTES = 1024 ** 3;
+export const DISK_FREE_MIN_SEGMENTS = 2;
+// The shipper uploads a segment within seconds of the minute it closes; three waiting, or one for five minutes, is a
+// shipper that has stopped or can't reach S3.
+export const JOURNAL_BACKLOG_SEGMENTS = 3;
+export const JOURNAL_BACKLOG_AGE_MS = 5 * 60_000;
