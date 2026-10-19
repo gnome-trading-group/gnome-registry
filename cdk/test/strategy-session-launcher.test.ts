@@ -57,9 +57,15 @@ jest.mock('@aws-sdk/client-eventbridge', () => ({
   PutEventsCommand: jest.fn().mockImplementation((input) => ({ input })),
 }));
 // Not installed locally (only provided by the Lambda runtime), so it must be virtual.
+const logQueries: any[] = [];
 jest.mock('@aws-sdk/client-cloudwatch-logs', () => ({
-  CloudWatchLogsClient: jest.fn(),
-  GetLogEventsCommand: jest.fn(),
+  CloudWatchLogsClient: jest.fn().mockImplementation(() => ({
+    send: async (cmd: any) => {
+      logQueries.push(cmd.input);
+      return { events: [{ timestamp: 1, message: 'hello' }] };
+    },
+  })),
+  GetLogEventsCommand: jest.fn().mockImplementation((input) => ({ input })),
 }), { virtual: true });
 
 process.env.REGISTRY_API_URL = 'https://registry.test/api/';
@@ -125,6 +131,7 @@ function sessionEnv(): Record<string, string> {
 beforeEach(() => {
   events.length = 0;
   ec2Calls.length = 0;
+  logQueries.length = 0;
   haltFails = false;
   haltBodies = [];
   patchBodies = [];
@@ -681,5 +688,44 @@ describe('launch region', () => {
     const res = await launcher.handler(apiEvent('/strategy-sessions/launch', body));
     expect(res.statusCode).toBe(200);
     expect(ec2Calls.find(c => c.kind === 'RunInstances')!.region).toBe('us-east-1');
+  });
+});
+
+describe('GET /strategy-sessions/logs', () => {
+  function logsEvent(sessionId = 's1'): APIGatewayProxyEvent {
+    return {
+      httpMethod: 'GET',
+      resource: '/strategy-sessions/logs',
+      path: '/strategy-sessions/logs',
+      queryStringParameters: { sessionId },
+      requestContext: {},
+    } as unknown as APIGatewayProxyEvent;
+  }
+
+  it("reads a running session's newest events up to now", async () => {
+    sessionRow = { ...sessionRow, status: 'RUNNING', stopped_at: null };
+    const before = Date.now();
+    const res = await launcher.handler(logsEvent());
+
+    expect(res.statusCode).toBe(200);
+    expect(JSON.parse(res.body).logs[0].logs).toEqual([{ timestamp: 1, message: 'hello' }]);
+    expect(logQueries[0]).toMatchObject({ logGroupName: '/gnome/orchestrator/eu-west-1', logStreamName: 'ec2/i-123' });
+    expect(logQueries[0].startTime).toBeUndefined();
+    expect(logQueries[0].endTime).toBeGreaterThanOrEqual(before);
+  });
+
+  it('reads an ended session up to shortly after it stopped', async () => {
+    sessionRow = { ...sessionRow, status: 'STOPPED', stopped_at: '2026-09-01T12:00:00Z' };
+    await launcher.handler(logsEvent());
+
+    expect(logQueries[0].startTime).toBeUndefined();
+    expect(logQueries[0].endTime).toBe(Date.parse('2026-09-01T12:05:00Z'));
+  });
+
+  it('falls back to the last modification for a failed session that never recorded a stop', async () => {
+    sessionRow = { ...sessionRow, status: 'FAILED', stopped_at: null, date_modified: '2026-09-01T12:00:00Z' };
+    await launcher.handler(logsEvent());
+
+    expect(logQueries[0].endTime).toBe(Date.parse('2026-09-01T12:05:00Z'));
   });
 });

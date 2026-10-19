@@ -26,6 +26,8 @@ const LAUNCH_TEMPLATE_NAME = 'gnome-orchestrator';
 const LIVE_LAUNCH_TEMPLATE_NAME = 'gnome-orchestrator-live';
 const AMI_PARAMETER_PREFIX = '/gnome/orchestrator/ami';
 const LATEST_ORCHESTRATOR_PARAMETER = '/gnome/orchestrator/latest-version';
+const ENDED_SESSION_STATUSES = ['STOPPED', 'FAILED'];
+const ENDED_SESSION_LOGS_GRACE_MS = 5 * 60 * 1000;
 // Published by gnome-orchestrator per release as <prefix>/<version>, plus <prefix>/latest:
 // { version, properties: { key: defaultValue } }.
 const ORCHESTRATOR_PROPERTIES_PREFIX = '/gnome/orchestrator/properties';
@@ -664,6 +666,15 @@ async function terminateInstance(session: { instance_id?: string | null; launch_
   }
 }
 
+// A FAILED session may never have had stopped_at set. The grace period covers the instance's shutdown output, which
+// it writes after the session is marked ended.
+function logsEndTime(session: { status: string; stopped_at?: string | null; date_modified?: string | null }): number {
+  if (!ENDED_SESSION_STATUSES.includes(session.status)) return Date.now();
+  const endedAt = session.stopped_at ?? session.date_modified;
+  if (!endedAt) return Date.now();
+  return Math.min(Date.parse(endedAt) + ENDED_SESSION_LOGS_GRACE_MS, Date.now());
+}
+
 async function handleLogs(queryParams: Record<string, string> | null) {
   const sessionId = queryParams?.sessionId;
   if (!sessionId) return createResponse(400, { message: 'sessionId is required' });
@@ -681,11 +692,12 @@ async function handleLogs(queryParams: Record<string, string> | null) {
   const logsClient = new CloudWatchLogsClient({ region });
   let logEvents: { timestamp: number; message: string }[] = [];
   try {
+    // With no startTime the stream's newest events are returned, so an ended session shows how it ended rather than
+    // an empty window around now.
     const response = await logsClient.send(new GetLogEventsCommand({
       logGroupName,
       logStreamName,
-      startTime: Date.now() - 60 * 60 * 1000,
-      endTime: Date.now(),
+      endTime: logsEndTime(sessions[0]),
       limit: 500,
     }));
     logEvents = (response.events ?? []).map(e => ({ timestamp: e.timestamp ?? 0, message: e.message ?? '' }));
