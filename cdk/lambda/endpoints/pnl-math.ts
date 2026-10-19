@@ -58,6 +58,15 @@ export interface LifetimePnl {
   fees: bigint;
 }
 
+// What one fill outside any session's PnL changed the strategy's lifetime PnL by: the amounts it realized and paid,
+// plus the change in unrealized PnL it made, both sides valued at the mark it was booked against. A settlement
+// closing inventory valued at 40c at $1 is worth the 60c the mark never saw; a reset writes the unrealized off.
+export function fillImpact(
+  before: PositionState, after: PositionState, realized: bigint, fees: bigint, mark: MarkInputs | null,
+): bigint {
+  return realized - fees + pnl(after, mark).unrealizedPnl - pnl(before, mark).unrealizedPnl;
+}
+
 export function lifetimePnl(position: PositionState, mark: MarkInputs | null): LifetimePnl {
   const valued = pnl(position, mark);
   return {

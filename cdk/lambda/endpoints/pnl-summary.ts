@@ -2,10 +2,10 @@ import { APIGatewayProxyEvent } from 'aws-lambda';
 import { PoolClient } from 'pg';
 import { connectLedgerDatabase, createResponse, isSessionId, parseMode, parsePositiveInt } from './ledger-common';
 import { avgEntryPrice, markPrice, PositionState } from './ledger-math';
-import { lifetimePnl, SessionPnl, sessionPnl } from './pnl-math';
+import { fillImpact, lifetimePnl, SessionPnl, sessionPnl } from './pnl-math';
 import {
-  ListingInfo, loadListingInfo, loadSessionStates, loadStrategyState, SessionListingState, startOfDay,
-  StrategyListingState,
+  AfterSession, ListingInfo, loadAfterSession, loadListingInfo, loadOutOfSessionFills, loadSessionStates,
+  loadStrategyState, OutOfSessionSource, PositionFill, SessionListingState, startOfDay, StrategyListingState,
 } from './pnl-state';
 
 // The PnL the controller shows, computed here once so the page never sums scaled integers itself. Money, prices and
@@ -79,6 +79,7 @@ export async function sessionSummary(client: PoolClient, sessionId: string, now:
     [sessionId])).rows;
 
   const pnls = states.map(state => sessionPnl(state));
+  const after = await Promise.all(states.map(state => leftOpen(state) ? loadAfterSession(client, state) : null));
   const opening = states.some(s => s.startedFlat) ? 'FLAT'
     : states.some(s => s.opening.netQuantity !== 0n) ? 'INHERITED' : 'NONE';
   return {
@@ -96,8 +97,64 @@ export async function sessionSummary(client: PoolClient, sessionId: string, now:
       refused: refusals.reduce((acc, r) => acc + Number(r.count), 0),
     },
     refusals: refusals.map(r => ({ listingId: r.listing_id, reason: r.reason, count: Number(r.count) })),
-    listings: states.map((state, i) => sessionListingRow(state, pnls[i], info, review)),
+    listings: states.map((state, i) => ({
+      ...sessionListingRow(state, pnls[i], info, review),
+      afterSession: after[i] && afterSessionRow(after[i]),
+    })),
   };
+}
+
+function leftOpen(state: SessionListingState): boolean {
+  return state.stoppedAt !== null && state.current.netQuantity !== 0n;
+}
+
+function impactOf(fill: PositionFill): bigint {
+  return fillImpact(fill.before, fill.after, fill.realized, fill.fees, fill.mark);
+}
+
+const AFTER_SESSION_KINDS: Record<string, string> = {
+  SETTLEMENT: 'SETTLED', MANUAL: 'CLOSED_MANUALLY', ADJUSTMENT: 'ADJUSTED', RESET: 'RESET',
+};
+
+// What became of a position the session stopped holding, for reading alongside its PnL, which it never changes: a
+// settlement or anything else booked against it later counts in the strategy's PnL outside sessions.
+function afterSessionRow(a: AfterSession) {
+  const { fill } = a;
+  // A later session starting flat writes the position off with a reset of its own.
+  const inherited = a.nextSessionId !== null && fill?.source !== 'RESET'
+    && (fill === null || (a.nextSessionStartedAt as Date) <= fill.recordedAt);
+  if (inherited) {
+    return { kind: 'INHERITED', at: a.nextSessionStartedAt, sessionId: a.nextSessionId, price: null, impact: null,
+      settlementPrice: null };
+  }
+  if (fill !== null) {
+    const kind = AFTER_SESSION_KINDS[fill.source];
+    if (!kind) {
+      return { kind: 'INHERITED', at: fill.recordedAt, sessionId: fill.sessionId, price: null, impact: null,
+        settlementPrice: null };
+    }
+    return {
+      kind, at: fill.recordedAt, sessionId: fill.sessionId, price: fill.price?.toString() ?? null,
+      impact: impactOf(fill).toString(), settlementPrice: kind === 'SETTLED' ? fill.price?.toString() ?? null : null,
+    };
+  }
+  return {
+    kind: a.eventContract ? 'AWAITING_SETTLEMENT' : 'OPEN', at: null, sessionId: null, price: null, impact: null,
+    settlementPrice: a.settlementPrice?.toString() ?? null,
+  };
+}
+
+const OUTSIDE_SESSION_TERMS: Record<OutOfSessionSource, 'settlements' | 'manual' | 'adjustments' | 'resets'> = {
+  SETTLEMENT: 'settlements', MANUAL: 'manual', ADJUSTMENT: 'adjustments', RESET: 'resets',
+};
+
+// How a strategy's lifetime PnL differs from the sum of its sessions' PnL: what each kind of fill outside them
+// changed it by, and carry, the mark moving on inventory no session held, which is whatever remains.
+function outsideSessions(total: bigint, fills: PositionFill[]) {
+  const terms = { settlements: 0n, manual: 0n, adjustments: 0n, resets: 0n };
+  for (const fill of fills) terms[OUTSIDE_SESSION_TERMS[fill.source as OutOfSessionSource]] += impactOf(fill);
+  const booked = terms.settlements + terms.manual + terms.adjustments + terms.resets;
+  return strings({ total, ...terms, carry: total - booked });
 }
 
 function sessionListingRow(
@@ -171,6 +228,7 @@ export async function strategySummary(client: PoolClient, strategyId: number, mo
     'SELECT session_id FROM strategy.session WHERE strategy_id = $1 AND mode = $2', [strategyId, mode],
   )).rows.map(r => r.session_id);
   const sessionPnls = (await loadSessionStates(client, sessionIds, now)).map(s => sessionPnl(s));
+  const outside = await loadOutOfSessionFills(client, mode, strategyId, now);
   const modes = (await client.query(
     'SELECT DISTINCT mode FROM strategy.session WHERE strategy_id = $1', [strategyId])).rows.map(r => r.mode);
   const info = await loadListingInfo(client, current.listings.map(l => l.listingId));
@@ -183,15 +241,16 @@ export async function strategySummary(client: PoolClient, strategyId: number, mo
     scope: { kind: 'strategy', strategyId, mode, timeZone, dayStart: dayStart.toISOString() },
     asOf: now.toISOString(),
     modesWithData: modes,
-    totals: strings({
-      lifetime: lifetime.total,
-      today: lifetime.total - startOfToday.total,
-      realized: lifetime.realized,
-      unrealized: lifetime.unrealized,
-      fees: lifetime.fees,
-      // Mark moves on inventory held while no session ran, reset write-offs and adjustments.
-      betweenSessions: lifetime.total - sessionPnls.reduce((acc, p) => acc + p.total, 0n),
-    }),
+    totals: {
+      ...strings({
+        lifetime: lifetime.total,
+        today: lifetime.total - startOfToday.total,
+        realized: lifetime.realized,
+        unrealized: lifetime.unrealized,
+        fees: lifetime.fees,
+      }),
+      outsideSessions: outsideSessions(lifetime.total - sessionPnls.reduce((acc, p) => acc + p.total, 0n), outside),
+    },
     openPositions: current.listings.filter(l => l.position.netQuantity !== 0n).length,
     listings: current.listings.map(l => {
       const p = lifetimePnl(l.position, l.mark);

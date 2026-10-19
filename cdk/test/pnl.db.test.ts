@@ -14,6 +14,11 @@ const CENT = 10_000_000;
 const UNIT = 1_000_000;
 const HALF_HOUR = 30 * 60 * 1000;
 const cents = (value: number) => String(value * CENT);
+const outside = (terms: { settlements?: number; manual?: number; adjustments?: number; resets?: number; carry?: number }) => {
+  const all = { settlements: 0, manual: 0, adjustments: 0, resets: 0, carry: 0, ...terms };
+  const total = Object.values(all).reduce((acc, v) => acc + v, 0);
+  return { total: cents(total), ...Object.fromEntries(Object.entries(all).map(([k, v]) => [k, cents(v)])) };
+};
 
 // One strategy on one listing, priced in cents:
 //   10:01  session old buys 10 at 40c (fee 1c)
@@ -24,7 +29,8 @@ const cents = (value: number) => String(value * CENT);
 //   12:30  mark 55c
 //   12:40  new sells 4 at 54c (fee 1c): realizes 4 x 14 = 56c, keeps 6 at 40c
 //   13:00  now: new's PnL = 56 + 6 x 15 - 1 - 100 = 45c, of which carry 10 x (55 - 50) = 50c and trading -5c
-//          (sold 1c under the mark on 4, and the fee). Lifetime = 56 + 90 - 2 = 144c = 49 + 45 + 50 between sessions.
+//          (sold 1c under the mark on 4, and the fee). Lifetime = 56 + 90 - 2 = 144c = 49 + 45 + 50 carried outside
+//          sessions.
 describeDb('PnL derived from the ledger, against Postgres', () => {
   let pool: Pool;
   let client: PoolClient;
@@ -107,14 +113,19 @@ describeDb('PnL derived from the ledger, against Postgres', () => {
     expect(old.opening).toBe('NONE');
     expect(old.totals.total).toBe(cents(49));
     expect(old.asOf).toBe('2026-10-06T11:00:00.000Z');
+    expect(old.listings[0].afterSession).toEqual({
+      kind: 'INHERITED', at: new Date('2026-10-06T12:00:00Z'), sessionId: 'new', price: null, impact: null,
+      settlementPrice: null,
+    });
+    expect(summary.listings[0].afterSession).toBeNull();
   });
 
-  it("a strategy's lifetime is its sessions' PnL plus what moved between them; today starts at the zone's midnight", async () => {
+  it("a strategy's lifetime is its sessions' PnL plus what moved outside them; today starts at the zone's midnight", async () => {
     await story();
     const utc = await summarize(client, { strategyId: '1', mode: 'paper' }, now) as any;
     expect(utc.totals).toEqual({
       lifetime: cents(144), today: cents(144), realized: cents(56), unrealized: cents(90), fees: cents(2),
-      betweenSessions: cents(50),
+      outsideSessions: outside({ carry: 50 }),
     });
     expect(utc.openPositions).toBe(1);
     expect(utc.modesWithData).toEqual(['paper']);
@@ -174,7 +185,13 @@ describeDb('PnL derived from the ledger, against Postgres', () => {
 
     const strategy = await summarize(client, { strategyId: '1', mode: 'paper' }, later) as any;
     expect(strategy.totals.lifetime).toBe(cents(54));
-    expect(strategy.totals.betweenSessions).toBe(cents(-40));
+    // The reset wrote off 6 x (55 - 40); the 50c the mark made between old and new is carry.
+    expect(strategy.totals.outsideSessions).toEqual(outside({ resets: -90, carry: 50 }));
+    const stopped = await summarize(client, { sessionId: 'new' }, later) as any;
+    expect(stopped.listings[0].afterSession).toEqual({
+      kind: 'RESET', at: new Date('2026-10-06T14:00:05Z'), sessionId: 'flat', price: null, impact: cents(-90),
+      settlementPrice: null,
+    });
 
     const s = await series(client, {
       strategyId: '1', mode: 'paper', start: '2026-10-06T13:30:00Z', resolution: String(HALF_HOUR),
@@ -201,8 +218,13 @@ describeDb('PnL derived from the ledger, against Postgres', () => {
     const strategy = await summarize(client, { strategyId: '1', mode: 'paper' }, later) as any;
     expect([strategy.totals.lifetime, strategy.totals.realized, strategy.totals.unrealized, strategy.totals.fees])
       .toEqual([cents(143), cents(146), cents(0), cents(3)]);
-    // The trade belongs to no session, so it lands between them: 143 - (49 + 45).
-    expect(strategy.totals.betweenSessions).toBe(cents(49));
+    // The trade belongs to no session, so it lands outside them: 143 - (49 + 45), its fee plus the carry.
+    expect(strategy.totals.outsideSessions).toEqual(outside({ manual: -1, carry: 50 }));
+    const stopped = await summarize(client, { sessionId: 'new' }, later) as any;
+    expect(stopped.totals.total).toBe(cents(45));
+    expect(stopped.listings[0].afterSession).toMatchObject({
+      kind: 'CLOSED_MANUALLY', sessionId: null, price: cents(55), impact: cents(-1),
+    });
     expect(strategy.openPositions).toBe(0);
 
     const s = await series(client, {
@@ -219,9 +241,15 @@ describeDb('PnL derived from the ledger, against Postgres', () => {
   it('a correction to flat realizes nothing, so it writes the unrealized PnL off', async () => {
     await story();
     await stop('new', '2026-10-06T13:00:00Z');
+    const later = new Date('2026-10-06T14:00:00Z');
+    expect((await summarize(client, { sessionId: 'new' }, later) as any).listings[0].afterSession)
+      .toMatchObject({ kind: 'OPEN', impact: null });
     await adjust('2026-10-06T13:10:00Z', { netQuantity: 0, totalCost: 0 });
-    const strategy = await summarize(client, { strategyId: '1', mode: 'paper' }, new Date('2026-10-06T14:00:00Z')) as any;
+    const strategy = await summarize(client, { strategyId: '1', mode: 'paper' }, later) as any;
     expect([strategy.totals.lifetime, strategy.totals.realized]).toEqual([cents(54), cents(56)]);
+    expect(strategy.totals.outsideSessions).toEqual(outside({ adjustments: -90, carry: 50 }));
+    expect((await summarize(client, { sessionId: 'new' }, later) as any).listings[0].afterSession)
+      .toMatchObject({ kind: 'ADJUSTED', impact: cents(-90) });
   });
 
   it('refuses a booking while a session holds the listing, or one that mixes a trade with a correction', async () => {

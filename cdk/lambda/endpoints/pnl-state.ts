@@ -234,6 +234,124 @@ export async function loadStrategyState(
   };
 }
 
+// Fills that change a strategy's lifetime PnL outside every session's own PnL: a settlement or a manual trade belongs
+// to no session, a correction is an operator's, and a reset writes off what its session chose not to inherit.
+export const OUT_OF_SESSION_SOURCES = ['SETTLEMENT', 'MANUAL', 'ADJUSTMENT', 'RESET'] as const;
+export type OutOfSessionSource = typeof OUT_OF_SESSION_SOURCES[number];
+
+// A fill with the position it found, valued against the newest mark before it, as the PnL chart does (fills before
+// marks at the same moment).
+export interface PositionFill {
+  fillId: string;
+  source: string;
+  sessionId: string | null;
+  listingId: number;
+  accountId: number | null;
+  recordedAt: Date;
+  price: bigint | null;
+  before: PositionState;
+  after: PositionState;
+  // What this row itself realized and paid: only a manual trade or a settlement carries its own amounts.
+  realized: bigint;
+  fees: bigint;
+  mark: MarkInputs | null;
+}
+
+const POSITION_FILL = `
+  SELECT f.fill_id, f.source, f.session_id, f.listing_id, f.account_id, f.recorded_at, f.fill_price,
+    f.net_quantity_after, f.total_cost_after, f.realized_pnl_after, f.fees_after,
+    prev.net_quantity_after AS before_net, prev.total_cost_after AS before_cost, mk.bid, mk.ask, mk.last_trade
+  FROM ledger.fill f
+  LEFT JOIN LATERAL (
+    SELECT net_quantity_after, total_cost_after FROM ledger.fill p
+    WHERE p.strategy_id = f.strategy_id AND p.listing_id = f.listing_id AND p.mode = f.mode
+      AND p.account_id IS NOT DISTINCT FROM f.account_id AND p.source <> 'GAP' AND p.fill_id < f.fill_id
+    ORDER BY p.fill_id DESC LIMIT 1
+  ) prev ON TRUE
+  LEFT JOIN LATERAL (
+    SELECT bid, ask, last_trade FROM ledger.mark m
+    WHERE m.listing_id = f.listing_id AND m.ts < f.recorded_at ORDER BY m.ts DESC LIMIT 1
+  ) mk ON TRUE`;
+
+function positionFill(r: Record<string, any>): PositionFill {
+  const own = r.source === 'MANUAL' || r.source === 'SETTLEMENT';
+  return {
+    fillId: String(r.fill_id),
+    source: r.source,
+    sessionId: r.session_id,
+    listingId: r.listing_id,
+    accountId: r.account_id,
+    recordedAt: r.recorded_at,
+    price: r.fill_price === null ? null : toBigInt(r.fill_price),
+    before: position(r.before_net, r.before_cost),
+    after: position(r.net_quantity_after, r.total_cost_after),
+    realized: own ? toBigInt(r.realized_pnl_after) : 0n,
+    fees: own ? toBigInt(r.fees_after) : 0n,
+    mark: toMark(r),
+  };
+}
+
+export async function loadOutOfSessionFills(
+  client: PoolClient, mode: string, strategyId: number, at: Date,
+): Promise<PositionFill[]> {
+  const rows = (await client.query(`${POSITION_FILL}
+    WHERE f.mode = $1 AND f.strategy_id = $2 AND f.recorded_at <= $3 AND f.source = ANY($4::text[])
+    ORDER BY f.fill_id`, [mode, strategyId, at, OUT_OF_SESSION_SOURCES])).rows;
+  return rows.map(positionFill);
+}
+
+// What became of a position a stopped session left open: the first thing to touch it afterwards, a later session
+// holding it (whether or not it traded), or, if nothing has yet, whether its market is still to settle. Only for
+// reading: none of it counts in the session's PnL.
+export interface AfterSession {
+  fill: PositionFill | null;
+  nextSessionId: string | null;
+  nextSessionStartedAt: Date | null;
+  // Set for a prediction-market outcome; settlementPrice stays null until its result is recorded.
+  eventContract: boolean;
+  settlementPrice: bigint | null;
+}
+
+export async function loadAfterSession(client: PoolClient, state: SessionListingState): Promise<AfterSession> {
+  const r = (await client.query(`
+    WITH acct AS (
+      SELECT sva.account_id FROM sm.listing ll
+      JOIN account_master.session_venue_account sva ON sva.exchange_id = ll.exchange_id AND sva.session_id = $1
+      WHERE ll.listing_id = $4
+    )
+    SELECT
+      (SELECT f.fill_id FROM ledger.fill f
+       WHERE f.strategy_id = $2 AND f.mode = $3 AND f.listing_id = $4 AND f.source <> 'GAP'
+         AND f.account_id IS NOT DISTINCT FROM (SELECT account_id FROM acct)
+         AND f.session_id IS DISTINCT FROM $1 AND f.recorded_at >= $5
+       ORDER BY f.fill_id LIMIT 1) AS next_fill_id,
+      next.session_id AS next_session_id, next.started_at AS next_started_at,
+      ec.event_contract_id IS NOT NULL AS event_contract, ec.settlement_price
+    FROM (SELECT 1) one
+    LEFT JOIN LATERAL (
+      SELECT s.session_id, s.started_at FROM strategy.session_listing sl
+      JOIN strategy.session s ON s.session_id = sl.session_id
+      JOIN sm.listing l ON l.listing_id = sl.listing_id
+      LEFT JOIN account_master.session_venue_account sva
+        ON sva.session_id = s.session_id AND sva.exchange_id = l.exchange_id
+      WHERE sl.strategy_id = $2 AND sl.mode = $3 AND sl.listing_id = $4 AND s.session_id <> $1
+        AND s.started_at > $5 AND sva.account_id IS NOT DISTINCT FROM (SELECT account_id FROM acct)
+      ORDER BY s.started_at LIMIT 1
+    ) next ON TRUE
+    LEFT JOIN sm.listing l ON l.listing_id = $4
+    LEFT JOIN sm.event_contract ec ON ec.security_id = l.security_id`,
+  [state.sessionId, state.strategyId, state.mode, state.listingId, state.startedAt])).rows[0];
+  const fill = r.next_fill_id === null ? null
+    : positionFill((await client.query(`${POSITION_FILL} WHERE f.fill_id = $1`, [r.next_fill_id])).rows[0]);
+  return {
+    fill,
+    nextSessionId: r.next_session_id,
+    nextSessionStartedAt: r.next_started_at,
+    eventContract: r.event_contract,
+    settlementPrice: r.settlement_price === null ? null : toBigInt(r.settlement_price),
+  };
+}
+
 // The start of the day containing `at` in a time zone (an IANA name such as UTC or America/New_York).
 export async function startOfDay(client: PoolClient, at: Date, timeZone: string): Promise<Date> {
   const result = await client.query(

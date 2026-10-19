@@ -135,6 +135,52 @@ describeDb('Settlement sweeper, against Postgres', () => {
     expect([event.pnlImpact, event.actor]).toEqual([cents(600), 'settlement-sweeper']);
   });
 
+  // A session buying 10 at 40c (fee 1c) and stopping at kickoff with the mark at 45c: its PnL is 49c and stays so.
+  async function heldThroughKickoff() {
+    await session('s', [500]);
+    await open('s', 500, 0, 10, 40, CENT);
+    await client.query(`INSERT INTO ledger.mark (listing_id, ts, bid, ask, last_trade)
+      VALUES (500, NOW() - INTERVAL '30 minutes', $1, $1, 0)`, [45 * CENT]);
+    await client.query(`UPDATE strategy.session SET status = 'STOPPED', stopped_at = NOW() - INTERVAL '20 minutes'
+      WHERE session_id = 's'`);
+  }
+
+  it('leaves a session its PnL at kickoff and shows the settlement outside sessions, where the strategy adds up', async () => {
+    await heldThroughKickoff();
+    const now = () => new Date(Date.now() + 60_000);
+    const before = await summarize(client, { sessionId: 's' }, now()) as any;
+    expect(before.listings[0].afterSession).toMatchObject({ kind: 'AWAITING_SETTLEMENT', settlementPrice: null });
+
+    await settle([{ eventContractId: 1, settlementPrice: 0 }]);
+    await sweepSettlements(client);
+
+    const after = await summarize(client, { sessionId: 's' }, now()) as any;
+    expect(after.totals.total).toBe(cents(49));
+    expect(after.listings[0].afterSession).toMatchObject({
+      kind: 'SETTLED', sessionId: null, price: '0', settlementPrice: '0', impact: cents(-450),
+    });
+    const strategy = await summarize(client, { strategyId: '1', mode: 'paper' }, now()) as any;
+    expect(strategy.totals.lifetime).toBe(cents(-401));
+    expect(strategy.totals.outsideSessions).toEqual({
+      total: cents(-450), settlements: cents(-450), manual: '0', adjustments: '0', resets: '0', carry: '0',
+    });
+  });
+
+  it('counts the mark moving after the session stopped as carry, and only the rest as the settlement', async () => {
+    await heldThroughKickoff();
+    // Another strategy's session still trading the market marks it at 30c.
+    await client.query(`INSERT INTO ledger.mark (listing_id, ts, bid, ask, last_trade)
+      VALUES (500, NOW() - INTERVAL '10 minutes', $1, $1, 0)`, [30 * CENT]);
+    await settle([{ eventContractId: 1, settlementPrice: DOLLAR }]);
+    await sweepSettlements(client);
+
+    const strategy = await summarize(client, { strategyId: '1', mode: 'paper' }, new Date(Date.now() + 60_000)) as any;
+    expect(strategy.totals.lifetime).toBe(cents(599));
+    expect(strategy.totals.outsideSessions).toEqual({
+      total: cents(550), settlements: cents(700), manual: '0', adjustments: '0', resets: '0', carry: cents(-150),
+    });
+  });
+
   it('leaves a position a running session holds, then books it once that session stops', async () => {
     await session('s', [500]);
     await open('s', 500, 0, 10, 40);
