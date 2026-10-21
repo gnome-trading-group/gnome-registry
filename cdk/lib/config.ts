@@ -16,6 +16,8 @@ export interface RegistryConfig {
     controllerUrl: string;
     incidentIo: boolean;
     metaEmails: string[];
+    // The account's monthly AWS budget: nearing it, passing it or being forecast to pass it raises an alert.
+    monthlyBudgetUsd: number;
   };
   venuePoller: {
     kalshiApiUrl: string;
@@ -45,6 +47,7 @@ export const CONFIGS: { [stage in Stage]?: RegistryConfig } = {
       controllerUrl: 'https://controller-dev.gnometrading.group',
       incidentIo: false,
       metaEmails: [],
+      monthlyBudgetUsd: 300,
     },
     venuePoller: { ...defaultConfig.venuePoller, kalshiApiUrl: 'https://external-api.demo.kalshi.co' },
   },
@@ -56,6 +59,7 @@ export const CONFIGS: { [stage in Stage]?: RegistryConfig } = {
       controllerUrl: 'https://controller.gnometrading.group',
       incidentIo: true,
       metaEmails: ["alerts@gnometrading.group"],
+      monthlyBudgetUsd: 300,
     },
     slackChannel: 'C0B60PCAPNC', // #gnome-security-master
     dbInstanceType: ec2.InstanceType.of(ec2.InstanceClass.T4G, ec2.InstanceSize.MEDIUM),

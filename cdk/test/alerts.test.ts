@@ -1,6 +1,6 @@
 import { isAutomaticActor, normalizeType, severityOf } from '../lambda/alerts/alert-types';
 import { sinksFor } from '../lambda/alerts/routes';
-import { deliverUnrecorded, fromAlarm } from '../lambda/alerts/alert-router';
+import { deliverUnrecorded, fromAlarm, fromCostNotification } from '../lambda/alerts/alert-router';
 import { acknowledgedMessage, escape, firingMessage, resolvedMessage } from '../lambda/alerts/sinks/slack';
 import { eventFor } from '../lambda/alerts/sinks/incidentio';
 import { parseAlert } from '../lambda/alerts/alerts-ingest';
@@ -77,6 +77,50 @@ describe('CloudWatch alarms', () => {
   it('ignores autoscaling and alerting\'s own alarms', () => {
     expect(fromAlarm(alarm('TargetTracking-table-AlarmHigh', 'ALARM', 'OK'))).toBeNull();
     expect(fromAlarm(alarm('AlertingMeta-RouterErrors-Critical', 'ALARM', 'OK'))).toBeNull();
+  });
+});
+
+describe('AWS spend notifications', () => {
+  const sns = (message: string, timestamp = '2026-10-19T12:00:00Z') => ({
+    EventSource: 'aws:sns', Sns: { MessageId: 'm1', Timestamp: timestamp, Message: message },
+  });
+  const budget = (alertType: string, threshold: string, amount: string) => [
+    'AWS Budget Notification October 19, 2026', 'AWS Account 241533121172', '',
+    'Budget Name: gnome-monthly', 'Budget Type: Cost', 'Budgeted Amount: $300.00',
+    `Alert Type: ${alertType}`, `Alert Threshold: > ${threshold}`, `${alertType} Amount: ${amount}`,
+  ].join('\n');
+
+  it('warns nearing the budget or on a forecast, and errors past it', () => {
+    expect(fromCostNotification(sns(budget('ACTUAL', '$240.00', '$245.12')))).toMatchObject({
+      type: 'COST_BUDGET', severity: 'WARNING', key: 'budget:gnome-monthly:ACTUAL:240:2026-10',
+      title: 'AWS spend $245.12 is over $240.00 on budget gnome-monthly ($300.00/month)',
+    });
+    expect(fromCostNotification(sns(budget('ACTUAL', '$300.00', '$1,301.50')))).toMatchObject({
+      severity: 'ERROR', title: 'AWS spend $1301.50 is over $300.00 on budget gnome-monthly ($300.00/month)',
+    });
+    expect(fromCostNotification(sns(budget('FORECASTED', '$300.00', '$320.00')))).toMatchObject({
+      severity: 'WARNING', key: 'budget:gnome-monthly:FORECASTED:300:2026-10',
+    });
+  });
+
+  it('keys a budget threshold per month, so next month\'s crossing is new', () => {
+    const october = fromCostNotification(sns(budget('ACTUAL', '$240.00', '$245.12')))!;
+    const november = fromCostNotification(sns(budget('ACTUAL', '$240.00', '$245.12'), '2026-11-20T12:00:00Z'))!;
+    expect(october.key).not.toBe(november.key);
+  });
+
+  it('reads a spend anomaly', () => {
+    const anomaly = JSON.stringify({
+      anomalyId: 'an-1', monitorName: 'gnome-services', dimensionalValue: 'Amazon Elastic Compute Cloud - Compute',
+      impact: { totalImpact: 84.5 }, anomalyDetailsLink: 'https://console.aws.amazon.com/cost-management/home#/anomaly-detection/an-1',
+      rootCauses: [{ service: 'Amazon Elastic Compute Cloud - Compute', region: 'eu-west-1', usageType: 'BoxUsage:c7i.4xlarge' }],
+    });
+    expect(fromCostNotification(sns(anomaly))).toMatchObject({
+      type: 'COST_ANOMALY', key: 'cost-anomaly:an-1',
+      title: 'AWS spend anomaly: $84.50 over expected (Amazon Elastic Compute Cloud - Compute)',
+      body: 'Root causes:\nAmazon Elastic Compute Cloud - Compute / eu-west-1 / BoxUsage:c7i.4xlarge',
+    });
+    expect(severityOf(fromCostNotification(sns(anomaly))!, null, 'prod')).toBe('ERROR');
   });
 });
 

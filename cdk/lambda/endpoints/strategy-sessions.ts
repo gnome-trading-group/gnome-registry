@@ -1,6 +1,6 @@
 import { APIGatewayProxyEvent, APIGatewayProxyEventQueryStringParameters } from 'aws-lambda';
 import { PoolClient } from 'pg';
-import { ResourceHandler, withTransaction } from './base';
+import { parseIdList, ResourceHandler, withTransaction } from './base';
 import { LaunchCheckError } from './launch-checks';
 import { AccountAssignmentError, bindAccounts } from './venue-account-assignment';
 
@@ -92,6 +92,24 @@ export class StrategySessionHandler extends ResourceHandler {
     }
     if (params?.mode === 'paper' || params?.mode === 'live') {
       query += ` AND mode='${params.mode}'`;
+    }
+    // A session's listing rows outlive its lease, so these find sessions that traded a listing as well as those
+    // trading it now.
+    if (params?.listingId !== undefined) {
+      const ids = parseIdList(params.listingId);
+      query += ids.length > 0
+        ? ` AND session_id IN (SELECT session_id FROM strategy.session_listing WHERE listing_id IN (${ids.join(',')}))`
+        : ' AND FALSE';
+    }
+    if (params?.eventId !== undefined) {
+      const ids = parseIdList(params.eventId);
+      query += ids.length > 0
+        ? ` AND session_id IN (
+            SELECT sl.session_id FROM strategy.session_listing sl
+            JOIN sm.listing l ON l.listing_id = sl.listing_id
+            JOIN sm.event_contract ec ON ec.security_id = l.security_id
+            WHERE ec.event_id IN (${ids.join(',')}))`
+        : ' AND FALSE';
     }
     return query;
   }

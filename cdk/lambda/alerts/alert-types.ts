@@ -91,6 +91,9 @@ export const ALERT_TYPES: Record<string, AlertType> = {
 
   // From the alarm's name: cdk-monitoring-constructs ends it with the tier it was declared under.
   CLOUDWATCH_ALARM: { severity: e => e.severity ?? 'WARNING', debounce: 1 },
+  // Billing data lags by hours, so a page couldn't stop the spend sooner than a person reading Slack today.
+  COST_BUDGET: { severity: e => e.severity === 'ERROR' ? 'ERROR' : 'WARNING', debounce: 1 },
+  COST_ANOMALY: { severity: 'ERROR', debounce: 1 },
 };
 
 export function alertType(type: string): AlertType {

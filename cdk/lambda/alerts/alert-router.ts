@@ -13,6 +13,7 @@ import { sendToIncidentIo } from './sinks/incidentio';
 //   the 1-minute rule: asks the store what the monitoring rules find, and puts it on the bus
 //   an alert on the bus (from the tick, the ingest API or any service in the account): records it, then delivers
 //   a CloudWatch alarm changing state: the same, once it's in the alert shape
+//   a budget or spend anomaly notification (SNS): the same
 // A sink that fails is logged, not retried here: the alert stays owed to it, and the next tick redelivers. If the
 // store can't be reached, a new alert is delivered anyway (nothing must stop a page) and the invocation fails, so
 // Lambda's retry records it later. Only the first attempt delivers it unrecorded: each retry would post it again.
@@ -79,6 +80,57 @@ export function fromAlarm(event: any): AlertEvent | null {
     labels: { alarmName: name, region },
     links: [{ title: 'Alarm', url: `https://${region}.console.aws.amazon.com/cloudwatch/home?region=${region}#alarmsV2:alarm/${encodeURIComponent(name)}` }],
     stateAt: detail.state?.timestamp ?? event.time ?? new Date().toISOString(),
+  };
+}
+
+const money = (text: string, label: string): number | null => {
+  const match = new RegExp(`^${label}:\\s*>?\\s*\\$([\\d,.]+)`, 'm').exec(text);
+  return match ? Number(match[1].replace(/,/g, '')) : null;
+};
+
+// An SNS message from AWS Budgets (plain text) or Cost Anomaly Detection (JSON). Going over the budget is ERROR;
+// nearing it, or being forecast to pass it, is a WARNING. Like the ingest API's reports these are moments rather than
+// states: each closes quietly after a day, and repeats of an open one only count against it.
+export function fromCostNotification(record: any): AlertEvent | null {
+  const sns = record?.Sns;
+  if (!sns?.Message) return null;
+  const stateAt: string = sns.Timestamp ?? new Date().toISOString();
+  let anomaly: any = null;
+  try {
+    anomaly = JSON.parse(sns.Message);
+  } catch {
+    // Budgets' notifications aren't JSON.
+  }
+  if (anomaly?.anomalyId) {
+    const impact = Number(anomaly.impact?.totalImpact ?? 0);
+    const causes = (anomaly.rootCauses ?? []).map((c: any) => [c.service, c.region, c.usageType].filter(Boolean).join(' / '));
+    return {
+      action: 'FIRING', key: `cost-anomaly:${anomaly.anomalyId}`, type: 'COST_ANOMALY', source: 'ingest',
+      title: `AWS spend anomaly: $${impact.toFixed(2)} over expected${anomaly.dimensionalValue ? ` (${anomaly.dimensionalValue})` : ''}`,
+      body: causes.length > 0 ? `Root causes:\n${causes.join('\n')}` : null,
+      labels: { monitor: String(anomaly.monitorName ?? ''), impactUsd: impact.toFixed(2) },
+      links: anomaly.anomalyDetailsLink ? [{ title: 'Anomaly', url: anomaly.anomalyDetailsLink }] : [],
+      stateAt,
+    };
+  }
+  const message: string = sns.Message;
+  const name = /^Budget Name:\s*(.+)$/m.exec(message)?.[1]?.trim() ?? 'budget';
+  const alertType = /^Alert Type:\s*(\w+)/m.exec(message)?.[1] ?? 'ACTUAL';
+  const budgeted = money(message, 'Budgeted Amount');
+  const threshold = money(message, 'Alert Threshold');
+  const amount = money(message, `${alertType} Amount`);
+  const over = alertType === 'ACTUAL' && budgeted !== null && threshold !== null && threshold >= budgeted;
+  const month = stateAt.slice(0, 7);
+  return {
+    action: 'FIRING', key: `budget:${name}:${alertType}:${threshold ?? '-'}:${month}`, type: 'COST_BUDGET',
+    source: 'ingest', severity: over ? 'ERROR' : 'WARNING',
+    title: `${alertType === 'FORECASTED' ? 'Forecast AWS spend' : 'AWS spend'} ${amount !== null ? `$${amount.toFixed(2)} ` : ''}`
+      + `is over ${threshold !== null ? `$${threshold.toFixed(2)}` : 'its threshold'} on budget ${name}`
+      + (budgeted !== null ? ` ($${budgeted.toFixed(2)}/month)` : ''),
+    body: message.trim().slice(0, 4000),
+    labels: { budget: name, alertType },
+    links: [{ title: 'Budgets', url: 'https://us-east-1.console.aws.amazon.com/billing/home#/budgets' }],
+    stateAt,
   };
 }
 
@@ -156,6 +208,13 @@ export const handler = async (event: any) => {
   }
   if (event.source === ALERT_EVENT_SOURCE) {
     await handleAlert(event.detail as AlertEvent, event);
+    return;
+  }
+  if (event.Records?.[0]?.EventSource === 'aws:sns') {
+    for (const record of event.Records) {
+      const alert = fromCostNotification(record);
+      if (alert) await handleAlert(alert, { id: record.Sns.MessageId, time: record.Sns.Timestamp });
+    }
     return;
   }
   console.warn('Ignoring an event the router does not handle', JSON.stringify(event).slice(0, 500));

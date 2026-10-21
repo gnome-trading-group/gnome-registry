@@ -174,7 +174,8 @@ export async function events(client: PoolClient, params: Record<string, string |
 
   const eventIds = [...new Set(traded.filter(isContract).map(t => t.event_id as number))];
   const eventRows = eventIds.length === 0 ? [] : (await client.query(
-    'SELECT event_id, title, expiry, resolved FROM sm.event WHERE event_id = ANY($1::int[])', [eventIds])).rows;
+    'SELECT event_id, title, expiry, resolved FROM sm.event WHERE event_id = ANY($1::int[]) ORDER BY expiry NULLS LAST, event_id',
+    [eventIds])).rows;
   const contracts: Contract[] = eventIds.length === 0 ? [] : (await client.query(`
     SELECT ec.event_id, ec.event_contract_id, ec.outcome_label, s.contract_type, l.listing_id, l.exchange_security_id,
       l.exchange_security_symbol AS symbol

@@ -18,6 +18,22 @@ describe('strategy session queries', () => {
     expect(handler.generateSelectQuery({ mode: "x' OR 1=1" })).not.toContain('mode=');
   });
 
+  it('filters to sessions that traded a listing', () => {
+    expect(handler.generateSelectQuery({ listingId: '42' }))
+      .toContain('AND session_id IN (SELECT session_id FROM strategy.session_listing WHERE listing_id IN (42))');
+  });
+
+  it('filters to sessions that traded any listing of an event', () => {
+    const query = handler.generateSelectQuery({ eventId: '9', status: 'RUNNING' });
+    expect(query).toContain('WHERE ec.event_id IN (9)');
+    expect(query).toContain("AND status IN ('RUNNING')");
+  });
+
+  it('matches nothing rather than everything for an invalid listing or event id', () => {
+    expect(handler.generateSelectQuery({ listingId: "1' OR 1=1" })).toContain('AND FALSE');
+    expect(handler.generateSelectQuery({ eventId: 'abc' })).toContain('AND FALSE');
+  });
+
   it('guards an update on the expected statuses', () => {
     const query = handler.generateModifyQuery(
       { session_id: 's1' },

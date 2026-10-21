@@ -1,6 +1,8 @@
 import * as cdk from 'aws-cdk-lib';
 import { Construct } from 'constructs';
 import * as apigw from 'aws-cdk-lib/aws-apigateway';
+import * as budgets from 'aws-cdk-lib/aws-budgets';
+import * as ce from 'aws-cdk-lib/aws-ce';
 import * as cloudwatch from 'aws-cdk-lib/aws-cloudwatch';
 import * as cwActions from 'aws-cdk-lib/aws-cloudwatch-actions';
 import * as ec2 from 'aws-cdk-lib/aws-ec2';
@@ -37,8 +39,8 @@ export const ALERTS_API_URL_PARAMETER = '/gnome/alerting/api-url';
 export const ALERT_BUS_NAME_PARAMETER = '/gnome/alerting/bus-name';
 const META_PREFIX = 'AlertingMeta-';
 
-// One path for every alert: the monitoring rules' 1-minute tick, the ingest API, services in the account and
-// CloudWatch alarms all put alerts on one bus; the router records each with the store and delivers it to Slack and,
+// One path for every alert: the monitoring rules' 1-minute tick, the ingest API, services in the account, CloudWatch
+// alarms and AWS spend notifications all reach the router; the router records each with the store and delivers it to Slack and,
 // in prod, incident.io. Alerting's own health is watched by alarms that skip the router entirely.
 export class AlertingStack extends cdk.Stack {
   constructor(scope: Construct, id: string, props: Props) {
@@ -144,7 +146,54 @@ export class AlertingStack extends cdk.Stack {
       description: 'The bus services in this account put alerts on (events:PutEvents)',
     });
 
+    this.costAlerts(props, router);
     this.alertOnAlerting(props, router, store, ingest, dlq, tick);
+  }
+
+  // AWS Budgets and Cost Anomaly Detection can only notify by SNS or email, so their topic feeds the router directly.
+  private costAlerts(props: Props, router: lambda.NodejsFunction) {
+    const topic = new sns.Topic(this, 'CostAlertsTopic');
+    const { policyDependable } = topic.addToResourcePolicy(new iam.PolicyStatement({
+      actions: ['sns:Publish'],
+      principals: [new iam.ServicePrincipal('budgets.amazonaws.com'), new iam.ServicePrincipal('costalerts.amazonaws.com')],
+      resources: [topic.topicArn],
+      conditions: { StringEquals: { 'aws:SourceAccount': this.account } },
+    }));
+    topic.addSubscription(new subs.LambdaSubscription(router));
+
+    const notify = (notificationType: 'ACTUAL' | 'FORECASTED', threshold: number) => ({
+      notification: { notificationType, comparisonOperator: 'GREATER_THAN', threshold, thresholdType: 'PERCENTAGE' },
+      subscribers: [{ subscriptionType: 'SNS', address: topic.topicArn }],
+    });
+    const budget = new budgets.CfnBudget(this, 'MonthlyBudget', {
+      budget: {
+        budgetName: 'gnome-monthly',
+        budgetType: 'COST',
+        timeUnit: 'MONTHLY',
+        budgetLimit: { amount: props.alerting.monthlyBudgetUsd, unit: 'USD' },
+      },
+      notificationsWithSubscribers: [notify('ACTUAL', 80), notify('ACTUAL', 100), notify('FORECASTED', 100)],
+    });
+    // Budgets checks it may publish to the topic when the budget is created.
+    if (policyDependable) budget.node.addDependency(policyDependable);
+
+    // Budgets only hears about a runaway once the month's total moves; this catches a service's spend jumping within
+    // hours.
+    const monitor = new ce.CfnAnomalyMonitor(this, 'CostAnomalyMonitor', {
+      monitorName: 'gnome-services',
+      monitorType: 'DIMENSIONAL',
+      monitorDimension: 'SERVICE',
+    });
+    const subscription = new ce.CfnAnomalySubscription(this, 'CostAnomalySubscription', {
+      subscriptionName: 'gnome-alerts',
+      frequency: 'IMMEDIATE',
+      monitorArnList: [monitor.attrMonitorArn],
+      subscribers: [{ type: 'SNS', address: topic.topicArn }],
+      thresholdExpression: JSON.stringify({
+        Dimensions: { Key: 'ANOMALY_TOTAL_IMPACT_ABSOLUTE', MatchOptions: ['GREATER_THAN_OR_EQUAL'], Values: ['20'] },
+      }),
+    });
+    if (policyDependable) subscription.node.addDependency(policyDependable);
   }
 
   // Alerting watching itself can't go through the router: these go to incident.io's CloudWatch alert source (prod)

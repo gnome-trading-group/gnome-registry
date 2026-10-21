@@ -72,6 +72,22 @@
       ],
       "url": "https://github.com/gnome-trading-group/gnome-registry/blob/main/docs/runbooks/alerts/CLOUDWATCH_ALARM.md"
     },
+    "COST_ANOMALY": {
+      "summary": "AWS Cost Anomaly Detection saw a service's spend jump well above its usual pattern.",
+      "firstSteps": [
+        "Open the anomaly from the alert's link and read its root causes.",
+        "Check whether the named service is still spending at that rate."
+      ],
+      "url": "https://github.com/gnome-trading-group/gnome-registry/blob/main/docs/runbooks/alerts/COST_ANOMALY.md"
+    },
+    "COST_BUDGET": {
+      "summary": "The account's AWS spend this month is near, over, or forecast to pass its budget.",
+      "firstSteps": [
+        "Open Cost Explorer for this account, grouped by service, for this month.",
+        "Find what grew, and whether something is still running that shouldn't be."
+      ],
+      "url": "https://github.com/gnome-trading-group/gnome-registry/blob/main/docs/runbooks/alerts/COST_BUDGET.md"
+    },
     "CUSTOM": {
       "summary": "A strategy or service raised its own alert.",
       "firstSteps": [
