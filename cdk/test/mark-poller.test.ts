@@ -45,16 +45,24 @@ describe('Kalshi quotes', () => {
 describe('Polymarket Intl quotes', () => {
   it('takes the best level of each side, which the CLOB lists last', () => {
     const book = {
-      asset_id: '1110', last_trade_price: '0.920',
+      asset_id: '1110', last_trade_price: '0.080',
       bids: [{ price: '0.01', size: '2220988.08' }, { price: '0.9', size: '243341.26' }, { price: '0.91', size: '28880.13' }],
       asks: [{ price: '0.99', size: '113359.44' }, { price: '0.93', size: '241855.61' }, { price: '0.92', size: '13294' }],
     };
-    expect(polymarketIntlQuote(listing('0xdf9b:1110'), book))
+    expect(polymarketIntlQuote(listing('0xdf9b:1110'), book, '0.920'))
       .toEqual({ listingId: 7, bid: cents(91), ask: cents(92), lastTrade: cents(92) });
   });
 
+  // K27 vs Virtus.pro after the game, before resolution: the K27 token's book carried Virtus.pro's 0.999.
+  it('takes the token\'s own last trade, never the book\'s', () => {
+    const book = { asset_id: '4032', last_trade_price: '0.999', bids: [],
+      asks: [{ price: '0.01', size: '1092' }, { price: '0.001', size: '21551.39' }] };
+    expect(polymarketIntlQuote(listing('0xe81e:4032'), book, '0.019'))
+      .toEqual({ listingId: 7, bid: 0n, ask: 1_000_000n, lastTrade: 19_000_000n });
+  });
+
   it('reads a missing side or trade as unknown', () => {
-    expect(polymarketIntlQuote(listing('0xdf9b:1110'), { bids: [{ price: '0.4', size: '0' }], asks: [], last_trade_price: '' }))
+    expect(polymarketIntlQuote(listing('0xdf9b:1110'), { bids: [{ price: '0.4', size: '0' }], asks: [] }, undefined))
       .toEqual({ listingId: 7, bid: 0n, ask: 0n, lastTrade: 0n });
   });
 });

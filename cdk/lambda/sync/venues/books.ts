@@ -85,7 +85,9 @@ export function kalshiQuote(listing: UnwatchedListing, market: Record<string, an
 }
 
 // Each Polymarket Intl outcome token has its own book. The CLOB lists levels worst first, so the best is searched for.
-export function polymarketIntlQuote(listing: UnwatchedListing, book: Record<string, any>): Quote {
+// A book's last_trade_price is the market's last trade, often in the other outcome's terms (0.999 on a token asking
+// 0.001), so the token's own last trade is read apart.
+export function polymarketIntlQuote(listing: UnwatchedListing, book: Record<string, any>, lastTrade: unknown): Quote {
   const levels = (side: unknown) => (Array.isArray(side) ? side : [])
     .filter((l: any) => scaleDecimal(l?.size ?? 0, SIZE_SCALE) > 0n).map((l: any) => price(l.price)).filter(p => p > 0n);
   const bids = levels(book.bids);
@@ -94,7 +96,7 @@ export function polymarketIntlQuote(listing: UnwatchedListing, book: Record<stri
     listingId: listing.listing_id,
     bid: bids.reduce((best, p) => (p > best ? p : best), 0n),
     ask: asks.reduce((best, p) => (best === 0n || p < best ? p : best), 0n),
-    lastTrade: price(book.last_trade_price),
+    lastTrade: price(lastTrade),
   };
 }
 
@@ -127,18 +129,24 @@ export async function polymarketIntlQuotes(listings: UnwatchedListing[]): Promis
     const id = l.exchange_security_id ?? '';
     return id.includes(':') ? id.slice(id.indexOf(':') + 1) : id;
   };
-  const books = new Map<string, Record<string, any>>();
-  const tokens = [...new Set(listings.map(tokenOf).filter(Boolean))];
-  for (const batch of chunks(tokens, POLYMARKET_BATCH)) {
-    const res = await fetchWithRetry(`${CLOB_API}/books`, () => ({
+  const postTokens = async (path: string, batch: string[]): Promise<Record<string, any>[]> => {
+    const res = await fetchWithRetry(`${CLOB_API}${path}`, () => ({
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(batch.map(token_id => ({ token_id }))),
     }));
-    if (!res.ok) throw new Error(`Polymarket POST /books failed: ${res.status} ${await res.text()}`);
-    for (const book of await res.json() as Record<string, any>[]) books.set(String(book.asset_id), book);
+    if (!res.ok) throw new Error(`Polymarket POST ${path} failed: ${res.status} ${await res.text()}`);
+    return res.json();
+  };
+  const books = new Map<string, Record<string, any>>();
+  const lastTrades = new Map<string, unknown>();
+  const tokens = [...new Set(listings.map(tokenOf).filter(Boolean))];
+  for (const batch of chunks(tokens, POLYMARKET_BATCH)) {
+    for (const book of await postTokens('/books', batch)) books.set(String(book.asset_id), book);
+    for (const trade of await postTokens('/last-trades-prices', batch)) lastTrades.set(String(trade.token_id), trade.price);
   }
-  return quoteEach(listings, l => books.get(tokenOf(l)), polymarketIntlQuote);
+  return quoteEach(listings, l => books.get(tokenOf(l)),
+    (l, book) => polymarketIntlQuote(l, book, lastTrades.get(tokenOf(l))));
 }
 
 export async function polymarketUsQuotes(listings: UnwatchedListing[]): Promise<Quote[]> {
