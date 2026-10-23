@@ -3,13 +3,14 @@ import * as apigw from 'aws-cdk-lib/aws-apigateway';
 import * as lambda from 'aws-cdk-lib/aws-lambda';
 import * as rds from 'aws-cdk-lib/aws-rds';
 import { Construct } from 'constructs';
-import { MonitoringFacade, noopAction } from 'cdk-monitoring-constructs';
+import { DefaultDashboardFactory, MonitoringFacade, noopAction } from 'cdk-monitoring-constructs';
 
 interface Props extends cdk.StackProps {
   api: apigw.RestApi;
   syncLambda: lambda.IFunction;
   settlementSweeperLambda: lambda.IFunction;
   venuePollerLambda: lambda.IFunction;
+  markPollerLambda: lambda.IFunction;
   sessionMonitorLambda: lambda.IFunction;
   database: rds.DatabaseInstance;
 }
@@ -25,6 +26,11 @@ export class MonitoringStack extends cdk.Stack {
     super(scope, id, props);
 
     const monitoring = new MonitoringFacade(this, 'RegistryDashboard', {
+      // Only the alarms are used; each dashboard is billed monthly and nobody reads them.
+      dashboardFactory: new DefaultDashboardFactory(this, 'RegistryDashboardFactory', {
+        dashboardNamePrefix: 'RegistryDashboard',
+        createDashboard: false,
+      }),
       alarmFactoryDefaults: {
         actionsEnabled: true,
         alarmNamePrefix: 'Registry-',
@@ -34,7 +40,6 @@ export class MonitoringStack extends cdk.Stack {
     });
 
     monitoring
-      .addLargeHeader('Gnome Registry')
       .monitorApiGateway({
         api: props.api,
         humanReadableName: 'Registry API',
@@ -63,6 +68,14 @@ export class MonitoringStack extends cdk.Stack {
         lambdaFunction: props.venuePollerLambda,
         humanReadableName: 'Venue Poller',
         alarmFriendlyName: 'VenuePoller',
+        addFaultCountAlarm: {
+          Error: { maxErrorCount: 0 },
+        },
+      })
+      .monitorLambdaFunction({
+        lambdaFunction: props.markPollerLambda,
+        humanReadableName: 'Mark Poller',
+        alarmFriendlyName: 'MarkPoller',
         addFaultCountAlarm: {
           Error: { maxErrorCount: 0 },
         },

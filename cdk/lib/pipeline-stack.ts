@@ -9,6 +9,7 @@ import { ExchangeSyncStack } from "./stacks/exchange-sync-stack";
 import { StrategySessionMonitorStack } from "./stacks/strategy-session-monitor-stack";
 import { SettlementSweeperStack } from "./stacks/settlement-sweeper-stack";
 import { VenuePollerStack } from "./stacks/venue-poller-stack";
+import { MarkPollerStack } from "./stacks/mark-poller-stack";
 import { MonitoringStack } from "./stacks/monitoring-stack";
 import { AlertingStack } from "./stacks/alerting-stack";
 import { GITHUB_REPO, GITHUB_BRANCH, CONFIGS, RegistryConfig } from "./config";
@@ -53,11 +54,17 @@ class AppStage extends cdk.Stage {
       venuePoller: config.venuePoller,
     });
 
+    const markPollerStack = new MarkPollerStack(this, "MarkPollerStack", {
+      api: apiStack.api,
+      apiKey: apiStack.apiKey,
+    });
+
     new MonitoringStack(this, "MonitoringStack", {
       api: apiStack.api,
       syncLambda: exchangeSyncStack.syncLambda,
       settlementSweeperLambda: settlementSweeperStack.sweeperLambda,
       venuePollerLambda: venuePollerStack.pollerLambda,
+      markPollerLambda: markPollerStack.pollerLambda,
       sessionMonitorLambda: sessionMonitorStack.monitorLambda,
       database: databaseStack.database,
     });

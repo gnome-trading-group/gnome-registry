@@ -49,3 +49,11 @@ export function parseMode(value: string | undefined): 'paper' | 'live' | undefin
 
 // Sessions that may still have a running process: their ledger writes are accepted while they hold their leases.
 export const WRITABLE_SESSION_STATUSES = ['SUBMITTED', 'STARTING', 'RUNNING', 'STOPPING'];
+
+// A listing some running session is on, in any strategy or mode: its OMS records the listing's marks. A session still
+// waiting for its instance holds the lease but prices nothing yet, so the mark poller keeps the listing until it runs.
+export function watchedListing(listingId: string): string {
+  return `EXISTS (SELECT 1 FROM strategy.session_listing wl
+    JOIN strategy.session ws ON ws.session_id = wl.session_id
+    WHERE wl.listing_id = ${listingId} AND wl.active AND ws.status IN ('RUNNING', 'STOPPING'))`;
+}

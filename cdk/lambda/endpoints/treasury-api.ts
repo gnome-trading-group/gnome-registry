@@ -2,10 +2,12 @@ import { APIGatewayProxyEvent } from 'aws-lambda';
 import { PoolClient } from 'pg';
 import { getActor, withTransaction } from './base';
 import { connectLedgerDatabase, createResponse, isPositiveInt } from './ledger-common';
+import { PollerMarksError, recordPollerMarks } from './ledger-poller-marks';
 import { accountTreasury, parseSnapshot, recordSnapshot, TreasuryError } from './treasury';
 
 // The treasury's routes. The venue poller posts snapshots and reads which accounts to poll with the API key; an
-// operator's manual snapshot, transfers and account settings are Cognito only, so each is attributed to a person.
+// operator's manual snapshot, transfers and account settings are Cognito only, so each is attributed to a person. The
+// mark poller's route (ledger-poller-marks.ts) is served here too.
 
 const TRANSFER_KINDS = ['OPENING', 'DEPOSIT', 'WITHDRAWAL', 'INTEREST', 'REWARD', 'FEE_ADJUSTMENT', 'CORRECTION'];
 const CONFIG_MONEY = ['minBuffer', 'lowBalanceThreshold', 'cashTolerance', 'dustThreshold'] as const;
@@ -164,6 +166,8 @@ export const handler = async (event: APIGatewayProxyEvent) => {
       }
       case 'GET /treasury/poll-targets':
         return createResponse(200, await pollTargets(client));
+      case 'POST /ledger/poller-marks':
+        return createResponse(200, await withTransaction(client, (c) => recordPollerMarks(c, event.body ?? '', now)));
       case 'GET /treasury/summary':
         return createResponse(200, await summary(client, now));
       case 'GET /treasury/transfers':
@@ -180,6 +184,7 @@ export const handler = async (event: APIGatewayProxyEvent) => {
     }
   } catch (error) {
     if (error instanceof TreasuryError) return createResponse(error.statusCode, { message: error.message });
+    if (error instanceof PollerMarksError) return createResponse(400, { message: error.message });
     if (error instanceof SyntaxError) return createResponse(400, { message: 'Body is not valid JSON' });
     const message = error instanceof Error ? error.message : String(error);
     console.error('Treasury error:', message);

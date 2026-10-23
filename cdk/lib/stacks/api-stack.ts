@@ -191,8 +191,10 @@ export class ApiStack extends cdk.Stack {
     this.attachIntegration('market-data-keys', accountCreation, [], ['GET', 'POST']);
 
     // The treasury: the venue poller posts what each account holds and reads which accounts to poll (API key); an
-    // operator reads where the money stands and records transfers, settings and manual readings (Cognito).
+    // operator reads where the money stands and records transfers, settings and manual readings (Cognito). The mark
+    // poller's one route shares its Lambda, rather than adding one to a stack at its resource cap.
     const treasury = this.createIntegration('treasury-api.ts');
+    this.attachIntegration('ledger/poller-marks', treasury, ['POST'], []);
     this.attachIntegration('treasury/snapshots', treasury, ['POST'], ['POST']);
     this.attachIntegration('treasury/poll-targets', treasury, ['GET'], []);
     this.attachIntegration('treasury/summary', treasury, [], ['GET']);
