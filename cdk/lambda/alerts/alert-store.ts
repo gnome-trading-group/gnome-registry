@@ -28,7 +28,9 @@ export async function detect(client: PoolClient, now: Date): Promise<AlertEvent[
     const locked = (await client.query('SELECT pg_try_advisory_xact_lock($1) AS locked', [DETECT_LOCK])).rows[0].locked;
     if (!locked) return [];
     const stateAt = now.toISOString();
-    const findings = (await runRules(client, now)).filter(f => f.alertable);
+    // One finding per key: a debounce counts ticks, and two findings that share a key in one tick would count twice.
+    const findings = [...new Map((await runRules(client, now)).filter(f => f.alertable)
+      .map(f => [f.key, f] as const)).values()];
     const silent = findings.filter(f => f.kind === 'SILENT');
     const events: AlertEvent[] = findings.map(f => fromFinding(f, stateAt, silent.length >= MASS_SILENCE));
     if (silent.length >= MASS_SILENCE) {

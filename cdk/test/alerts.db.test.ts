@@ -204,6 +204,16 @@ describeDb('alerts against Postgres', () => {
     expect(await tick(at(3))).toEqual([{ type: 'AGENT_STALLED', status: 'FIRING', severity: 'ERROR', sinks: ['slack'] }]);
   });
 
+  it('two findings with one key in a tick count as one tick toward the debounce', async () => {
+    const connecting = { ...HEALTHY, gateways: [{ name: 'PmReader', reconnecting: true }, { name: 'PmReader', reconnecting: true }] };
+    await session('s1', { health: connecting, heartbeatAt: at(0) });
+    expect(await tick(at(0))).toEqual([]);
+    expect((await client.query(`SELECT status, pending_ticks FROM alert.alert`)).rows)
+      .toEqual([{ status: 'PENDING', pending_ticks: 1 }]);
+    await client.query(`UPDATE strategy.session SET last_heartbeat_at = $1`, [at(1)]);
+    expect(await tick(at(1))).toEqual([{ type: 'RECONNECTING', status: 'FIRING', severity: 'WARNING', sinks: ['slack'] }]);
+  });
+
   it(`${MASS_SILENCE} sessions going silent at once page once, about the registry`, async () => {
     for (const id of ['a', 'b', 'c']) await session(id);
     const sent = await tick(at(2));
