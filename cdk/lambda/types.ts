@@ -43,6 +43,20 @@ export interface IDeleteExchange {
   exchangeId: number;
 }
 
+// Venue sources are created with their exchange (a database trigger); only vendors are created through the API.
+export interface ICreateSource {
+  code: string;
+  homeRegion: string;
+  adapter: string;
+  families: string[];
+}
+export interface IModifySource {
+  homeRegion?: string;
+  adapter?: string;
+  families?: string[];
+  active?: boolean;
+}
+
 interface IListingBase {
   exchangeId: number;
   securityId: number;

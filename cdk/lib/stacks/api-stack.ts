@@ -41,6 +41,16 @@ export class ApiStack extends cdk.Stack {
     this.api = new apigw.RestApi(this, 'registry-api', {
       description: "Gnome's Registry API",
       cloudWatchRole: true,
+      deployOptions: {
+        stageName: ApiStack.STAGE_NAME,
+      },
+      apiKeySourceType: apigw.ApiKeySourceType.HEADER,
+    });
+
+    // Only browsers send CORS preflights, and the browser only calls /cognito routes; the API-key routes serve
+    // services. Preflights there would cost an OPTIONS method per route in a stack near CloudFormation's resource cap.
+    // Every /cognito route is created under this resource and inherits its preflight.
+    this.api.root.addResource(ApiStack.COGNITO_PREFIX, {
       defaultCorsPreflightOptions: {
         allowOrigins: apigw.Cors.ALL_ORIGINS,
         allowMethods: apigw.Cors.ALL_METHODS,
@@ -49,14 +59,9 @@ export class ApiStack extends cdk.Stack {
           'Authorization',
           'Content-Type',
           'X-Amz-Date',
-          'X-Api-Key',
           'X-Amz-Security-Token'
         ],
       },
-      deployOptions: {
-        stageName: ApiStack.STAGE_NAME,
-      },
-      apiKeySourceType: apigw.ApiKeySourceType.HEADER,
     });
 
     // Without these, a request the Cognito authorizer rejects (401/403) comes back with no CORS headers and the
@@ -113,6 +118,11 @@ export class ApiStack extends cdk.Stack {
     for (const [resourceName, cognitoMethods] of crudResources) {
       this.attachMethods(resourceName, `${resourceName}.ts`, ALL, cognitoMethods);
     }
+
+    // Market-data sources and streams. Services read them with the API key; vendor sources are added and edited by a
+    // person (venue sources and listing streams are created by the database with their exchange and listing).
+    this.attachMethods('sources', 'sources.ts', ['GET'], ['GET', 'POST', 'PATCH']);
+    this.attachMethods('streams', 'streams.ts', ['GET'], ['GET']);
 
     // Fee schedules are append-only, so there is no DELETE or PATCH: a fix is a new row.
     this.attachMethods('fees', 'fees.ts', ['GET', 'POST'], ['GET', 'POST']);

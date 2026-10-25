@@ -96,6 +96,10 @@ describe('ApiStack auth', () => {
     ['cognito/hedge-keywords', 'DELETE'],
     ['cognito/ledger/adjustments', 'POST'],
     ['cognito/pnl/series', 'GET'],
+    ['cognito/sources', 'GET'],
+    ['cognito/sources', 'POST'],
+    ['cognito/sources', 'PATCH'],
+    ['cognito/streams', 'GET'],
   ])('%s %s is reachable with a Cognito token', (path, httpMethod) => {
     const props = method(template, resourceId(template, path), httpMethod);
     expect(props.AuthorizerId).toBeDefined();
@@ -114,6 +118,8 @@ describe('ApiStack auth', () => {
     ['venue-accounts', 'POST'],
     ['treasury/snapshots', 'POST'],
     ['treasury/poll-targets', 'GET'],
+    ['sources', 'GET'],
+    ['streams', 'GET'],
   ])('%s %s stays on the API key for services', (path, httpMethod) => {
     method(template, resourceId(template, path), httpMethod);
   });
@@ -123,6 +129,8 @@ describe('ApiStack auth', () => {
     ['risk/policies', 'PATCH'],
     ['risk/policies', 'DELETE'],
     ['venue-accounts', 'GET'],
+    ['sources', 'POST'],
+    ['sources', 'PATCH'],
   ])('%s %s is not exposed to the API key', (path, httpMethod) => {
     const methods = template.findResources('AWS::ApiGateway::Method', {
       Properties: { HttpMethod: httpMethod, ResourceId: { Ref: resourceId(template, path) } },
@@ -186,14 +194,24 @@ describe('ApiStack auth', () => {
   });
 
   it.each([
-    ['risk/policies'],
     ['cognito/risk/policies'],
     ['cognito/strategy-sessions/stop'],
-    ['risk/halts'],
+    ['cognito/sources'],
   ])('leaves the %s CORS preflight unauthenticated', path => {
     const props = method(template, resourceId(template, path), 'OPTIONS');
     expect(props.AuthorizationType).toBe('NONE');
     expect(props.ApiKeyRequired).toBeFalsy();
+  });
+
+  it.each([
+    ['risk/policies'],
+    ['risk/halts'],
+    ['sources'],
+  ])('has no CORS preflight on the service route %s', path => {
+    const methods = template.findResources('AWS::ApiGateway::Method', {
+      Properties: { HttpMethod: 'OPTIONS', ResourceId: { Ref: resourceId(template, path) } },
+    });
+    expect(Object.keys(methods)).toHaveLength(0);
   });
 
   it('returns CORS headers on gateway 4xx so Cognito rejections are readable in the browser', () => {

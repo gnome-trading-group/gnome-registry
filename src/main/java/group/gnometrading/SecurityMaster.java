@@ -9,6 +9,8 @@ import group.gnometrading.collections.IntHashMap;
 import group.gnometrading.collections.IntMap;
 import group.gnometrading.collections.LongHashMap;
 import group.gnometrading.collections.LongMap;
+import group.gnometrading.md.Source;
+import group.gnometrading.md.Stream;
 import group.gnometrading.sm.AssetClass;
 import group.gnometrading.sm.ContractRelationship;
 import group.gnometrading.sm.ContractType;
@@ -44,6 +46,8 @@ public final class SecurityMaster {
     private static final String CONTRACT_RELATIONSHIP_ENDPOINT = "/api/contract-relationships?";
     private static final String FEE_ENDPOINT = "/api/fees?";
     private static final String SIMULATION_PARAMETERS_ENDPOINT = "/api/simulation-parameters?";
+    private static final String SOURCE_ENDPOINT = "/api/sources?";
+    private static final String STREAM_ENDPOINT = "/api/streams?";
     // Every spec a listing has had, each from when it held at the venue.
     private static final String SPEC_HISTORY_PARAMETER = "&from=1970-01-01T00:00:00Z";
     private static final long NANOS_PER_MILLI = 1_000_000L;
@@ -101,6 +105,8 @@ public final class SecurityMaster {
     private static final Event EMPTY_EVENT = new Event(-1, null, null, null, false, 0L, 0L);
     private static final SimulationParameters NO_SIMULATION_PARAMETERS = new SimulationParameters(-1, -1, null, null);
     private static final EventContract EMPTY_EVENT_CONTRACT = new EventContract(-1, -1, -1, null);
+    private static final Source EMPTY_SOURCE = new Source(-1, null, null, 0, null, null, null, false);
+    private static final Stream EMPTY_STREAM = new Stream(-1, -1, null, null, 0, null, null, null, 0, 0L, 0L, false);
 
     private final RegistryConnection registryConnection;
 
@@ -113,6 +119,8 @@ public final class SecurityMaster {
     private final MutableString contractRelationshipPath;
     private final MutableString feePath;
     private final MutableString simulationParametersPath;
+    private final MutableString sourcePath;
+    private final MutableString streamPath;
 
     private final IntMap<Security> securityCache;
     private final IntMap<Exchange> exchangeCache;
@@ -126,6 +134,10 @@ public final class SecurityMaster {
     private final Map<String, Exchange> exchangeByCodeCache;
     private final IntMap<Event> eventCache;
     private final IntMap<EventContract> eventContractBySecurityCache;
+    private final IntMap<Source> sourceCache;
+    private final Map<String, Source> sourceByCodeCache;
+    private final IntMap<Stream> streamCache;
+    private final IntMap<Stream> streamByListingCache;
 
     private ContractRelationship[] allContractRelationships;
 
@@ -141,6 +153,8 @@ public final class SecurityMaster {
         this.contractRelationshipPath = new ExpandingMutableString(CONTRACT_RELATIONSHIP_ENDPOINT);
         this.feePath = new ExpandingMutableString(FEE_ENDPOINT);
         this.simulationParametersPath = new ExpandingMutableString(SIMULATION_PARAMETERS_ENDPOINT);
+        this.sourcePath = new ExpandingMutableString(SOURCE_ENDPOINT);
+        this.streamPath = new ExpandingMutableString(STREAM_ENDPOINT);
 
         this.securityCache = new IntHashMap<>();
         this.exchangeCache = new IntHashMap<>();
@@ -153,6 +167,10 @@ public final class SecurityMaster {
         this.exchangeByCodeCache = new HashMap<>();
         this.eventCache = new IntHashMap<>();
         this.eventContractBySecurityCache = new IntHashMap<>();
+        this.sourceCache = new IntHashMap<>();
+        this.sourceByCodeCache = new HashMap<>();
+        this.streamCache = new IntHashMap<>();
+        this.streamByListingCache = new IntHashMap<>();
     }
 
     public Security getSecurity(final int securityId) {
@@ -218,6 +236,106 @@ public final class SecurityMaster {
             final Exchange exchange = result.length == 0 ? EMPTY_EXCHANGE : result[0];
             this.exchangeByCodeCache.put(exchangeCode, exchange);
             return exchange == EMPTY_EXCHANGE ? null : exchange;
+        } catch (IOException e) {
+            throw new RuntimeException(e);
+        }
+    }
+
+    public Source getSource(final int sourceId) {
+        if (this.sourceCache.containsKey(sourceId)) {
+            final Source cached = this.sourceCache.get(sourceId);
+            return cached == EMPTY_SOURCE ? null : cached;
+        }
+        final int originalLength = addParameters(this.sourcePath, "sourceId", sourceId);
+        final Source source = fetchSource();
+        this.sourcePath.setLength(originalLength);
+        if (source == null) {
+            this.sourceCache.put(sourceId, EMPTY_SOURCE);
+        }
+        return source;
+    }
+
+    /** The source with this code (e.g. KALSHI, PANDASCORE), or null if there is none. */
+    public Source getSource(final String code) {
+        final Source cached = this.sourceByCodeCache.get(code);
+        if (cached != null) {
+            return cached == EMPTY_SOURCE ? null : cached;
+        }
+        final int originalLength = this.sourcePath.length();
+        this.sourcePath.appendString("code=");
+        this.sourcePath.appendString(code);
+        final Source source = fetchSource();
+        this.sourcePath.setLength(originalLength);
+        if (source == null) {
+            this.sourceByCodeCache.put(code, EMPTY_SOURCE);
+        }
+        return source;
+    }
+
+    private Source fetchSource() {
+        final ByteBuffer response = this.registryConnection.get(this.sourcePath);
+        try {
+            final Source[] result = OBJECT_MAPPER.readValue(toByteArray(response), Source[].class);
+            if (result.length == 0) {
+                return null;
+            }
+            final Source source = result[0];
+            this.sourceCache.put(source.sourceId(), source);
+            this.sourceByCodeCache.put(source.code(), source);
+            return source;
+        } catch (IOException e) {
+            throw new RuntimeException(e);
+        }
+    }
+
+    public Stream getStream(final int streamId) {
+        if (this.streamCache.containsKey(streamId)) {
+            final Stream cached = this.streamCache.get(streamId);
+            return cached == EMPTY_STREAM ? null : cached;
+        }
+        final int originalLength = addParameters(this.streamPath, "streamId", streamId);
+        final Stream stream = fetchStream();
+        this.streamPath.setLength(originalLength);
+        if (stream == null) {
+            this.streamCache.put(streamId, EMPTY_STREAM);
+        }
+        return stream;
+    }
+
+    /** The listing's book stream, or null if the listing has none. */
+    public Stream streamForListing(final int listingId) {
+        if (this.streamByListingCache.containsKey(listingId)) {
+            final Stream cached = this.streamByListingCache.get(listingId);
+            return cached == EMPTY_STREAM ? null : cached;
+        }
+        final int originalLength = addParameters(this.streamPath, "listingId", listingId);
+        final Stream stream = fetchStream();
+        this.streamPath.setLength(originalLength);
+        if (stream == null) {
+            this.streamByListingCache.put(listingId, EMPTY_STREAM);
+        }
+        return stream;
+    }
+
+    /** The listing a stream carries the book of, or null for a stream of anything else. */
+    public Listing listingForStream(final int streamId) {
+        final Stream stream = getStream(streamId);
+        return stream == null || stream.listingId() == 0 ? null : getListing(stream.listingId());
+    }
+
+    private Stream fetchStream() {
+        final ByteBuffer response = this.registryConnection.get(this.streamPath);
+        try {
+            final Stream[] result = OBJECT_MAPPER.readValue(toByteArray(response), Stream[].class);
+            if (result.length == 0) {
+                return null;
+            }
+            final Stream stream = result[0];
+            this.streamCache.put(stream.streamId(), stream);
+            if (stream.listingId() != 0) {
+                this.streamByListingCache.put(stream.listingId(), stream);
+            }
+            return stream;
         } catch (IOException e) {
             throw new RuntimeException(e);
         }

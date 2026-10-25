@@ -258,6 +258,95 @@ class SecurityMasterTest {
         assertEquals(2, securityMaster.getListing(20, 123).listingId());
     }
 
+    private static final String LISTING_STREAM_JSON =
+            """
+            [{"stream_id": 31, "source_id": 2, "source_code": "KALSHI", "source_kind": "VENUE",
+              "subject_kind": "LISTING", "listing_id": 789, "native_subject_id": "MKT:yes", "family": "book",
+              "region": null, "resolved_region": "us-east-1", "event_id": null, "starts_at": null, "ends_at": null,
+              "active": true, "date_created": "2026-10-25T17:00:00.000Z"}]""";
+
+    @Test
+    void testStreamForListingReadsTheListingsBookStream() {
+        when(registryConnection.get(new ViewString("/api/streams?listingId=789")))
+                .thenReturn(ByteBuffer.wrap(LISTING_STREAM_JSON.getBytes()));
+
+        final group.gnometrading.md.Stream stream = securityMaster.streamForListing(789);
+
+        assertEquals(
+                new group.gnometrading.md.Stream(
+                        31, 2, "KALSHI", "LISTING", 789, "MKT:yes", "book", "us-east-1", 0, 0L, 0L, true),
+                stream);
+    }
+
+    @Test
+    void testStreamFoundByListingIsFoundByIdWithoutAnotherRequest() {
+        when(registryConnection.get(new ViewString("/api/streams?listingId=789")))
+                .thenReturn(ByteBuffer.wrap(LISTING_STREAM_JSON.getBytes()));
+
+        securityMaster.streamForListing(789);
+
+        assertEquals(789, securityMaster.getStream(31).listingId());
+        assertSame(securityMaster.getStream(31), securityMaster.streamForListing(789));
+        verify(registryConnection, times(1)).get(any());
+    }
+
+    @Test
+    void testListingForStreamResolvesThroughTheStream() {
+        when(registryConnection.get(new ViewString("/api/streams?streamId=31")))
+                .thenReturn(ByteBuffer.wrap(LISTING_STREAM_JSON.getBytes()));
+        stubListing(789, 456, 123);
+
+        assertEquals(789, securityMaster.listingForStream(31).listingId());
+    }
+
+    @Test
+    void testVendorStreamHasNoListingAndKeepsItsWindow() {
+        when(registryConnection.get(new ViewString("/api/streams?streamId=40")))
+                .thenReturn(ByteBuffer.wrap(
+                        """
+                        [{"stream_id": 40, "source_id": 9, "source_code": "PANDASCORE", "subject_kind": "MATCH",
+                          "listing_id": null, "native_subject_id": "12345", "family": "esports",
+                          "resolved_region": "eu-west-1", "event_id": 77, "starts_at": "2026-10-25T18:00:00.000Z",
+                          "ends_at": null, "active": true}]"""
+                                .getBytes()));
+
+        final group.gnometrading.md.Stream stream = securityMaster.getStream(40);
+
+        assertEquals(0, stream.listingId());
+        assertEquals(77, stream.eventId());
+        assertEquals(1_792_951_200_000L, stream.startsAt());
+        assertEquals(0L, stream.endsAt());
+        assertNull(securityMaster.listingForStream(40));
+    }
+
+    @Test
+    void testMissingStreamIsCachedAsMissing() {
+        when(registryConnection.get(new ViewString("/api/streams?streamId=5")))
+                .thenReturn(ByteBuffer.wrap("[]".getBytes()));
+
+        assertNull(securityMaster.getStream(5));
+        assertNull(securityMaster.getStream(5));
+        verify(registryConnection, times(1)).get(any());
+    }
+
+    @Test
+    void testSourceFetchedByCodeIsFoundByIdWithoutAnotherRequest() {
+        when(registryConnection.get(new ViewString("/api/sources?code=PANDASCORE")))
+                .thenReturn(ByteBuffer.wrap(
+                        """
+                        [{"source_id": 9, "code": "PANDASCORE", "kind": "VENDOR", "exchange_id": null,
+                          "home_region": "eu-west-1", "adapter": "PANDASCORE", "families": ["esports"], "active": true}]"""
+                                .getBytes()));
+
+        final group.gnometrading.md.Source source = securityMaster.getSource("PANDASCORE");
+
+        assertEquals(group.gnometrading.md.SourceKind.VENDOR, source.kind());
+        assertEquals(0, source.exchangeId());
+        assertArrayEquals(new String[] {"esports"}, source.families());
+        assertSame(source, securityMaster.getSource(9));
+        verify(registryConnection, times(1)).get(any());
+    }
+
     private void stubListing(int listingId, int exchangeId, int securityId) {
         when(registryConnection.get(new ViewString("/api/listings?listingId=" + listingId)))
                 .thenReturn(ByteBuffer.wrap(
