@@ -3,7 +3,6 @@ package group.gnometrading;
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.Mockito.*;
 
-import group.gnometrading.schemas.SchemaType;
 import group.gnometrading.sm.AssetClass;
 import group.gnometrading.sm.ContractRelationship;
 import group.gnometrading.sm.ContractType;
@@ -73,12 +72,12 @@ class SecurityMasterTest {
                         12399,
                         """
                         [{"exchange_id": 12399, "exchange_code": "BTC_VENUE", "exchange_name": "BTC", "region": "us-east-2", "schema_type": "mbp-1"}]""",
-                        new Exchange(12399, "BTC_VENUE", "BTC", "us-east-2", SchemaType.MBP_1)),
+                        new Exchange(12399, "BTC_VENUE", "BTC", "us-east-2")),
                 Arguments.of(
                         12356,
                         """
                         [{"exchange_id": 12356, "region": "us-east-1", "schema_type": "mbp-1"}]""",
-                        new Exchange(12356, null, null, "us-east-1", SchemaType.MBP_1)));
+                        new Exchange(12356, null, null, "us-east-1")));
     }
 
     @ParameterizedTest
@@ -109,7 +108,7 @@ class SecurityMasterTest {
                         """,
                         new Listing(
                                 12,
-                                new Exchange(12399, "BTC_VENUE", "BTC", "us-east-2", SchemaType.MBP_1),
+                                new Exchange(12399, "BTC_VENUE", "BTC", "us-east-2"),
                                 spot(34, "BTC"),
                                 "SecId",
                                 "Binance")));
@@ -161,7 +160,7 @@ class SecurityMasterTest {
                         """,
                         new Listing(
                                 12,
-                                new Exchange(12399, "BTC_VENUE", "BTC", "us-east-2", SchemaType.MBP_1),
+                                new Exchange(12399, "BTC_VENUE", "BTC", "us-east-2"),
                                 spot(34, "BTC"),
                                 "SecId",
                                 "Binance")));
@@ -345,6 +344,30 @@ class SecurityMasterTest {
         assertArrayEquals(new String[] {"esports"}, source.families());
         assertSame(source, securityMaster.getSource(9));
         verify(registryConnection, times(1)).get(any());
+    }
+
+    @Test
+    void testStreamDirectoryResolvesStreamsListingsAndVenueIds() {
+        when(registryConnection.get(new ViewString("/api/streams?listingId=789")))
+                .thenReturn(ByteBuffer.wrap(LISTING_STREAM_JSON.getBytes()));
+        when(registryConnection.get(new ViewString("/api/streams?streamId=40")))
+                .thenReturn(ByteBuffer.wrap(
+                        """
+                        [{"stream_id": 40, "source_id": 9, "source_code": "PANDASCORE", "subject_kind": "MATCH",
+                          "listing_id": null, "native_subject_id": "12345", "family": "esports", "active": true}]"""
+                                .getBytes()));
+        stubListing(789, 456, 123);
+
+        final group.gnometrading.md.StreamDirectory directory =
+                group.gnometrading.md.StreamDirectory.of(securityMaster, new int[] {789}, new int[] {40});
+
+        assertEquals(789, directory.listingId(31));
+        assertEquals(31, directory.streamId(789));
+        assertEquals(789, directory.listingId(456, 123));
+        assertEquals(group.gnometrading.md.StreamDirectory.NONE, directory.listingId(40));
+        assertEquals(group.gnometrading.md.StreamDirectory.NONE, directory.listingId(456, 999));
+        assertEquals("esports", directory.stream(40).family());
+        assertEquals(789, directory.listing(789).listingId());
     }
 
     private void stubListing(int listingId, int exchangeId, int securityId) {

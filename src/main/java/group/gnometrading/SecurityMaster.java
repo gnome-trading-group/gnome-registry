@@ -100,7 +100,7 @@ public final class SecurityMaster {
             0L,
             false,
             0);
-    private static final Exchange EMPTY_EXCHANGE = new Exchange(-1, null, null, null, null);
+    private static final Exchange EMPTY_EXCHANGE = new Exchange(-1, null, null, null);
     private static final ListingSpecHistory NO_SPECS = new ListingSpecHistory(new long[0], new ListingSpec[0]);
     private static final Event EMPTY_EVENT = new Event(-1, null, null, null, false, 0L, 0L);
     private static final SimulationParameters NO_SIMULATION_PARAMETERS = new SimulationParameters(-1, -1, null, null);
