@@ -9,7 +9,7 @@ first_steps:
 
 ## What it means
 
-A gnome-pipelines run (a Fargate task) exited with an error. Scheduled runs are ERROR because some feed trading (cs2_prematch_predict drives a launcher rule); manual runs are INFO.
+A gnome-pipelines run (a Fargate task) exited with an error. Scheduled runs are ERROR because some feed trading (each cs2_upcoming run triggers the launcher's cs2 rule); manual runs are INFO.
 
 ## Impact
 

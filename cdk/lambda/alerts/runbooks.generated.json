@@ -486,6 +486,15 @@
       ],
       "url": "https://github.com/gnome-trading-group/gnome-registry/blob/main/docs/runbooks/cloudwatch/AlertingMeta.md"
     },
+    "Bot": {
+      "summary": "A gnome-bot alarm fired: the Slack ops bot may not be answering questions or triaging alerts.",
+      "firstSteps": [
+        "Open the alarm to see which part (work queue, Slack events, worker, answers).",
+        "Read the worker's logs (log group `<Stage>-BotStack-WorkerLogs…`) for \"Couldn't answer\" and the error after it.",
+        "Ask the bot something in Slack to see whether it answers now."
+      ],
+      "url": "https://github.com/gnome-trading-group/gnome-registry/blob/main/docs/runbooks/cloudwatch/Bot.md"
+    },
     "Classifier": {
       "summary": "A classifier alarm fired: a queue backing up, a worker unhealthy, or a venue feed gap.",
       "firstSteps": [
