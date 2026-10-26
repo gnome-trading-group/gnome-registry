@@ -42,6 +42,8 @@ export interface StrategyListingState {
   markTime: Date | null;
   version: string;
   lastFillAt: Date;
+  // The newest fill row's id: unique per row, so it orders and pages them.
+  fillId: string;
 }
 
 export interface SessionTotals {
@@ -182,7 +184,7 @@ export async function loadStrategyState(
   const listings = (await client.query(`${filtered},
     pos AS (
       SELECT DISTINCT ON (strategy_id, listing_id, account_id) strategy_id, listing_id, account_id,
-        net_quantity_after, total_cost_after, position_version, recorded_at
+        net_quantity_after, total_cost_after, position_version, recorded_at, fill_id
       FROM f ORDER BY strategy_id, listing_id, account_id, fill_id DESC
     ),
     -- A session trades each listing through one account, so its totals belong to that account's position.
@@ -223,6 +225,7 @@ export async function loadStrategyState(
       markTime: r.mark_time,
       version: String(r.position_version),
       lastFillAt: r.recorded_at,
+      fillId: String(r.fill_id),
     })),
     sessions: sessions.map(r => ({
       sessionId: r.session_id,
@@ -312,44 +315,52 @@ export interface AfterSession {
   settlementPrice: bigint | null;
 }
 
-export async function loadAfterSession(client: PoolClient, state: SessionListingState): Promise<AfterSession> {
-  const r = (await client.query(`
-    WITH acct AS (
-      SELECT sva.account_id FROM sm.listing ll
-      JOIN account_master.session_venue_account sva ON sva.exchange_id = ll.exchange_id AND sva.session_id = $1
-      WHERE ll.listing_id = $4
-    )
-    SELECT
-      (SELECT f.fill_id FROM ledger.fill f
-       WHERE f.strategy_id = $2 AND f.mode = $3 AND f.listing_id = $4 AND f.source <> 'GAP'
-         AND f.account_id IS NOT DISTINCT FROM (SELECT account_id FROM acct)
-         AND f.session_id IS DISTINCT FROM $1 AND f.recorded_at >= $5
-       ORDER BY f.fill_id LIMIT 1) AS next_fill_id,
-      next.session_id AS next_session_id, next.started_at AS next_started_at,
+// One query for every listing a session left open, however many it traded: each gets the answer in input order.
+export async function loadAfterSessions(client: PoolClient, states: SessionListingState[]): Promise<AfterSession[]> {
+  if (states.length === 0) return [];
+  const rows = (await client.query(`
+    SELECT q.ord, nf.fill_id AS next_fill_id, next.session_id AS next_session_id, next.started_at AS next_started_at,
       ec.event_contract_id IS NOT NULL AS event_contract, ec.settlement_price
-    FROM (SELECT 1) one
+    FROM unnest($1::text[], $2::int[], $3::text[], $4::int[], $5::timestamptz[])
+      WITH ORDINALITY AS q(session_id, strategy_id, mode, listing_id, started_at, ord)
+    LEFT JOIN LATERAL (
+      SELECT sva.account_id FROM sm.listing ll
+      JOIN account_master.session_venue_account sva ON sva.exchange_id = ll.exchange_id AND sva.session_id = q.session_id
+      WHERE ll.listing_id = q.listing_id
+    ) acct ON TRUE
+    LEFT JOIN LATERAL (
+      SELECT f.fill_id FROM ledger.fill f
+      WHERE f.strategy_id = q.strategy_id AND f.mode = q.mode AND f.listing_id = q.listing_id AND f.source <> 'GAP'
+        AND f.account_id IS NOT DISTINCT FROM acct.account_id
+        AND f.session_id IS DISTINCT FROM q.session_id AND f.recorded_at >= q.started_at
+      ORDER BY f.fill_id LIMIT 1
+    ) nf ON TRUE
     LEFT JOIN LATERAL (
       SELECT s.session_id, s.started_at FROM strategy.session_listing sl
       JOIN strategy.session s ON s.session_id = sl.session_id
       JOIN sm.listing l ON l.listing_id = sl.listing_id
       LEFT JOIN account_master.session_venue_account sva
         ON sva.session_id = s.session_id AND sva.exchange_id = l.exchange_id
-      WHERE sl.strategy_id = $2 AND sl.mode = $3 AND sl.listing_id = $4 AND s.session_id <> $1
-        AND s.started_at > $5 AND sva.account_id IS NOT DISTINCT FROM (SELECT account_id FROM acct)
+      WHERE sl.strategy_id = q.strategy_id AND sl.mode = q.mode AND sl.listing_id = q.listing_id
+        AND s.session_id <> q.session_id AND s.started_at > q.started_at
+        AND sva.account_id IS NOT DISTINCT FROM acct.account_id
       ORDER BY s.started_at LIMIT 1
     ) next ON TRUE
-    LEFT JOIN sm.listing l ON l.listing_id = $4
-    LEFT JOIN sm.event_contract ec ON ec.security_id = l.security_id`,
-  [state.sessionId, state.strategyId, state.mode, state.listingId, state.startedAt])).rows[0];
-  const fill = r.next_fill_id === null ? null
-    : positionFill((await client.query(`${POSITION_FILL} WHERE f.fill_id = $1`, [r.next_fill_id])).rows[0]);
-  return {
-    fill,
+    LEFT JOIN sm.listing l ON l.listing_id = q.listing_id
+    LEFT JOIN sm.event_contract ec ON ec.security_id = l.security_id
+    ORDER BY q.ord`,
+  [states.map(s => s.sessionId), states.map(s => s.strategyId), states.map(s => s.mode), states.map(s => s.listingId),
+    states.map(s => s.startedAt)])).rows;
+  const fillIds = rows.filter(r => r.next_fill_id !== null).map(r => String(r.next_fill_id));
+  const fills = new Map(fillIds.length === 0 ? [] : (await client.query(
+    `${POSITION_FILL} WHERE f.fill_id = ANY($1::bigint[])`, [fillIds])).rows.map(r => [String(r.fill_id), positionFill(r)]));
+  return rows.map(r => ({
+    fill: r.next_fill_id === null ? null : fills.get(String(r.next_fill_id)) ?? null,
     nextSessionId: r.next_session_id,
     nextSessionStartedAt: r.next_started_at,
     eventContract: r.event_contract,
     settlementPrice: r.settlement_price === null ? null : toBigInt(r.settlement_price),
-  };
+  }));
 }
 
 // The start of the day containing `at` in a time zone (an IANA name such as UTC or America/New_York).

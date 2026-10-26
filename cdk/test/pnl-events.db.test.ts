@@ -85,6 +85,68 @@ describeDb('positions by event against Postgres', () => {
     expect(result.other.map(o => [o.listingId, o.total])).toEqual([[505, cents(3)]]);
   });
 
+  it('returns events still held by default, and pages the flat ones most recently resolved first', async () => {
+    await client.query(`INSERT INTO sm.security (security_id, symbol, type, contract_type) VALUES (7, 'L-YES', 0, 7)`);
+    await client.query(`INSERT INTO sm.listing (listing_id, exchange_id, security_id, exchange_security_id, exchange_security_symbol)
+      VALUES (506, 1, 7, 'KX-L:yes', 'L Yes')`);
+    await client.query(`INSERT INTO sm.event (event_id, title, exchange_id, native_event_id, expiry) VALUES
+      (30, 'Will L happen?', 1, 'KX-L', '2026-10-07T09:00:00Z')`);
+    await client.query(`INSERT INTO sm.event_contract (event_id, security_id, outcome_label) VALUES (30, 7, 'Yes')`);
+    await client.query(`UPDATE sm.event SET resolved = true, resolved_at = '2026-10-06T10:00:00Z' WHERE event_id = 10`);
+    await hold(502, 5, 150);
+    await hold(500, 0, 0, 5);
+    await hold(506, 0, 0, -2);
+    await hold(505, 0, 0, 3);
+    const params = { strategyId: '1', mode: 'paper' };
+
+    const active = await events(client, params, now);
+    expect(active.events.map(e => e.eventId)).toEqual([20]);
+    expect(active.other).toEqual([]);
+    expect([active.counts, active.nextBefore]).toEqual([{ active: 1, history: 2, flatOther: 1 }, null]);
+
+    const history = (extra: Record<string, string>) => events(client, { ...params, status: 'history', ...extra }, now);
+    const first = await history({ limit: '1' });
+    expect(first.events.map(e => [e.eventId, e.markets[0].current])).toEqual([[30, cents(-2)]]);
+    expect(first.other.map(o => [o.listingId, o.total])).toEqual([[505, cents(3)]]);
+    const second = await history({ limit: '1', before: first.nextBefore as string });
+    expect([second.events.map(e => e.eventId), second.other]).toEqual([[10], []]);
+    const third = await history({ limit: '1', before: second.nextBefore as string });
+    expect([third.events, third.nextBefore]).toEqual([[], null]);
+    expect((await history({})).events.map(e => e.eventId)).toEqual([30, 10]);
+
+    await expect(history({ before: '12' })).rejects.toThrow('before must be');
+    await expect(history({ limit: '201' })).rejects.toThrow('limit must be 1 to 200');
+    await expect(events(client, { ...params, status: 'open' }, now)).rejects.toThrow('status must be');
+  });
+
+  it('a strategy that has traded thousands of events answers with the ones it holds and a page of the rest', async () => {
+    // 3,000 one-contract events, each traded once; 10 still held.
+    await client.query(`INSERT INTO sm.security (security_id, symbol, type, contract_type)
+      SELECT id, 'S' || id, 0, 7 FROM generate_series(1000, 3999) id`);
+    await client.query(`INSERT INTO sm.listing (listing_id, exchange_id, security_id, exchange_security_id)
+      SELECT id, 1, id, 'KX-' || id || ':yes' FROM generate_series(1000, 3999) id`);
+    await client.query(`INSERT INTO sm.event (event_id, title, exchange_id, native_event_id, expiry)
+      SELECT id, 'Event ' || id, 1, 'KX-' || id, '2026-09-01T00:00:00Z'::timestamptz + id * interval '1 minute'
+      FROM generate_series(1000, 3999) id`);
+    await client.query(`INSERT INTO sm.event_contract (event_id, security_id, outcome_label)
+      SELECT id, id, 'Yes' FROM generate_series(1000, 3999) id`);
+    await client.query(`INSERT INTO ledger.fill (source, session_id, strategy_id, listing_id, mode, client_oid_counter,
+        cum_qty_after, net_quantity_after, total_cost_after, realized_pnl_after, fees_after, position_version, recorded_at)
+      SELECT 'VENUE', 's', 1, id, 'paper', id, 1, CASE WHEN id < 1010 THEN $1 ELSE 0 END,
+        CASE WHEN id < 1010 THEN $2 ELSE 0 END, $3, 0, 1, '2026-10-01T00:00:00Z'
+      FROM generate_series(1000, 3999) id`, [UNIT, 50 * CENT, CENT]);
+
+    const started = Date.now();
+    const active = await events(client, { strategyId: '1', mode: 'paper' }, now);
+    const history = await events(client, { strategyId: '1', mode: 'paper', status: 'history' }, now);
+    expect(Date.now() - started).toBeLessThan(5_000);
+    expect([active.events.length, active.counts]).toEqual([10, { active: 10, history: 2990, flatOther: 0 }]);
+    expect([history.events.length, history.events[0].eventId, history.events[49].eventId]).toEqual([50, 3999, 3950]);
+    expect(JSON.stringify(history).length).toBeLessThan(100_000);
+    const next = await events(client, { strategyId: '1', mode: 'paper', status: 'history', before: history.nextBefore as string }, now);
+    expect(next.events[0].eventId).toBe(3949);
+  }, 60_000);
+
   it('collapses the outcomes it does not hold into one scenario, since they all pay the same', async () => {
     await hold(502, 5, 150);
     const threeWay = (await events(client, { strategyId: '1', mode: 'paper' }, now)).events[0].markets[0];

@@ -83,11 +83,17 @@ export interface LifetimeWalkOptions {
   markStepMs: number;
   times: number[];
   sessionEvents: boolean;
+  // Listings walked point by point even if dormant in the window, as a chart already drawing their lines needs them.
+  keepListingIds?: number[];
 }
 
 export interface LifetimeWalk {
-  // One per strategy and listing traded, in (strategy, listing) order.
+  // One per strategy and listing active in the window (held at some point, or traded), in (strategy, listing) order.
   keys: { strategyId: number; listingId: number }[];
+  // Every strategy with anything on the ledger by the window's end, and the PnL of each one's dormant listings: flat
+  // through the whole window and untraded in it, so worth their realized PnL less fees at every point.
+  strategyIds: number[];
+  dormantTotal: Map<number, bigint>;
   t: number[];
   total: bigint[];
   realized: bigint[];
@@ -128,7 +134,6 @@ export async function walkLifetime(client: PoolClient, options: LifetimeWalkOpti
   };
   for (const l of state.listings) hold(l.strategyId, l.listingId, l.accountId);
   for (const f of fills) hold(f.strategy_id, f.listing_id, f.account_id);
-  const keys = [...keyed.values()].sort((a, b) => a.strategyId - b.strategyId || a.listingId - b.listingId);
 
   const position = new Map<string, PositionState>();
   const sessionTotals = new Map<string, { realized: bigint; fees: bigint }>();
@@ -136,8 +141,32 @@ export async function walkLifetime(client: PoolClient, options: LifetimeWalkOpti
   for (const l of state.listings) position.set(positionKeyOf(l.strategyId, l.listingId, l.accountId), { ...l.position });
   for (const s of state.sessions) sessionTotals.set(`${s.sessionId}/${s.listingId}`, { realized: s.realized, fees: s.fees });
 
+  // Most of what a strategy has traded is long flat: valuing it at every point would make each walk grow with every
+  // listing ever traded, while its PnL can't move until it trades again.
+  const traded = new Set(fills.map(f => keyOf(f.strategy_id, f.listing_id)));
+  const keep = new Set(options.keepListingIds ?? []);
+  const dormant = { total: 0n, realized: 0n, fees: 0n };
+  const dormantTotal = new Map<number, bigint>();
+  const keys: { strategyId: number; listingId: number }[] = [];
+  for (const key of [...keyed.values()].sort((a, b) => a.strategyId - b.strategyId || a.listingId - b.listingId)) {
+    const held = [...accountsOf.get(keyOf(key.strategyId, key.listingId)) ?? []];
+    const flat = held.every(h => (position.get(h) ?? FLAT).netQuantity === 0n);
+    if (!flat || traded.has(keyOf(key.strategyId, key.listingId)) || keep.has(key.listingId)) {
+      keys.push(key);
+      continue;
+    }
+    for (const h of held) {
+      const p = lifetimePnl(position.get(h) ?? FLAT, null);
+      dormant.total += p.total;
+      dormant.realized += p.realized;
+      dormant.fees += p.fees;
+      dormantTotal.set(key.strategyId, (dormantTotal.get(key.strategyId) ?? 0n) + p.total);
+    }
+  }
+
   const walk: LifetimeWalk = {
-    keys, t: [], total: [], realized: [], unrealized: [], fees: [],
+    keys, strategyIds: [...new Set([...keyed.values()].map(k => k.strategyId))].sort((a, b) => a - b), dormantTotal,
+    t: [], total: [], realized: [], unrealized: [], fees: [],
     keyTotal: keys.map(() => []), keyNet: keys.map(() => []), events: [],
   };
 
@@ -221,10 +250,10 @@ export async function walkLifetime(client: PoolClient, options: LifetimeWalkOpti
         });
       }
     }
-    let total = 0n;
-    let realized = 0n;
+    let total = dormant.total;
+    let realized = dormant.realized;
     let unrealized = 0n;
-    let fees = 0n;
+    let fees = dormant.fees;
     keys.forEach((key, i) => {
       const p = valued(key);
       total += p.total;
@@ -242,4 +271,11 @@ export async function walkLifetime(client: PoolClient, options: LifetimeWalkOpti
   }
   walk.events.sort((a, b) => a.time.localeCompare(b.time));
   return walk;
+}
+
+// One strategy's lifetime PnL at each point of a walk: its active listings' and its dormant ones'.
+export function strategyTotals(walk: LifetimeWalk, strategyId: number): bigint[] {
+  const base = walk.dormantTotal.get(strategyId) ?? 0n;
+  const own = walk.keys.flatMap((key, k) => (key.strategyId === strategyId ? [walk.keyTotal[k]] : []));
+  return walk.t.map((_, p) => own.reduce((sum, line) => sum + line[p], base));
 }

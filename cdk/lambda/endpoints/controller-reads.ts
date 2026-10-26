@@ -30,5 +30,10 @@ const ROUTES: Record<ControllerReadPath, (event: APIGatewayProxyEvent) => Promis
 
 export const handler = async (event: APIGatewayProxyEvent) => {
   const route = ROUTES[event.resource.replace(/^\/(cognito\/)?/, '') as ControllerReadPath];
-  return route ? route(event) : createResponse(404, { message: `No read at ${event.resource}` });
+  if (!route) return createResponse(404, { message: `No read at ${event.resource}` });
+  const response = await route(event) as { statusCode?: number };
+  if (response.statusCode === 413) {
+    console.error(`Oversized response refused: ${event.resource} ${JSON.stringify(event.queryStringParameters ?? {})}`);
+  }
+  return response;
 };

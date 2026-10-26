@@ -4,7 +4,7 @@ import { connectLedgerDatabase, createResponse, isSessionId, parseMode, parsePos
 import { avgEntryPrice, markPrice, PositionState } from './ledger-math';
 import { fillImpact, lifetimePnl, SessionPnl, sessionPnl } from './pnl-math';
 import {
-  AfterSession, ListingInfo, loadAfterSession, loadListingInfo, loadOutOfSessionFills, loadSessionStates,
+  AfterSession, ListingInfo, loadAfterSessions, loadListingInfo, loadOutOfSessionFills, loadSessionStates,
   loadStrategyState, OutOfSessionSource, PositionFill, SessionListingState, startOfDay, StrategyListingState,
 } from './pnl-state';
 
@@ -12,10 +12,15 @@ import {
 // quantities are scaled-integer strings; times are ISO UTC.
 //   ?sessionId=             one session: its PnL since it started, split into carry and trading, per listing
 //   ?sessionIds=a,b         those sessions' totals, for a page of a sessions table
-//   ?strategyId=&mode=&tz=  a strategy's lifetime and today's PnL, and what it holds per listing
+//   ?strategyId=&mode=&tz=  a strategy's lifetime and today's PnL, and its rows active today: held, needing review
+//                           or traded since the day started; the flat rest are summed in history
+//     &listingId=           that listing's rows instead, active or not
+//     &positions=flat       the flat rest themselves, newest first: &limit= (default 100, max 500), &before=nextBefore
 //   ?mode=&tz=              every strategy's lifetime and today's PnL
 
 const MAX_SESSION_IDS = 100;
+const DEFAULT_FLAT_LIMIT = 100;
+const MAX_FLAT_LIMIT = 500;
 
 type Totals = Record<string, string>;
 
@@ -79,7 +84,9 @@ export async function sessionSummary(client: PoolClient, sessionId: string, now:
     [sessionId])).rows;
 
   const pnls = states.map(state => sessionPnl(state));
-  const after = await Promise.all(states.map(state => leftOpen(state) ? loadAfterSession(client, state) : null));
+  const open = states.filter(leftOpen);
+  const loaded = await loadAfterSessions(client, open);
+  const after = new Map(open.map((state, i) => [state, loaded[i]]));
   const opening = states.some(s => s.startedFlat) ? 'FLAT'
     : states.some(s => s.opening.netQuantity !== 0n) ? 'INHERITED' : 'NONE';
   return {
@@ -99,7 +106,7 @@ export async function sessionSummary(client: PoolClient, sessionId: string, now:
     refusals: refusals.map(r => ({ listingId: r.listing_id, reason: r.reason, count: Number(r.count) })),
     listings: states.map((state, i) => ({
       ...sessionListingRow(state, pnls[i], info, review),
-      afterSession: after[i] && afterSessionRow(after[i]),
+      afterSession: after.has(state) ? afterSessionRow(after.get(state) as AfterSession) : null,
     })),
   };
 }
@@ -220,7 +227,45 @@ function lifetimeTotals(listings: StrategyListingState[]) {
   }, { total: 0n, realized: 0n, unrealized: 0n, fees: 0n });
 }
 
-export async function strategySummary(client: PoolClient, strategyId: number, mode: string, timeZone: string, now: Date) {
+// Today's PnL on a row moves only while it is held or traded: a flat row untraded since the day started is history,
+// its PnL the realized and fees it closed with.
+function activeToday(l: StrategyListingState, review: Set<number>, dayStart: Date): boolean {
+  return l.position.netQuantity !== 0n || review.has(l.listingId) || l.lastFillAt >= dayStart;
+}
+
+const rowKey = (l: StrategyListingState) => `${l.listingId}/${l.accountId}`;
+
+async function strategyRows(
+  client: PoolClient, rows: StrategyListingState[], todayStart: Map<string, bigint>, review: Set<number>,
+) {
+  const info = await loadListingInfo(client, rows.map(l => l.listingId));
+  const labels = await accountLabels(client, rows.map(l => l.accountId));
+  return rows.map(l => {
+    const p = lifetimePnl(l.position, l.mark);
+    return {
+      ...listingFields(info.get(l.listingId), l.listingId),
+      accountId: l.accountId,
+      accountLabel: l.accountId === null ? null : labels.get(l.accountId) ?? null,
+      ...positionFields(l.position),
+      markPrice: markPrice(l.mark).toString(),
+      bid: l.mark?.bid.toString() ?? null,
+      ask: l.mark?.ask.toString() ?? null,
+      markTime: l.markTime,
+      // A row first traded today started the day at nothing.
+      ...strings({
+        total: p.total, today: p.total - (todayStart.get(rowKey(l)) ?? 0n), realized: p.realized,
+        unrealized: p.unrealized, fees: p.fees,
+      }),
+      version: l.version,
+      needsReview: review.has(l.listingId),
+      lastFillAt: l.lastFillAt,
+    };
+  });
+}
+
+export async function strategySummary(
+  client: PoolClient, strategyId: number, mode: string, timeZone: string, now: Date, listingId?: number,
+) {
   const dayStart = await startOfDay(client, now, timeZone);
   const current = await loadStrategyState(client, mode, strategyId, now);
   const atDayStart = await loadStrategyState(client, mode, strategyId, dayStart);
@@ -231,10 +276,12 @@ export async function strategySummary(client: PoolClient, strategyId: number, mo
   const outside = await loadOutOfSessionFills(client, mode, strategyId, now);
   const modes = (await client.query(
     'SELECT DISTINCT mode FROM strategy.session WHERE strategy_id = $1', [strategyId])).rows.map(r => r.mode);
-  const info = await loadListingInfo(client, current.listings.map(l => l.listingId));
   const review = await needsReview(client, strategyId, mode);
-  const labels = await accountLabels(client, current.listings.map(l => l.accountId));
 
+  const active = current.listings.filter(l => activeToday(l, review, dayStart));
+  const history = lifetimeTotals(current.listings.filter(l => !activeToday(l, review, dayStart)));
+  const shown = listingId === undefined ? active : current.listings.filter(l => l.listingId === listingId);
+  const todayStart = new Map(atDayStart.listings.map(l => [rowKey(l), lifetimePnl(l.position, l.mark).total]));
   const lifetime = lifetimeTotals(current.listings);
   const startOfToday = lifetimeTotals(atDayStart.listings);
   return {
@@ -252,25 +299,29 @@ export async function strategySummary(client: PoolClient, strategyId: number, mo
       outsideSessions: outsideSessions(lifetime.total - sessionPnls.reduce((acc, p) => acc + p.total, 0n), outside),
     },
     openPositions: current.listings.filter(l => l.position.netQuantity !== 0n).length,
-    listings: current.listings.map(l => {
-      const p = lifetimePnl(l.position, l.mark);
-      const before = atDayStart.listings.find(d => d.listingId === l.listingId && d.accountId === l.accountId);
-      const todayStart = before ? lifetimePnl(before.position, before.mark).total : 0n;
-      return {
-        ...listingFields(info.get(l.listingId), l.listingId),
-        accountId: l.accountId,
-        accountLabel: l.accountId === null ? null : labels.get(l.accountId) ?? null,
-        ...positionFields(l.position),
-        markPrice: markPrice(l.mark).toString(),
-        bid: l.mark?.bid.toString() ?? null,
-        ask: l.mark?.ask.toString() ?? null,
-        markTime: l.markTime,
-        ...strings({ total: p.total, today: p.total - todayStart, realized: p.realized, unrealized: p.unrealized, fees: p.fees }),
-        version: l.version,
-        needsReview: review.has(l.listingId),
-        lastFillAt: l.lastFillAt,
-      };
-    }),
+    history: {
+      count: current.listings.length - active.length,
+      ...strings({ total: history.total, realized: history.realized, fees: history.fees }),
+    },
+    listings: await strategyRows(client, shown, todayStart, review),
+  };
+}
+
+// The rows strategySummary leaves out, newest first. Untraded since the day started, each one's today is zero.
+export async function flatPositions(
+  client: PoolClient, strategyId: number, mode: string, timeZone: string, now: Date, limit: number, before?: bigint,
+) {
+  const dayStart = await startOfDay(client, now, timeZone);
+  const current = await loadStrategyState(client, mode, strategyId, now);
+  const review = await needsReview(client, strategyId, mode);
+  const flat = current.listings
+    .filter(l => !activeToday(l, review, dayStart) && (before === undefined || BigInt(l.fillId) < before))
+    .sort((a, b) => (BigInt(b.fillId) > BigInt(a.fillId) ? 1 : -1))
+    .slice(0, limit);
+  const todayStart = new Map(flat.map(l => [rowKey(l), lifetimePnl(l.position, l.mark).total]));
+  return {
+    rows: await strategyRows(client, flat, todayStart, review),
+    nextBefore: flat.length === limit ? flat[flat.length - 1].fillId : null,
   };
 }
 
@@ -340,9 +391,20 @@ export async function summarize(client: PoolClient, params: Record<string, strin
   const timeZone = parseTimeZone(params.tz);
   const strategyId = parsePositiveInt(params.strategyId);
   if (Number.isNaN(strategyId)) throw new BadRequest('strategyId must be a positive integer');
-  return strategyId === undefined
-    ? firmSummary(client, mode, timeZone, now)
-    : strategySummary(client, strategyId, mode, timeZone, now);
+  if (strategyId === undefined) return firmSummary(client, mode, timeZone, now);
+  if (params.positions !== undefined) {
+    if (params.positions !== 'flat') throw new BadRequest('positions must be flat');
+    const limit = parsePositiveInt(params.limit) ?? DEFAULT_FLAT_LIMIT;
+    if (Number.isNaN(limit) || limit > MAX_FLAT_LIMIT) throw new BadRequest(`limit must be 1 to ${MAX_FLAT_LIMIT}`);
+    if (params.before !== undefined && !/^[1-9][0-9]{0,18}$/.test(params.before)) {
+      throw new BadRequest('before must be a nextBefore from an earlier page');
+    }
+    return flatPositions(client, strategyId, mode, timeZone, now, limit,
+      params.before === undefined ? undefined : BigInt(params.before));
+  }
+  const listingId = parsePositiveInt(params.listingId);
+  if (Number.isNaN(listingId)) throw new BadRequest('listingId must be a positive integer');
+  return strategySummary(client, strategyId, mode, timeZone, now, listingId);
 }
 
 export const handler = async (event: APIGatewayProxyEvent) => {

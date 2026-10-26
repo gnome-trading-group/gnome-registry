@@ -2,7 +2,7 @@ import { APIGatewayProxyEvent } from 'aws-lambda';
 import { PoolClient } from 'pg';
 import { connectLedgerDatabase, createResponse, parseMode, parsePositiveInt } from './ledger-common';
 import { BadRequest, parseTimeZone } from './pnl-summary';
-import { walkLifetime } from './pnl-walk';
+import { strategyTotals, walkLifetime } from './pnl-walk';
 
 // PnL per day in the viewer's time zone: the change in lifetime PnL from one local midnight to the next (today's up
 // to now). Taken from the same walk as the charts, so the days always add up to the chart's change.
@@ -51,11 +51,7 @@ export async function daily(client: PoolClient, params: Record<string, string | 
   const result: { timeZone: string; days: Days; strategies?: { strategyId: number; days: Days }[] } =
     { timeZone, days: changes(walk.total) };
   if (strategyId === undefined && params.byStrategy === 'true') {
-    const strategyIds = [...new Set(walk.keys.map(k => k.strategyId))];
-    result.strategies = strategyIds.map(id => ({
-      strategyId: id,
-      days: changes(walk.t.map((_, p) => walk.keys.reduce((sum, key, k) => (key.strategyId === id ? sum + walk.keyTotal[k][p] : sum), 0n))),
-    }));
+    result.strategies = walk.strategyIds.map(id => ({ strategyId: id, days: changes(strategyTotals(walk, id)) }));
   }
   return result;
 }

@@ -4,7 +4,7 @@ import { connectLedgerDatabase, createResponse, isSessionId, parseMode, parsePos
 import { MarkInputs, PositionState, toBigInt } from './ledger-math';
 import { pickResolution, pointTimes, sessionPnl } from './pnl-math';
 import { FLAT, loadListingInfo, loadSessionStates } from './pnl-state';
-import { FillRow, fillPosition, inOrder, loadMarkChanges, SeriesEvent, walkLifetime } from './pnl-walk';
+import { FillRow, fillPosition, inOrder, loadMarkChanges, SeriesEvent, strategyTotals, walkLifetime } from './pnl-walk';
 
 // PnL over time for a chart, one point per resolution step (the smallest that keeps the series within a bounded
 // number of points), each the state at that moment: the position the newest fill left, valued at the newest mark.
@@ -12,7 +12,15 @@ import { FillRow, fillPosition, inOrder, loadMarkChanges, SeriesEvent, walkLifet
 //   ?strategyId=&mode=     the strategy's lifetime PnL, continuous across its sessions (&listingId= for one listing)
 //   ?mode=                 every strategy's: the firm's lifetime PnL, with each strategy's line
 // Optional: start, end (ISO), resolution (ms), since (ms; only points from then on, for appending to a chart).
-// Every listing is carried forward between its own updates, so the totals always equal the sum of the listings.
+// Each listing's own line, as long as the series, comes only when asked for, so a strategy trading many listings
+// can't outgrow the response:
+//   byListing=true         the MAX_SERIES_LISTINGS listings that moved most over the window, among those held or traded
+//                          in it, with listingCount (how many were) and `other`, everything else summed
+//   listingIds=1,2         exactly these lines (and `other`): a poll keeps the lines its chart already draws
+//   listingId= (strategy)  that listing alone; implies its line
+// Every listing is carried forward between its own updates, so the totals always equal the lines plus `other`.
+
+export const MAX_SERIES_LISTINGS = 25;
 
 class BadRequest extends Error {}
 
@@ -41,7 +49,16 @@ function parseTime(value: string | undefined, name: string): Date | undefined {
   return time;
 }
 
-function seriesShape(w: Window, listingIds: number[]) {
+function parseListingIds(value: string | undefined): number[] | undefined {
+  if (value === undefined) return undefined;
+  const ids = value.split(',').map(Number);
+  if (ids.length > MAX_SERIES_LISTINGS || ids.some(id => !Number.isInteger(id) || id <= 0)) {
+    throw new BadRequest(`listingIds must be 1 to ${MAX_SERIES_LISTINGS} positive integers`);
+  }
+  return ids;
+}
+
+function seriesShape(w: Window) {
   return {
     resolutionMs: w.stepMs,
     t: [] as number[],
@@ -49,12 +66,41 @@ function seriesShape(w: Window, listingIds: number[]) {
     realized: [] as string[],
     unrealized: [] as string[],
     fees: [] as string[],
-    listings: listingIds.map(listingId => ({
-      listingId, symbol: null as string | null, lotSize: null as string | null, total: [] as string[],
-      netQuantity: [] as string[],
-    })),
+    listings: [] as { listingId: number; symbol: string | null; lotSize: string | null; total: string[]; netQuantity: string[] }[],
+    listingCount: 0,
+    other: null as string[] | null,
     events: [] as SeriesEvent[],
   };
+}
+
+interface Line {
+  listingId: number;
+  total: bigint[];
+  net: bigint[];
+}
+
+const abs = (v: bigint) => (v < 0n ? -v : v);
+const moved = (line: Line) => abs((line.total.at(-1) ?? 0n) - (line.total[0] ?? 0n));
+
+// Draws the chosen lines into the series: those asked for by id, else the ones that moved most. `active` are the
+// lines held or traded in the window; whatever isn't drawn, dormant listings included, goes into `other`.
+async function drawLines(
+  client: PoolClient, series: ReturnType<typeof seriesShape>, active: Line[], total: bigint[], requested?: number[],
+) {
+  const shown = requested
+    ? requested.flatMap(id => active.filter(l => l.listingId === id))
+    : [...active].sort((a, b) => (moved(a) === moved(b) ? a.listingId - b.listingId : moved(b) > moved(a) ? 1 : -1))
+      .slice(0, MAX_SERIES_LISTINGS);
+  const info = await loadListingInfo(client, shown.map(l => l.listingId));
+  series.listings = shown.map(l => ({
+    listingId: l.listingId,
+    symbol: info.get(l.listingId)?.symbol ?? null,
+    lotSize: info.get(l.listingId)?.lotSize ?? null,
+    total: l.total.map(String),
+    netQuantity: l.net.map(String),
+  }));
+  series.listingCount = active.length;
+  series.other = total.map((value, p) => shown.reduce((rest, l) => rest - l.total[p], value).toString());
 }
 
 export async function sessionSeries(client: PoolClient, sessionId: string, params: Record<string, string | undefined>, now: Date) {
@@ -69,13 +115,10 @@ export async function sessionSeries(client: PoolClient, sessionId: string, param
     start && start > session.started_at ? start : session.started_at,
     until && until < end ? until : end,
     params);
+  const requested = parseListingIds(params.listingIds);
+  const byListing = params.byListing === 'true' || requested !== undefined;
   const listingIds = states.map(s => s.listingId);
-  const series = seriesShape(w, listingIds);
-  const info = await loadListingInfo(client, listingIds);
-  series.listings.forEach(l => {
-    l.symbol = info.get(l.listingId)?.symbol ?? null;
-    l.lotSize = info.get(l.listingId)?.lotSize ?? null;
-  });
+  const series = seriesShape(w);
 
   // Where each listing stood when the window opens: the session's own last fill, else what it inherited.
   const atStart = (await client.query(`
@@ -88,8 +131,9 @@ export async function sessionSeries(client: PoolClient, sessionId: string, param
 
   const position = new Map<number, PositionState>();
   const mark = new Map<number, MarkInputs | null>();
+  const ownAtStart = new Map(atStart.map(f => [f.listing_id, f]));
   for (const state of states) {
-    const own = atStart.find(f => f.listing_id === state.listingId);
+    const own = ownAtStart.get(state.listingId);
     position.set(state.listingId, own
       ? fillPosition(own, toBigInt(own.realized_pnl_after), toBigInt(own.fees_after))
       : state.opening);
@@ -108,6 +152,8 @@ export async function sessionSeries(client: PoolClient, sessionId: string, param
     }
   }
 
+  const lines: Line[] = states.map(s => ({ listingId: s.listingId, total: [], net: [] }));
+  const totals: bigint[] = [];
   let next = 0;
   for (const t of pointTimes(w.fromMs, w.toMs, w.stepMs)) {
     for (; next < changes.length && changes[next].timeMs <= t; next++) {
@@ -141,14 +187,22 @@ export async function sessionSeries(client: PoolClient, sessionId: string, param
       realized += p.realized;
       unrealized += p.unrealized;
       fees += p.fees;
-      series.listings[i].total.push(p.total.toString());
-      series.listings[i].netQuantity.push((position.get(state.listingId) ?? FLAT).netQuantity.toString());
+      if (byListing) {
+        lines[i].total.push(p.total);
+        lines[i].net.push((position.get(state.listingId) ?? FLAT).netQuantity);
+      }
     });
+    totals.push(total);
     series.t.push(t);
     series.total.push(total.toString());
     series.realized.push(realized.toString());
     series.unrealized.push(unrealized.toString());
     series.fees.push(fees.toString());
+  }
+  if (byListing) {
+    const traded = new Set(fills.map(f => f.listing_id));
+    const active = lines.filter(l => traded.has(l.listingId) || l.net.some(n => n !== 0n) || requested?.includes(l.listingId));
+    await drawLines(client, series, active, totals, requested);
   }
   return series;
 }
@@ -164,19 +218,16 @@ export async function strategySeries(
   const w = window(start, until && until < now ? until : now, params);
   const listingId = parsePositiveInt(params.listingId);
   if (Number.isNaN(listingId)) throw new BadRequest('listingId must be a positive integer');
+  const requested = listingId === undefined ? parseListingIds(params.listingIds) : [listingId];
   const walk = await walkLifetime(client, {
     mode, strategyId, listingId, fromMs: w.fromMs, toMs: w.toMs, markStepMs: w.stepMs,
-    times: pointTimes(w.fromMs, w.toMs, w.stepMs), sessionEvents: true,
+    times: pointTimes(w.fromMs, w.toMs, w.stepMs), sessionEvents: true, keepListingIds: requested,
   });
-  const listingIds = walk.keys.map(k => k.listingId);
-  const series = seriesShape(w, listingIds);
-  const info = await loadListingInfo(client, listingIds);
-  series.listings.forEach((l, i) => {
-    l.symbol = info.get(l.listingId)?.symbol ?? null;
-    l.lotSize = info.get(l.listingId)?.lotSize ?? null;
-    l.total = walk.keyTotal[i].map(String);
-    l.netQuantity = walk.keyNet[i].map(String);
-  });
+  const series = seriesShape(w);
+  if (params.byListing === 'true' || requested !== undefined) {
+    const active = walk.keys.map((key, k) => ({ listingId: key.listingId, total: walk.keyTotal[k], net: walk.keyNet[k] }));
+    await drawLines(client, series, active, walk.total, requested);
+  }
   series.t = walk.t;
   series.total = walk.total.map(String);
   series.realized = walk.realized.map(String);
@@ -197,7 +248,6 @@ export async function firmSeries(client: PoolClient, mode: string, params: Recor
     mode, strategyId: null, fromMs: w.fromMs, toMs: w.toMs, markStepMs: w.stepMs,
     times: pointTimes(w.fromMs, w.toMs, w.stepMs), sessionEvents: false,
   });
-  const strategyIds = [...new Set(walk.keys.map(k => k.strategyId))];
   return {
     resolutionMs: w.stepMs,
     t: walk.t,
@@ -206,12 +256,11 @@ export async function firmSeries(client: PoolClient, mode: string, params: Recor
     unrealized: walk.unrealized.map(String),
     fees: walk.fees.map(String),
     listings: [],
+    listingCount: 0,
+    other: null,
     events: walk.events,
-    strategies: strategyIds.map(strategyId => ({
-      strategyId,
-      total: walk.t.map((_, p) => walk.keys
-        .reduce((sum, key, k) => (key.strategyId === strategyId ? sum + walk.keyTotal[k][p] : sum), 0n)
-        .toString()),
+    strategies: walk.strategyIds.map(strategyId => ({
+      strategyId, total: strategyTotals(walk, strategyId).map(String),
     })),
   };
 }

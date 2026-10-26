@@ -147,17 +147,19 @@ describeDb('PnL derived from the ledger, against Postgres', () => {
 
   it('a session series starts at $0 and steps with its marks and fills; since returns only new points', async () => {
     await story();
-    const s = await series(client, { sessionId: 'new', resolution: String(HALF_HOUR) }, now) as any;
+    const s = await series(client, { sessionId: 'new', resolution: String(HALF_HOUR), byListing: 'true' }, now) as any;
     expect(s.t.map((t: number) => new Date(t).toISOString().slice(11, 16))).toEqual(['12:00', '12:30', '13:00']);
     expect(s.total).toEqual([cents(0), cents(50), cents(45)]);
     expect([s.listings[0].symbol, s.listings[0].lotSize]).toEqual(['KX-YES', String(UNIT)]);
     expect(s.listings[0].netQuantity).toEqual([String(10 * UNIT), String(10 * UNIT), String(6 * UNIT)]);
+    expect([s.listingCount, s.other]).toEqual([1, ['0', '0', '0']]);
     expect(s.events.map((e: any) => e.kind)).toEqual(['SESSION_START']);
 
     const tail = await series(client, {
       sessionId: 'new', resolution: String(HALF_HOUR), since: String(Date.parse('2026-10-06T12:30:00Z')),
     }, now) as any;
     expect(tail.total).toEqual([cents(50), cents(45)]);
+    expect(tail.listings).toEqual([]);
   });
 
   it('a strategy series is continuous across sessions, including what moved between them', async () => {
@@ -290,9 +292,118 @@ describeDb('PnL derived from the ledger, against Postgres', () => {
     const all = await series(client, params, now) as any;
     const one = await series(client, { ...params, listingId: '500' }, now) as any;
     expect(all.total.at(-1)).toBe(cents(147));
+    expect(all.listings).toEqual([]);
+    expect((await series(client, { ...params, byListing: 'true' }, now) as any).listings.map((l: any) => l.listingId))
+      .toEqual([500, 501]);
     expect(one.total.at(-1)).toBe(cents(144));
     expect(one.listings.map((l: any) => l.listingId)).toEqual([500]);
   });
+
+  async function closedFill(listingId: number, at: string, realizedCents: number) {
+    await client.query(`INSERT INTO sm.listing (listing_id, exchange_id, security_id) VALUES ($1, 1, 1)
+      ON CONFLICT DO NOTHING`, [listingId]);
+    await client.query(`INSERT INTO ledger.fill (source, session_id, strategy_id, listing_id, mode, client_oid_counter,
+        cum_qty_after, net_quantity_after, total_cost_after, realized_pnl_after, fees_after, position_version, recorded_at)
+      VALUES ('VENUE', 'new', 1, $1, 'paper', $4, 1, 0, 0, $2, 0, 1, $3)`, [listingId, realizedCents * CENT, at, String(listingId)]);
+  }
+
+  it('a strategy summary lists the rows active today, sums the flat rest into history and pages them', async () => {
+    await story();
+    await closedFill(503, '2026-10-04T10:00:00Z', 4);
+    await closedFill(501, '2026-10-05T10:00:00Z', 3);
+    await closedFill(502, '2026-10-06T12:10:00Z', 2);
+    const params = { strategyId: '1', mode: 'paper' };
+    const s = await summarize(client, params, now) as any;
+    expect(s.listings.map((l: any) => l.listingId)).toEqual([500, 502]);
+    expect(s.listings[1].today).toBe(cents(2));
+    expect(s.history).toEqual({ count: 2, total: cents(7), realized: cents(7), fees: '0' });
+    expect(s.totals.lifetime).toBe(cents(153));
+
+    const page = (extra: Record<string, string>) => summarize(client, { ...params, positions: 'flat', ...extra }, now);
+    const first = await page({ limit: '1' }) as any;
+    expect(first.rows.map((r: any) => [r.listingId, r.total, r.today])).toEqual([[501, cents(3), '0']]);
+    const second = await page({ limit: '1', before: first.nextBefore }) as any;
+    expect(second.rows.map((r: any) => r.listingId)).toEqual([503]);
+    expect((await page({ limit: '1', before: second.nextBefore }) as any)).toEqual({ rows: [], nextBefore: null });
+    expect((await page({}) as any).nextBefore).toBeNull();
+
+    const one = await summarize(client, { ...params, listingId: '501' }, now) as any;
+    expect(one.listings.map((l: any) => l.listingId)).toEqual([501]);
+    await expect(page({ limit: '501' })).rejects.toThrow('limit must be 1 to 500');
+    await expect(page({ before: 'x' })).rejects.toThrow('before must be');
+    await expect(summarize(client, { ...params, positions: 'open' }, now)).rejects.toThrow('positions must be flat');
+  });
+
+  it('a listing flat and untraded through the window is dormant: counted in every total, drawn only in other', async () => {
+    await story();
+    await closedFill(501, '2026-10-05T10:00:00Z', 3);
+    const params = { strategyId: '1', mode: 'paper', start: '2026-10-06T12:00:00Z', resolution: String(HALF_HOUR) };
+    const s = await series(client, { ...params, byListing: 'true' }, now) as any;
+    const from10 = await series(client, { ...params, start: '2026-10-05T09:00:00Z' }, now) as any;
+    expect(s.total.at(-1)).toBe(cents(147));
+    expect(from10.total.at(-1)).toBe(cents(147));
+    expect(s.listings.map((l: any) => l.listingId)).toEqual([500]);
+    expect([s.listingCount, s.other]).toEqual([1, [cents(3), cents(3), cents(3)]]);
+
+    const firm = await series(client, { mode: 'paper', start: params.start, resolution: String(HALF_HOUR) }, now) as any;
+    expect(firm.strategies).toEqual([{ strategyId: 1, total: s.total }]);
+    const days = await daily(client, { mode: 'paper', tz: 'UTC', days: '1', byStrategy: 'true' }, now);
+    expect(days.strategies).toEqual([{ strategyId: 1, days: days.days }]);
+  });
+
+  it('draws the listings that moved most, the rest summed into other; a poll keeps the lines it asks for', async () => {
+    await story();
+    for (let i = 0; i < 30; i++) await closedFill(600 + i, '2026-10-06T12:10:00Z', i + 1);
+    const params = { strategyId: '1', mode: 'paper', start: '2026-10-06T12:00:00Z', resolution: String(HALF_HOUR) };
+    const s = await series(client, { ...params, byListing: 'true' }, now) as any;
+    const ids = s.listings.map((l: any) => l.listingId);
+    // 500 moved 45c in the window; 629 down to 606 moved 30c to 7c.
+    expect(ids).toEqual([500, ...Array.from({ length: 24 }, (_, i) => 629 - i)]);
+    expect(s.listingCount).toBe(31);
+    s.total.forEach((total: string, p: number) => expect(
+      s.listings.reduce((sum: bigint, l: any) => sum + BigInt(l.total[p]), BigInt(s.other[p]))).toBe(BigInt(total)));
+
+    const poll = await series(client, {
+      ...params, listingIds: '600,500', since: String(Date.parse('2026-10-06T12:30:00Z')),
+    }, now) as any;
+    expect(poll.listings.map((l: any) => [l.listingId, l.total.at(-1)])).toEqual([[600, cents(1)], [500, cents(144)]]);
+    expect(poll.other.at(-1)).toBe(String(BigInt(poll.total.at(-1)) - BigInt(cents(145))));
+    await expect(series(client, { ...params, listingIds: Array.from({ length: 26 }, (_, i) => 600 + i).join(',') }, now))
+      .rejects.toThrow(/listingIds/);
+  });
+
+  it('a strategy that has traded thousands of listings charts a week in a bounded response', async () => {
+    await session('new', '2026-08-31T00:00:00Z');
+    // 5,000 listings traded in September, 200 of them still held and marked every 15 minutes through the week.
+    await client.query(`INSERT INTO sm.listing (listing_id, exchange_id, security_id)
+      SELECT id, 1, 1 FROM generate_series(10000, 14999) id`);
+    await client.query(`INSERT INTO ledger.fill (source, session_id, strategy_id, listing_id, mode, client_oid_counter,
+        cum_qty_after, net_quantity_after, total_cost_after, realized_pnl_after, fees_after, position_version, recorded_at)
+      SELECT 'VENUE', 'new', 1, id, 'paper', id, 1, CASE WHEN id < 10200 THEN $1 ELSE 0 END,
+        CASE WHEN id < 10200 THEN $2 ELSE 0 END, $3, 0, 1, '2026-09-01T00:00:00Z'
+      FROM generate_series(10000, 14999) id`, [UNIT, 50 * CENT, CENT]);
+    await client.query(`INSERT INTO ledger.mark (listing_id, ts, bid, ask, last_trade)
+      SELECT id, ts, (40 + id % 20) * $1::bigint, (42 + id % 20) * $1::bigint, 0
+      FROM generate_series(10000, 10199) id,
+        generate_series('2026-09-29T13:00:00Z'::timestamptz, '2026-10-06T13:00:00Z', interval '15 minutes') ts`, [CENT]);
+    const params = { strategyId: '1', mode: 'paper', start: '2026-09-29T13:00:00Z' };
+
+    const started = Date.now();
+    const totals = await series(client, params, now) as any;
+    const lines = await series(client, { ...params, byListing: 'true' }, now) as any;
+    const elapsedMs = Date.now() - started;
+    expect(totals.total.at(-1)).toBe(String(BigInt(cents(5000)) + BigInt(totals.unrealized.at(-1))));
+    expect([lines.listings.length, lines.listingCount]).toEqual([25, 200]);
+    expect(JSON.stringify(totals).length).toBeLessThan(200_000);
+    expect(JSON.stringify(lines).length).toBeLessThan(1_000_000);
+    expect(elapsedMs).toBeLessThan(10_000);
+
+    const summary = await summarize(client, { strategyId: '1', mode: 'paper' }, now) as any;
+    expect([summary.listings.length, summary.history.count]).toEqual([200, 4800]);
+    expect(JSON.stringify(summary).length).toBeLessThan(200_000);
+    const flat = await summarize(client, { strategyId: '1', mode: 'paper', positions: 'flat' }, now) as any;
+    expect([flat.rows.length, flat.nextBefore !== null]).toEqual([100, true]);
+  }, 60_000);
 
   it('price history opens with the price in force, then the last in each step, with the mark derived', async () => {
     await mark('2026-10-06T10:00:10Z', 40, 42);

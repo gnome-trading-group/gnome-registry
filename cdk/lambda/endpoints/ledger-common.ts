@@ -14,12 +14,21 @@ const CORS_HEADERS = {
 const SESSION_ID_PATTERN = /^[A-Za-z0-9_-]+$/;
 const MAX_INT = 2147483647;
 
+// Lambda drops a response over 6 MB and API Gateway answers an opaque 502 that no log ties to a route, so a body near
+// the limit is refused here, where the caller can be told to ask for less.
+export const MAX_RESPONSE_BYTES = 5_500_000;
+
 export function createResponse(statusCode: number, body: unknown) {
-  return {
-    statusCode,
-    body: typeof body === 'string' ? body : JSON.stringify(body),
-    headers: CORS_HEADERS,
-  };
+  const text = typeof body === 'string' ? body : JSON.stringify(body);
+  const bytes = Buffer.byteLength(text);
+  if (bytes > MAX_RESPONSE_BYTES) {
+    return {
+      statusCode: 413,
+      body: JSON.stringify({ message: `Response of ${bytes} bytes is too large; ask for a narrower window or fewer rows` }),
+      headers: CORS_HEADERS,
+    };
+  }
+  return { statusCode, body: text, headers: CORS_HEADERS };
 }
 
 export function connectLedgerDatabase() {
