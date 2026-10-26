@@ -16,6 +16,10 @@ export const ALERT_BUS_NAME = 'gnome-alerts';
 export const ALERT_EVENT_SOURCE = 'gnome.alerts';
 export const ALERT_DETAIL_TYPE = 'Alert';
 export const METRICS_NAMESPACE = 'Gnome/Alerting';
+// Announced on the same bus after an alert is posted to Slack as firing, for gnome-bot to triage in the post's thread.
+// Its own source, so the router's rule (source gnome.alerts) never hears it.
+export const ALERT_DELIVERED_SOURCE = 'gnome.alerts.delivered';
+export const ALERT_DELIVERED_DETAIL_TYPE = 'AlertDelivered';
 
 export interface AlertEvent {
   action: Action;
@@ -79,6 +83,29 @@ export interface Delivery {
   sinks: Sink[];
   // Set when the store couldn't be reached: delivered anyway, but nothing recorded it.
   unpersisted?: boolean;
+}
+
+// An alert just posted to Slack as firing: what gnome-bot needs to look into it and reply in its thread.
+export interface AlertDelivered {
+  alertId: number | null;
+  key: string;
+  type: string;
+  severity: Severity;
+  title: string;
+  body: string | null;
+  mode: Mode | null;
+  strategyId: number | null;
+  sessionId: string | null;
+  listingId: number | null;
+  exchangeId: number | null;
+  accountId: number | null;
+  labels: Record<string, string>;
+  runbook: Runbook | null;
+  slackChannel: string;
+  slackTs: string;
+  // A repeat fire of an alert already posted once gets a new message too; the bot decides whether to triage again.
+  firstPost: boolean;
+  stage: string;
 }
 
 export type StoreRequest =

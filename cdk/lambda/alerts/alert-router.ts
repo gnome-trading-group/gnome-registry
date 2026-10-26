@@ -4,7 +4,8 @@ import { GetSecretValueCommand, SecretsManagerClient } from '@aws-sdk/client-sec
 import { normalizeType, runbookFor, severityOf } from './alert-types';
 import { sinksFor } from './routes';
 import {
-  ALERT_BUS_NAME, ALERT_DETAIL_TYPE, ALERT_EVENT_SOURCE, AlertEvent, Delivery, RecordResult, Severity, Sink, StoreRequest,
+  ALERT_BUS_NAME, ALERT_DELIVERED_DETAIL_TYPE, ALERT_DELIVERED_SOURCE, ALERT_DETAIL_TYPE, ALERT_EVENT_SOURCE, AlertDelivered,
+  AlertEvent, Delivery, RecordResult, Severity, Sink, StoreRequest,
 } from './model';
 import { sendToSlack } from './sinks/slack';
 import { sendToIncidentIo } from './sinks/incidentio';
@@ -134,6 +135,35 @@ export function fromCostNotification(record: any): AlertEvent | null {
   };
 }
 
+// Slack caps a message at 40,000 characters; the bot needs the gist, and can look the rest up.
+const DELIVERED_BODY_CHARS = 4000;
+
+/** What gnome-bot hears when a firing alert is posted, or null for a post it shouldn't triage (an update). */
+export function deliveredEvent(d: Delivery, slackChannel: string, slackTs: string | null, stageName: string): AlertDelivered | null {
+  if (!slackTs || d.status !== 'FIRING' || d.acknowledgedBy) return null;
+  return {
+    alertId: d.alertId, key: d.key, type: d.type, severity: d.severity, title: d.title,
+    body: d.body ? d.body.slice(0, DELIVERED_BODY_CHARS) : null, mode: d.mode, strategyId: d.strategyId,
+    sessionId: d.sessionId, listingId: d.listingId, exchangeId: d.exchangeId, accountId: d.accountId, labels: d.labels,
+    runbook: d.runbook, slackChannel, slackTs, firstPost: !d.slackTs, stage: stageName,
+  };
+}
+
+// Triage is a nicety: an alert is delivered whether or not the announcement makes it.
+async function announceDelivered(event: AlertDelivered): Promise<void> {
+  try {
+    const res = await events.send(new PutEventsCommand({
+      Entries: [{
+        EventBusName: ALERT_BUS_NAME, Source: ALERT_DELIVERED_SOURCE, DetailType: ALERT_DELIVERED_DETAIL_TYPE,
+        Detail: JSON.stringify(event),
+      }],
+    }));
+    if (res.FailedEntryCount) console.warn(`Announcing ${event.key} as delivered failed`, JSON.stringify(res.Entries));
+  } catch (error) {
+    console.warn(`Announcing ${event.key} as delivered failed`, error);
+  }
+}
+
 async function deliver(d: Delivery): Promise<void> {
   const controllerUrl = process.env.CONTROLLER_URL ?? '';
   for (const sink of d.sinks) {
@@ -149,6 +179,8 @@ async function deliver(d: Delivery): Promise<void> {
         await sendToIncidentIo(d, { alertSourceConfigId, token, controllerUrl });
       }
       if (d.alertId !== null) await invokeStore({ op: 'markDelivered', alertId: d.alertId, sink, slackTs });
+      const delivered = sink === 'slack' ? deliveredEvent(d, process.env.SLACK_CHANNEL!, slackTs, stage()) : null;
+      if (delivered) await announceDelivered(delivered);
     } catch (error) {
       console.error(`Delivering ${d.key} to ${sink} failed; the next tick retries it`, error);
     }

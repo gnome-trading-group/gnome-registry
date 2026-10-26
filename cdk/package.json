@@ -19,7 +19,7 @@
     "@aws-sdk/client-lambda": "^3.1152.0",
     "@aws-sdk/client-secrets-manager": "^3.1051.0",
     "@aws-sdk/client-ssm": "^3.1146.0",
-    "@gnome-trading-group/gnome-shared-cdk": "^1.1.0",
+    "@gnome-trading-group/gnome-shared-cdk": "^1.2.0",
     "@types/jest": "^29.5.12",
     "@types/node": "20.14.9",
     "aws-cdk": "^2.176.0",

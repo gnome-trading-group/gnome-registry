@@ -10,7 +10,9 @@ import * as cognito from 'aws-cdk-lib/aws-cognito';
 import * as ssm from 'aws-cdk-lib/aws-ssm';
 import { join } from 'path';
 import { Runtime } from 'aws-cdk-lib/aws-lambda';
-import { CallerKind, GnomeApiAuthorizer, RouteMethods, Stage } from '@gnome-trading-group/gnome-shared-cdk';
+import {
+  API_KEY_SECRET_NAMES, ApiKeySecret, CallerKind, GnomeApiAuthorizer, RouteMethods, Stage,
+} from '@gnome-trading-group/gnome-shared-cdk';
 import { CONTROLLER_READ_PATHS } from '../../lambda/endpoints/controller-read-paths';
 import { ALERT_BUS_NAME } from '../../lambda/alerts/model';
 
@@ -73,6 +75,7 @@ export class ApiStack extends cdk.Stack {
     // Created before the routes so the authorizer can check it and its keyId can reach the launcher Lambda's env var
     // and IAM policy.
     this.apiKey = new apigw.ApiKey(this, 'ApiKey');
+    new ApiKeySecret(this, 'ApiKeySecret', { apiKey: this.apiKey, secretName: API_KEY_SECRET_NAMES.REGISTRY });
 
     // The pool is owned by another stack and published through SSM. Services call with the API key, people with a
     // Cognito ID token and bots with a gnome-api-scoped access token; each route below names which of them it serves.

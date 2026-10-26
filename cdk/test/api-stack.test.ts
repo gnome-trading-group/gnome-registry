@@ -166,6 +166,13 @@ describe('ApiStack auth', () => {
     expect([statements[0].Resource].flat()).toHaveLength(2);
   });
 
+  it('mirrors the API key into its fixed-name secret without passing the value through the template', () => {
+    template.hasResourceProperties('AWS::SecretsManager::Secret', { Name: 'gnome/api-keys/registry', SecretString: 'pending' });
+    template.hasResourceProperties('AWS::CloudFormation::CustomResource', {
+      ApiKeyId: { Ref: Match.stringLikeRegexp('^ApiKey') },
+    });
+  });
+
   it('stays well under the CloudFormation limit of 500 resources per stack', () => {
     expect(Object.keys(template.toJSON().Resources).length).toBeLessThan(450);
   });

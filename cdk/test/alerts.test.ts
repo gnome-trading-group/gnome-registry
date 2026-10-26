@@ -1,6 +1,6 @@
 import { isAutomaticActor, normalizeType, severityOf } from '../lambda/alerts/alert-types';
 import { sinksFor } from '../lambda/alerts/routes';
-import { deliverUnrecorded, fromAlarm, fromCostNotification } from '../lambda/alerts/alert-router';
+import { deliveredEvent, deliverUnrecorded, fromAlarm, fromCostNotification } from '../lambda/alerts/alert-router';
 import { acknowledgedMessage, escape, firingMessage, resolvedMessage } from '../lambda/alerts/sinks/slack';
 import { eventFor } from '../lambda/alerts/sinks/incidentio';
 import { parseAlert } from '../lambda/alerts/alerts-ingest';
@@ -224,5 +224,35 @@ describe('an alert the store could not record', () => {
 
   it('is delivered when its age is unknown, rather than risk dropping it', () => {
     expect(deliverUnrecorded(undefined, undefined, at(300))).toBe(true);
+  });
+});
+
+describe('announcing a delivered alert for triage', () => {
+  it('announces a firing post with where it is, what it is about and its runbook', () => {
+    const event = deliveredEvent(delivery(), 'C1', '100.1', 'prod')!;
+    expect(event).toMatchObject({
+      alertId: 7, type: 'FATAL_ERROR', severity: 'CRITICAL', sessionId: 's1', strategyId: 1, mode: 'live',
+      slackChannel: 'C1', slackTs: '100.1', firstPost: true, stage: 'prod',
+      runbook: { url: 'https://github.com/x/FATAL_ERROR.md' },
+    });
+  });
+
+  it('marks a repeat fire, which gets a new message, as not the first post', () => {
+    expect(deliveredEvent(delivery({ slackTs: '90.0' }), 'C1', '100.1', 'prod')!.firstPost).toBe(false);
+  });
+
+  it.each([
+    ['a resolve', delivery({ status: 'RESOLVED', slackTs: '90.0' })],
+    ['an acknowledged alert', delivery({ acknowledgedBy: 'mason@gnome.group', slackTs: '90.0' })],
+  ])('does not announce %s, which only edits the existing message', (_name, d) => {
+    expect(deliveredEvent(d, 'C1', '90.0', 'prod')).toBeNull();
+  });
+
+  it('does not announce when Slack returned no message', () => {
+    expect(deliveredEvent(delivery(), 'C1', null, 'prod')).toBeNull();
+  });
+
+  it('caps the body it passes on', () => {
+    expect(deliveredEvent(delivery({ body: 'x'.repeat(10_000) }), 'C1', '1.1', 'prod')!.body).toHaveLength(4000);
   });
 });
