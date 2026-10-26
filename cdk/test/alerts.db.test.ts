@@ -3,7 +3,7 @@ import { connectExclusive, LOCK_TIMEOUT_MS, release } from './ledger-db';
 import { detect, markDelivered, MASS_SILENCE, record } from '../lambda/alerts/alert-store';
 import { AlertEvent, RecordResult } from '../lambda/alerts/model';
 import { recordHeartbeat } from '../lambda/endpoints/strategy-session-heartbeat';
-import { acknowledgeAlert } from '../lambda/endpoints/alerts';
+import { acknowledgeAlert, alertFacets } from '../lambda/endpoints/alerts';
 import { attention } from '../lambda/endpoints/monitoring-attention';
 import { StrategySessionHandler } from '../lambda/endpoints/strategy-sessions';
 
@@ -335,6 +335,49 @@ describeDb('alerts against Postgres', () => {
     expect([sent.delivery.status, sent.delivery.sinks, sent.delivery.acknowledgedBy])
       .toEqual(['RESOLVED', ['incidentio', 'slack'], 'ops@gnome.group']);
     expect(await acknowledgeAlert(client, first.delivery.alertId!, 'ops@gnome.group', 'prod', at(1))).toBeNull();
+  });
+
+  it('a reported event for the record closes once announced; one that needs a look stays open', async () => {
+    await session('s1');
+    const launched = await record(client, ingest({ type: 'LAUNCH_SUCCEEDED', sessionId: 's1' }), t0) as
+      Extract<RecordResult, { notify: true }>;
+    expect([launched.delivery.status, launched.delivery.sinks]).toEqual(['FIRING', ['slack']]);
+    await markDelivered(client, launched.delivery.alertId!, 'slack', 'ts-1', at(1));
+    const closed = (await client.query(`SELECT status, resolved_at FROM alert.alert WHERE type = 'LAUNCH_SUCCEEDED'`)).rows[0];
+    expect(closed).toEqual({ status: 'RESOLVED', resolved_at: at(1) });
+    // Delivered as resolved, nothing more is owed: Slack keeps the message as posted.
+    expect((await detect(client, at(5))).filter(e => e.action === 'REDELIVER')).toEqual([]);
+
+    const heldOn = await record(client, ingest({ type: 'SESSION_EXITED', sessionId: 's1', severity: 'WARNING' }, at(2)), at(2)) as
+      Extract<RecordResult, { notify: true }>;
+    await markDelivered(client, heldOn.delivery.alertId!, 'slack', 'ts-2', at(2));
+    expect((await client.query(`SELECT status FROM alert.alert WHERE type = 'SESSION_EXITED'`)).rows[0].status).toBe('FIRING');
+  });
+
+  it('a reported event for the record with nowhere to go is closed from the start', async () => {
+    await session('s1', { status: 'STOPPED' });
+    const suppressed = await record(client, ingest({ type: 'LAUNCH_SUCCEEDED', sessionId: 's1' }, at(1)), at(1));
+    expect(suppressed.notify).toBe(false);
+    expect((await client.query(`SELECT status FROM alert.alert WHERE type = 'LAUNCH_SUCCEEDED'`)).rows[0].status).toBe('RESOLVED');
+  });
+
+  it('facets count each severity and type, leaving out their own filter', async () => {
+    await session('s1');
+    await session('s2');
+    await record(client, ingest({ type: 'FATAL_ERROR', sessionId: 's1' }), t0);
+    await record(client, ingest({ type: 'FATAL_ERROR', sessionId: 's2' }), t0);
+    await record(client, ingest({ type: 'LAUNCH_FAILED', sessionId: 's1' }), t0);
+    await record(client, ingest({ type: 'PIPELINE_FAILED', key: 'p:r1', labels: { trigger: 'manual' } }), t0);
+
+    expect(await alertFacets(client, { status: 'FIRING' })).toEqual({
+      severity: { CRITICAL: 2, ERROR: 1, INFO: 1 },
+      type: { FATAL_ERROR: 2, LAUNCH_FAILED: 1, PIPELINE_FAILED: 1 },
+    });
+    expect(await alertFacets(client, { status: 'FIRING', severity: 'CRITICAL', type: 'LAUNCH_FAILED' })).toEqual({
+      severity: { ERROR: 1 },
+      type: { FATAL_ERROR: 2 },
+    });
+    expect(await alertFacets(client, { sessionId: 's2' })).toEqual({ severity: { CRITICAL: 1 }, type: { FATAL_ERROR: 1 } });
   });
 
   it('a session stuck starting or stopping is flagged', async () => {

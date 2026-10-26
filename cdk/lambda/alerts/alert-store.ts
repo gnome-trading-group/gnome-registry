@@ -2,7 +2,7 @@ import { PoolClient } from 'pg';
 import { connectDatabase } from '../connections';
 import { withTransaction } from '../endpoints/base';
 import { Finding, runRules } from '../monitoring/rules';
-import { alertType, normalizeType, runbookFor, severityOf } from './alert-types';
+import { alertType, isForTheRecord, normalizeType, runbookFor, severityOf } from './alert-types';
 import { sinksFor } from './routes';
 import { AlertEvent, Delivery, METRICS_NAMESPACE, Mode, RecordResult, Sink, StoreRequest } from './model';
 
@@ -156,8 +156,10 @@ export async function record(client: PoolClient, raw: AlertEvent, now: Date): Pr
       && !type.aboutStopping;
     const pending = !suppressed && type.debounce > 1;
     const sinks = suppressed || pending ? [] : sinksFor(severity, stage(), event.labels ?? {});
+    // Announced, it stays open until delivered (so a redelivery still posts it as new); with nowhere to go, it's done.
+    const closed = isForTheRecord(event.source, severity) && sinks.length === 0;
     const row = await insert(client, event, now, {
-      status: pending ? 'PENDING' : 'FIRING', severity, mode, sinks, fireCount: pending ? 0 : 1,
+      status: pending ? 'PENDING' : closed ? 'RESOLVED' : 'FIRING', severity, mode, sinks, fireCount: pending ? 0 : 1,
       pendingTicks: pending ? 1 : 0, suppressed,
     });
     // A concurrent record of the same key opened it first; that one notifies.
@@ -206,10 +208,18 @@ function toDelivery(row: any, sinks: Sink[]): Delivery {
   };
 }
 
-export async function markDelivered(client: PoolClient, alertId: number, sink: Sink, slackTs: string | null): Promise<void> {
-  await client.query(
+export async function markDelivered(
+  client: PoolClient, alertId: number, sink: Sink, slackTs: string | null, now = new Date(),
+): Promise<void> {
+  const row = (await client.query(
     `UPDATE alert.alert SET pending_sinks = array_remove(pending_sinks, $2), slack_ts = COALESCE($3, slack_ts)
-     WHERE alert_id = $1`, [alertId, sink, slackTs]);
+     WHERE alert_id = $1 RETURNING source, severity, status, pending_sinks`, [alertId, sink, slackTs])).rows[0];
+  // Quietly: Slack keeps the message as posted, as it did when these closed after a day.
+  if (row && row.status === 'FIRING' && row.pending_sinks.length === 0 && isForTheRecord(row.source, row.severity)) {
+    await client.query(
+      `UPDATE alert.alert SET status = 'RESOLVED', resolved_at = $2 WHERE alert_id = $1 AND status = 'FIRING'`,
+      [alertId, now]);
+  }
 }
 
 // How long the oldest owed notification has waited, as a CloudWatch metric (embedded in the log line: the store has

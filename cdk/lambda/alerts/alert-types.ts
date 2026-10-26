@@ -106,6 +106,12 @@ export function normalizeType(event: AlertEvent): AlertEvent {
   return { ...event, type: 'CUSTOM', severity: 'WARNING', labels: { ...event.labels, originalType: event.type } };
 }
 
+// A reported event at INFO (a launch, a session ending as planned) is for the record: nobody has anything to do about
+// it, so it closes once it's been announced rather than sitting among the open alerts for a day.
+export function isForTheRecord(source: string, severity: Severity): boolean {
+  return source === 'ingest' && severity === 'INFO';
+}
+
 export function rank(severity: Severity): number {
   return SEVERITIES.indexOf(severity);
 }

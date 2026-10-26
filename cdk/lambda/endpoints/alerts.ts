@@ -20,7 +20,8 @@ function list(value: string | undefined, allowed: string[]): string[] {
   return (value ?? '').split(',').map(v => v.trim().toUpperCase()).filter(v => allowed.includes(v));
 }
 
-export async function listAlerts(client: PoolClient, params: Record<string, string | undefined>) {
+// The filters every read shares; a facet leaves out its own, so each count says what picking that value would show.
+function conditions(params: Record<string, string | undefined>, omit?: 'severity' | 'type') {
   const where = ['NOT (status = \'RESOLVED\' AND fire_count = 0)'];
   const args: unknown[] = [];
   const add = (sql: string, value: unknown) => {
@@ -30,13 +31,29 @@ export async function listAlerts(client: PoolClient, params: Record<string, stri
   const statuses = list(params.status, STATUSES);
   if (statuses.length > 0) add('status = ANY(?::text[])', statuses);
   const severities = list(params.severity, SEVERITIES);
-  if (severities.length > 0) add('severity = ANY(?::text[])', severities);
-  if (params.type) add('type = ANY(?::text[])', params.type.split(',').map(t => t.trim()));
+  if (severities.length > 0 && omit !== 'severity') add('severity = ANY(?::text[])', severities);
+  if (params.type && omit !== 'type') add('type = ANY(?::text[])', params.type.split(',').map(t => t.trim()));
   if (params.sessionId && isSessionId(params.sessionId)) add('session_id = ?', params.sessionId);
   const strategyIds = parseIdList(params.strategyId);
   if (strategyIds.length > 0) add('strategy_id = ANY(?::int[])', strategyIds);
   const sinceId = parsePositiveInt(params.sinceId);
   if (sinceId !== undefined && !Number.isNaN(sinceId)) add('alert_id > ?', sinceId);
+  return { where, args };
+}
+
+/** @return how many alerts match the filters at each severity and of each type */
+export async function alertFacets(client: PoolClient, params: Record<string, string | undefined>) {
+  const count = async (column: 'severity' | 'type') => {
+    const { where, args } = conditions(params, column);
+    const rows = (await client.query(
+      `SELECT ${column} AS value, COUNT(*)::int AS n FROM alert.alert WHERE ${where.join(' AND ')} GROUP BY 1`, args)).rows;
+    return Object.fromEntries(rows.map(r => [r.value, r.n])) as Record<string, number>;
+  };
+  return { severity: await count('severity'), type: await count('type') };
+}
+
+export async function listAlerts(client: PoolClient, params: Record<string, string | undefined>) {
+  const { where, args } = conditions(params);
   const limit = Math.min(parsePositiveInt(params.limit) || DEFAULT_LIMIT, MAX_LIMIT);
   const offset = Number(params.offset) > 0 ? Math.floor(Number(params.offset)) : 0;
   args.push(limit, offset);
@@ -93,7 +110,8 @@ export const handler = async (event: APIGatewayProxyEvent) => {
   const client = await pool.connect();
   try {
     if (event.httpMethod === 'GET') {
-      return createResponse(200, await listAlerts(client, event.queryStringParameters ?? {}));
+      const params = event.queryStringParameters ?? {};
+      return createResponse(200, params.facets === 'true' ? await alertFacets(client, params) : await listAlerts(client, params));
     }
     if (event.httpMethod === 'PATCH') {
       const body = JSON.parse(event.body ?? '{}');
