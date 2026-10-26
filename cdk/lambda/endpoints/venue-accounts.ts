@@ -199,12 +199,8 @@ export async function changeStatus(client: PoolClient, accountId: number, status
   return { account: updated, haltedSessions: status === 'DRAINING' ? sessions : [], reason };
 }
 
-function isCognito(event: APIGatewayProxyEvent): boolean {
-  return event.resource?.startsWith('/cognito/') ?? false;
-}
-
 export const handler = async (event: APIGatewayProxyEvent) => {
-  const resource = (event.resource ?? '').replace(/^\/cognito\//, '/');
+  const resource = event.resource ?? '';
   const pool = await connectLedgerDatabase();
   const client = await pool.connect();
   try {
@@ -215,7 +211,7 @@ export const handler = async (event: APIGatewayProxyEvent) => {
     }
     // The account-creation Lambda (outside the VPC) replacing or deleting an account's secrets: their names, never
     // their contents, which the registry doesn't have.
-    if (resource === '/venue-accounts/secrets' && event.httpMethod === 'GET' && !isCognito(event)) {
+    if (resource === '/venue-accounts/secrets' && event.httpMethod === 'GET') {
       const accountId = Number(event.queryStringParameters?.accountId);
       if (!isPositiveInt(accountId)) return createResponse(400, { message: 'accountId must be a positive integer' });
       const row = (await client.query(
@@ -225,21 +221,21 @@ export const handler = async (event: APIGatewayProxyEvent) => {
         [accountId])).rows[0];
       return row ? createResponse(200, row) : createResponse(404, { message: `Unknown account ${accountId}` });
     }
-    if (resource === '/venue-accounts/secrets' && event.httpMethod === 'PUT' && !isCognito(event)) {
+    if (resource === '/venue-accounts/secrets' && event.httpMethod === 'PUT') {
       const replacement = JSON.parse(event.body ?? '{}') as ISecretsReplacement;
       return createResponse(200, await withTransaction(client, (c) => replaceSecrets(c, replacement)));
     }
-    if (resource === '/venue-accounts' && event.httpMethod === 'POST' && !isCognito(event)) {
+    if (resource === '/venue-accounts' && event.httpMethod === 'POST') {
       const registration = parseRegistration(event.body ?? '');
       const row = await withTransaction(client, (c) => registerAccount(c, registration),
         { actor: registration.actor, reason: 'registered' });
       return createResponse(200, row);
     }
-    if (resource === '/venue-accounts' && event.httpMethod === 'GET' && isCognito(event)) {
+    if (resource === '/venue-accounts' && event.httpMethod === 'GET') {
       const exchangeId = event.queryStringParameters?.exchangeId;
       return createResponse(200, await listAccounts(client, exchangeId ? Number(exchangeId) : undefined));
     }
-    if (resource === '/venue-accounts/status' && event.httpMethod === 'PATCH' && isCognito(event)) {
+    if (resource === '/venue-accounts/status' && event.httpMethod === 'PATCH') {
       const body = JSON.parse(event.body ?? '{}') as { accountId?: number; status?: string; reason?: string };
       if (!isPositiveInt(body.accountId)) return createResponse(400, { message: 'accountId must be a positive integer' });
       if (typeof body.status !== 'string' || !(body.status in TRANSITIONS)) {

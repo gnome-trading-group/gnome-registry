@@ -32,10 +32,10 @@ describeDb('Simulation parameters, against Postgres', () => {
 
   beforeEach(async () => {
     await client.query('TRUNCATE sm.simulation_parameters, sm.exchange RESTART IDENTITY CASCADE');
-    await client.query(`INSERT INTO sm.exchange (exchange_id, exchange_name, region, schema_type, exchange_code) VALUES
-      (1, 'K', 'us-east-1', 'mbp-10', 'KALSHI'), (2, 'P', 'us-east-1', 'mbp-10', 'POLYMARKET_US'),
-      (3, 'PI', 'eu-west-1', 'mbp-10', 'POLYMARKET_INTL'), (4, 'H', 'ap-northeast-1', 'mbp-10', 'HYPERLIQUID'),
-      (5, 'L', 'ap-northeast-1', 'mbp-10', 'LIGHTER'), (6, 'B', 'ap-northeast-1', 'mbp-10', 'BINANCE')`);
+    await client.query(`INSERT INTO sm.exchange (exchange_id, exchange_name, region, exchange_code) VALUES
+      (1, 'K', 'us-east-1', 'KALSHI'), (2, 'P', 'us-east-1', 'POLYMARKET_US'),
+      (3, 'PI', 'eu-west-1', 'POLYMARKET_INTL'), (4, 'H', 'ap-northeast-1', 'HYPERLIQUID'),
+      (5, 'L', 'ap-northeast-1', 'LIGHTER'), (6, 'B', 'ap-northeast-1', 'BINANCE')`);
     await client.query(seedStatement());
     handler = new SimulationParametersHandler();
     handler.client = client;

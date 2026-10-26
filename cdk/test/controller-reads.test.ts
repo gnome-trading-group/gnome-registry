@@ -4,7 +4,7 @@ import { createResponse, MAX_RESPONSE_BYTES } from '../lambda/endpoints/ledger-c
 
 describe('controller reads', () => {
   it('answers a route it does not serve with 404 rather than another read', async () => {
-    const response = await handler({ resource: '/cognito/pnl/latest' } as APIGatewayProxyEvent) as { statusCode: number };
+    const response = await handler({ resource: '/pnl/latest' } as APIGatewayProxyEvent) as { statusCode: number };
     expect(response.statusCode).toBe(404);
   });
 

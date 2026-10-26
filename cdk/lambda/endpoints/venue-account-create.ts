@@ -374,7 +374,7 @@ export async function setMarketDataKey(body: { exchangeCode?: string; credential
 }
 
 export const handler = async (event: APIGatewayProxyEvent) => {
-  const resource = (event.resource ?? '').replace(/^\/cognito\//, '/');
+  const resource = event.resource ?? '';
   try {
     const body = JSON.parse(event.body ?? '{}');
     if (resource === '/venue-accounts/create' && event.httpMethod === 'POST') {

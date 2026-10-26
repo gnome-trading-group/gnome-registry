@@ -31,7 +31,6 @@ interface IExchangeBase {
   exchangeCode: string;
   exchangeName: string;
   region: string;
-  schemaType: string;
 }
 export interface ICreateExchange extends IExchangeBase {}
 export interface IExchange extends IExchangeBase {

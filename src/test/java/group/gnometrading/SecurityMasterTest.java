@@ -71,12 +71,12 @@ class SecurityMasterTest {
                 Arguments.of(
                         12399,
                         """
-                        [{"exchange_id": 12399, "exchange_code": "BTC_VENUE", "exchange_name": "BTC", "region": "us-east-2", "schema_type": "mbp-1"}]""",
+                        [{"exchange_id": 12399, "exchange_code": "BTC_VENUE", "exchange_name": "BTC", "region": "us-east-2"}]""",
                         new Exchange(12399, "BTC_VENUE", "BTC", "us-east-2")),
                 Arguments.of(
                         12356,
                         """
-                        [{"exchange_id": 12356, "region": "us-east-1", "schema_type": "mbp-1"}]""",
+                        [{"exchange_id": 12356, "region": "us-east-1"}]""",
                         new Exchange(12356, null, null, "us-east-1")));
     }
 
@@ -101,7 +101,7 @@ class SecurityMasterTest {
                         [{"listing_id": 12, "exchange_id": 12399, "security_id": 34, "exchange_security_id": "SecId", "exchange_security_symbol": "Binance"}]
                         """,
                         """
-                        [{"exchange_id": 12399, "exchange_code": "BTC_VENUE", "exchange_name": "BTC", "region": "us-east-2", "schema_type": "mbp-1"}]
+                        [{"exchange_id": 12399, "exchange_code": "BTC_VENUE", "exchange_name": "BTC", "region": "us-east-2"}]
                         """,
                         """
                         [{"security_id": 34, "type": 0, "symbol": "BTC"}]
@@ -153,7 +153,7 @@ class SecurityMasterTest {
                         [{"listing_id": 12, "exchange_id": 12399, "security_id": 34, "exchange_security_id": "SecId", "exchange_security_symbol": "Binance"}]
                         """,
                         """
-                        [{"exchange_id": 12399, "exchange_code": "BTC_VENUE", "exchange_name": "BTC", "region": "us-east-2", "schema_type": "mbp-1"}]
+                        [{"exchange_id": 12399, "exchange_code": "BTC_VENUE", "exchange_name": "BTC", "region": "us-east-2"}]
                         """,
                         """
                         [{"security_id": 34, "type": 0, "symbol": "BTC"}]
@@ -213,7 +213,7 @@ class SecurityMasterTest {
     void testGetExchangeCaching() {
         String jsonResponse =
                 """
-                [{"exchange_id": 456, "exchange_code": "NYSE_VENUE", "exchange_name": "NYSE", "region": "us-east-1", "schema_type": "mbp-1"}]""";
+                [{"exchange_id": 456, "exchange_code": "NYSE_VENUE", "exchange_name": "NYSE", "region": "us-east-1"}]""";
         when(registryConnection.get(new ViewString("/api/exchanges?exchangeId=456")))
                 .thenReturn(ByteBuffer.wrap(jsonResponse.getBytes()));
 
@@ -389,8 +389,8 @@ class SecurityMasterTest {
         lenient()
                 .when(registryConnection.get(new ViewString("/api/exchanges?exchangeId=" + exchangeId)))
                 .thenReturn(ByteBuffer.wrap(("[{\"exchange_id\": " + exchangeId
-                                + ", \"exchange_code\": \"VENUE\", \"exchange_name\": \"Venue\", \"region\": \"us-east-1\","
-                                + " \"schema_type\": \"mbp-1\"}]")
+                                + ", \"exchange_code\": \"VENUE\", \"exchange_name\": \"Venue\", \"region\": \"us-east-1\""
+                                + "}]")
                         .getBytes()));
         lenient()
                 .when(registryConnection.get(new ViewString("/api/securities?securityId=" + securityId)))
@@ -410,7 +410,7 @@ class SecurityMasterTest {
                 [{"listing_id": 789, "exchange_id": 456, "security_id": 123, "exchange_security_id": "SecId", "exchange_security_symbol": "SYM"}]""";
         String exchangeResponse =
                 """
-                [{"exchange_id": 456, "exchange_code": "NYSE_VENUE", "exchange_name": "NYSE", "region": "us-east-1", "schema_type": "mbp-1"}]""";
+                [{"exchange_id": 456, "exchange_code": "NYSE_VENUE", "exchange_name": "NYSE", "region": "us-east-1"}]""";
         String securityResponse = """
                 [{"security_id": 123, "type": 0, "symbol": "BTC"}]""";
 
@@ -625,7 +625,7 @@ class SecurityMasterTest {
                 [{"listing_id": 789, "exchange_id": 456, "security_id": 123, "exchange_security_id": "SecId", "exchange_security_symbol": "SYM"}]""";
         String exchangeResponse =
                 """
-                [{"exchange_id": 456, "exchange_code": "NYSE_VENUE", "exchange_name": "NYSE", "region": "us-east-1", "schema_type": "mbp-1"}]""";
+                [{"exchange_id": 456, "exchange_code": "NYSE_VENUE", "exchange_name": "NYSE", "region": "us-east-1"}]""";
         String securityResponse = """
                 [{"security_id": 123, "type": 0, "symbol": "BTC"}]""";
 

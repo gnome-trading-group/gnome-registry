@@ -25,8 +25,8 @@ describeDb('positions by event against Postgres', () => {
     await client.query(`TRUNCATE ledger.fill, ledger.position, ledger.order, ledger.mark, strategy.session_listing,
       risk.policy, risk.policy_history, strategy.session, strategy.strategy, sm.event_contract, sm.event, sm.listing_spec,
       sm.listing, sm.security, sm.exchange RESTART IDENTITY CASCADE`);
-    await client.query(`INSERT INTO sm.exchange (exchange_id, exchange_name, region, schema_type, exchange_code)
-      VALUES (1, 'K', 'us-east-1', 'mbp-10', 'KALSHI')`);
+    await client.query(`INSERT INTO sm.exchange (exchange_id, exchange_name, region, exchange_code)
+      VALUES (1, 'K', 'us-east-1', 'KALSHI')`);
     // A yes/no market, a three-way event, and a perp.
     await client.query(`INSERT INTO sm.security (security_id, symbol, type, contract_type) VALUES
       (1, 'T-YES', 0, 7), (2, 'T-NO', 0, 7), (3, 'M-A', 0, 8), (4, 'M-B', 0, 8), (5, 'M-C', 0, 8), (6, 'BTC-PERP', 0, 1)`);

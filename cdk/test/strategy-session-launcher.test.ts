@@ -89,13 +89,16 @@ function jsonResponse(body: unknown, status = 200) {
   return { ok: status >= 200 && status < 300, status, json: async () => body, text: async () => JSON.stringify(body) };
 }
 
+// What the API authorizer passes on: a person's email for a token caller, otherwise an API-key service.
 function apiEvent(resource: string, body: unknown, email?: string): APIGatewayProxyEvent {
   return {
     httpMethod: 'POST',
     resource,
     path: resource,
     body: JSON.stringify(body),
-    requestContext: email ? { authorizer: { claims: { email } } } : {},
+    requestContext: {
+      authorizer: email ? { kind: 'person', actor: email, email } : { kind: 'service', actor: 'service' },
+    },
   } as unknown as APIGatewayProxyEvent;
 }
 
@@ -396,13 +399,6 @@ describe('POST /strategy-sessions/stop', () => {
     expect(sleeps).toEqual([5000]);
   });
 
-  it('serves the /cognito-prefixed route that API Gateway actually exposes for stop', async () => {
-    const response = await launcher.handler(apiEvent('/cognito/strategy-sessions/stop', { sessionId: 's1' }, 'alice@example.com'));
-
-    expect(response.statusCode).toBe(200);
-    expect(haltBodies).toEqual([{ sessionId: 's1', reason: 'session stop', actor: 'alice@example.com' }]);
-  });
-
   it('attributes a service stop (API key, no token) to the actor it names', async () => {
     await launcher.handler(apiEvent('/strategy-sessions/stop', { sessionId: 's1', actor: 'launcher:cs2-prematch' }));
     expect(haltBodies[0].actor).toBe('launcher:cs2-prematch');
@@ -420,12 +416,12 @@ describe('POST /strategy-sessions/stop', () => {
     expect(haltBodies[0].reason).toBe('session stop');
   });
 
-  it('ignores a body actor when the caller has a Cognito identity', async () => {
-    await launcher.handler(apiEvent('/cognito/strategy-sessions/stop', { sessionId: 's1', actor: 'someone-else' }, 'alice@example.com'));
+  it('ignores a body actor when the caller has a token identity', async () => {
+    await launcher.handler(apiEvent('/strategy-sessions/stop', { sessionId: 's1', actor: 'someone-else' }, 'alice@example.com'));
     expect(haltBodies[0].actor).toBe('alice@example.com');
   });
 
-  it('attributes the kill to unknown without Cognito claims', async () => {
+  it('attributes a service stop that names nobody to unknown', async () => {
     await launcher.handler(apiEvent('/strategy-sessions/stop', { sessionId: 's1' }));
     expect(haltBodies[0].actor).toBe('unknown');
   });
@@ -600,7 +596,7 @@ describe('orchestrator overrides', () => {
     ssmParams['/gnome/orchestrator/properties/latest'] = props('1.12.2', ['journal.enabled', 'risk.stale.after.ms']);
     const get = async (version?: string) => {
       const event = {
-        ...apiEvent('/cognito/orchestrator/properties', {}),
+        ...apiEvent('/orchestrator/properties', {}),
         httpMethod: 'GET',
         queryStringParameters: version ? { version } : null,
       } as unknown as APIGatewayProxyEvent;

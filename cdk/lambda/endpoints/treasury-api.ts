@@ -1,6 +1,6 @@
 import { APIGatewayProxyEvent } from 'aws-lambda';
 import { PoolClient } from 'pg';
-import { getActor, withTransaction } from './base';
+import { getActor, isService, withTransaction } from './base';
 import { connectLedgerDatabase, createResponse, isPositiveInt } from './ledger-common';
 import { PollerMarksError, recordPollerMarks } from './ledger-poller-marks';
 import { accountTreasury, parseSnapshot, recordSnapshot, TreasuryError } from './treasury';
@@ -148,8 +148,7 @@ export async function transfers(client: PoolClient, accountId: number | null) {
 }
 
 export const handler = async (event: APIGatewayProxyEvent) => {
-  const cognito = (event.resource ?? '').startsWith('/cognito/');
-  const resource = (event.resource ?? '').replace(/^\/cognito\//, '/');
+  const resource = event.resource ?? '';
   const route = `${event.httpMethod} ${resource}`;
   const pool = await connectLedgerDatabase();
   const client = await pool.connect();
@@ -160,8 +159,8 @@ export const handler = async (event: APIGatewayProxyEvent) => {
     if (accountId !== null && !isPositiveInt(accountId)) return createResponse(400, { message: 'accountId must be a positive integer' });
     switch (route) {
       case 'POST /treasury/snapshots': {
-        const actor = cognito ? getActor(event) : null;
-        const snapshot = parseSnapshot(event.body ?? '', cognito ? 'MANUAL' : 'POLLER', actor);
+        const manual = !isService(event);
+        const snapshot = parseSnapshot(event.body ?? '', manual ? 'MANUAL' : 'POLLER', manual ? getActor(event) : null);
         return createResponse(200, await withTransaction(client, (c) => recordSnapshot(c, snapshot, now)));
       }
       case 'GET /treasury/poll-targets':

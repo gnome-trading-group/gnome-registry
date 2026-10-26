@@ -585,10 +585,11 @@ async function handleStop(event: APIGatewayProxyEvent) {
     reason?: unknown;
   };
   const reason = typeof requestedReason === 'string' && requestedReason.trim() ? requestedReason.trim() : undefined;
-  // A person's identity comes only from their Cognito token, never the body, so nobody can stop as someone else.
-  // Only API-key callers (services) have no token, and they say who they are in `actor`.
-  const claimsEmail: string | undefined = event.requestContext?.authorizer?.claims?.email;
-  const actor = claimsEmail
+  // A person's identity comes only from their token, never the body, so nobody can stop as someone else. Only
+  // API-key callers (services) have no token, and they say who they are in `actor`.
+  const authorizer = event.requestContext?.authorizer;
+  const tokenActor: string | undefined = authorizer?.kind === 'service' ? undefined : authorizer?.actor;
+  const actor = tokenActor
     ?? (typeof requestedActor === 'string' && requestedActor.trim() ? requestedActor.trim() : UNKNOWN_ACTOR);
 
   const sessions = await registryFetch('/strategy-sessions', 'GET', undefined, { sessionId });

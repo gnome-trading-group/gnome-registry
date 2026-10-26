@@ -36,8 +36,8 @@ describeDb('treasury, against Postgres', () => {
       risk.policy, risk.policy_history, strategy.session, strategy.strategy, sm.event_contract, sm.event, sm.listing,
       sm.security, sm.exchange, account_master.venue_account, account_master.venue_account_history, treasury.transfer,
       treasury.balance_snapshot, treasury.recon_run, treasury.position_check RESTART IDENTITY CASCADE`);
-    await client.query(`INSERT INTO sm.exchange (exchange_id, exchange_name, region, schema_type, exchange_code)
-      VALUES (1, 'Kalshi', 'us-east-1', 'mbp-10', 'KALSHI'), (2, 'Polymarket', 'eu-west-1', 'mbp-10', 'POLYMARKET_INTL')`);
+    await client.query(`INSERT INTO sm.exchange (exchange_id, exchange_name, region, exchange_code)
+      VALUES (1, 'Kalshi', 'us-east-1', 'KALSHI'), (2, 'Polymarket', 'eu-west-1', 'POLYMARKET_INTL')`);
     await client.query(`INSERT INTO sm.security (security_id, symbol, type, contract_type)
       VALUES (1, 'T-YES', 4, 7), (2, 'T-NO', 4, 7), (3, 'A', 4, 8), (4, 'B', 4, 8)`);
     await client.query(`INSERT INTO sm.listing (listing_id, exchange_id, security_id, exchange_security_id)
@@ -151,8 +151,8 @@ describeDb('treasury, against Postgres', () => {
   });
 
   it('a Polymarket US short reconciles once its held-back dollar counts as spent (Phase 0 numbers)', async () => {
-    await client.query(`INSERT INTO sm.exchange (exchange_id, exchange_name, region, schema_type, exchange_code)
-      VALUES (3, 'Polymarket US', 'us-east-1', 'mbp-10', 'POLYMARKET_US')`);
+    await client.query(`INSERT INTO sm.exchange (exchange_id, exchange_name, region, exchange_code)
+      VALUES (3, 'Polymarket US', 'us-east-1', 'POLYMARKET_US')`);
     await client.query(`INSERT INTO sm.security (security_id, symbol, type, contract_type) VALUES (5, 'LAD', 4, 7)`);
     await client.query(`INSERT INTO sm.listing (listing_id, exchange_id, security_id, exchange_security_id)
       VALUES (700, 3, 5, 'tec-mlb-nlchamp-2026-09-27-lad:long')`);
@@ -171,8 +171,8 @@ describeDb('treasury, against Postgres', () => {
   });
 
   it('Polymarket US long and short listings net into one venue position, step by step (Phase 0 numbers)', async () => {
-    await client.query(`INSERT INTO sm.exchange (exchange_id, exchange_name, region, schema_type, exchange_code)
-      VALUES (3, 'Polymarket US', 'us-east-1', 'mbp-10', 'POLYMARKET_US')`);
+    await client.query(`INSERT INTO sm.exchange (exchange_id, exchange_name, region, exchange_code)
+      VALUES (3, 'Polymarket US', 'us-east-1', 'POLYMARKET_US')`);
     await client.query(`INSERT INTO sm.security (security_id, symbol, type, contract_type) VALUES (5, 'LAD', 4, 7), (6, 'LAD-NO', 4, 7)`);
     await client.query(`INSERT INTO sm.listing (listing_id, exchange_id, security_id, exchange_security_id)
       VALUES (700, 3, 5, 'tec-mlb-nlchamp-2026-09-27-lad:long'), (701, 3, 6, 'tec-mlb-nlchamp-2026-09-27-lad:short')`);

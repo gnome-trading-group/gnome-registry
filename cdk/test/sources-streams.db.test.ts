@@ -23,8 +23,8 @@ describeDb('market-data sources and streams, against Postgres', () => {
 
   beforeEach(async () => {
     await client.query('TRUNCATE sm.listing, sm.security, sm.exchange, md.source, md.stream RESTART IDENTITY CASCADE');
-    await client.query(`INSERT INTO sm.exchange (exchange_id, exchange_name, region, schema_type, exchange_code)
-      VALUES (1, 'Kalshi', 'us-east-1', 'mbp-10', 'KALSHI'), (3, 'Hyperliquid', 'ap-northeast-1', 'mbp-10', 'HYPERLIQUID')`);
+    await client.query(`INSERT INTO sm.exchange (exchange_id, exchange_name, region, exchange_code)
+      VALUES (1, 'Kalshi', 'us-east-1', 'KALSHI'), (3, 'Hyperliquid', 'ap-northeast-1', 'HYPERLIQUID')`);
     await client.query(`INSERT INTO sm.security (security_id, symbol, type) VALUES (1, 'X', 4), (2, 'Y', 4)`);
     await client.query(`INSERT INTO sm.listing (listing_id, exchange_id, security_id, exchange_security_id, active)
       VALUES (500, 1, 1, 'MKT:yes', true), (501, 1, 1, 'MKT:no', false)`);

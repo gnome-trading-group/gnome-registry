@@ -45,9 +45,9 @@ describeDb('Fee schedules and point-in-time listing specs, against Postgres', ()
   beforeEach(async () => {
     await client.query(`TRUNCATE sm.fee_schedule, sm.listing_spec, sm.listing, sm.security, sm.exchange
       RESTART IDENTITY CASCADE`);
-    await client.query(`INSERT INTO sm.exchange (exchange_id, exchange_name, region, schema_type, exchange_code) VALUES
-      (1, 'K', 'us-east-1', 'mbp-10', 'KALSHI'), (2, 'P', 'us-east-1', 'mbp-10', 'POLYMARKET_US'),
-      (3, 'H', 'ap-northeast-1', 'mbp-10', 'HYPERLIQUID'), (4, 'L', 'ap-northeast-1', 'mbp-10', 'LIGHTER')`);
+    await client.query(`INSERT INTO sm.exchange (exchange_id, exchange_name, region, exchange_code) VALUES
+      (1, 'K', 'us-east-1', 'KALSHI'), (2, 'P', 'us-east-1', 'POLYMARKET_US'),
+      (3, 'H', 'ap-northeast-1', 'HYPERLIQUID'), (4, 'L', 'ap-northeast-1', 'LIGHTER')`);
     await client.query(`INSERT INTO sm.security (security_id, symbol, type) VALUES (1, 'KX-YES', 4), (2, 'KX-NO', 4),
       (7, 'KX2-YES', 4), (3, 'PM-LONG', 4), (4, 'TT-LONG', 4), (5, 'BTC', 1), (6, 'HYPE/USDC', 0)`);
     await client.query(`INSERT INTO sm.listing (listing_id, exchange_id, security_id, exchange_security_id,

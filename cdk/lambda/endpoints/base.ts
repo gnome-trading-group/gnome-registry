@@ -21,8 +21,14 @@ export function parseIdList(value: string | undefined): number[] {
   return (value ?? '').split(',').map(Number).filter((n) => Number.isInteger(n) && n > 0);
 }
 
+/** Who made the request, as the API authorizer resolved it: a person's email, `bot:<clientId>`, or `service`. */
 export function getActor(event: APIGatewayProxyEvent): string {
-  return event.requestContext?.authorizer?.claims?.email ?? UNKNOWN_ACTOR;
+  return event.requestContext?.authorizer?.actor ?? UNKNOWN_ACTOR;
+}
+
+/** True for an API-key caller, which has no identity of its own beyond being a service. */
+export function isService(event: APIGatewayProxyEvent): boolean {
+  return event.requestContext?.authorizer?.kind === 'service';
 }
 
 export interface IAudit {

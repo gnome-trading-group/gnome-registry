@@ -15,7 +15,7 @@ function event(httpMethod: string, body: unknown, email?: string, query?: Record
     httpMethod,
     body: JSON.stringify(body),
     queryStringParameters: query ?? null,
-    requestContext: email ? { authorizer: { claims: { email } } } : {},
+    requestContext: email ? { authorizer: { kind: 'person', actor: email, email } } : {},
   } as unknown as APIGatewayProxyEvent;
 }
 
@@ -29,14 +29,14 @@ function statements(): string[] {
 }
 
 describe('risk policy writes are audited', () => {
-  it('PATCH sets the Cognito actor and reason inside the transaction before updating', async () => {
+  it('PATCH sets the person actor and reason inside the transaction before updating', async () => {
     const response = await handler(event('PATCH', { enabled: true, reason: 'manual kill' }, 'alice@example.com', { policyId: '3' }));
     expect(response.statusCode).toBe(200);
     expect(statements()).toEqual(['BEGIN', 'SELECT', 'SELECT', 'UPDATE', 'COMMIT']);
     expect(mockQuery.mock.calls[1][1]).toEqual(['alice@example.com', 'manual kill']);
   });
 
-  it('POST without a reason or Cognito claims records unknown with an empty reason', async () => {
+  it('POST without a reason or an authorized caller records unknown with an empty reason', async () => {
     await handler(event('POST', { policyType: 'KILL_SWITCH', strategyId: 7, parameters: {} }));
     expect(statements()).toEqual(['BEGIN', 'SELECT', 'INSERT', 'COMMIT']);
     expect(mockQuery.mock.calls[1][1]).toEqual(['unknown', '']);

@@ -38,9 +38,9 @@ describeDb('fee mismatch rule, against Postgres', () => {
     cum = 0n;
     await client.query(`TRUNCATE ledger.fill, strategy.session, strategy.strategy, sm.fee_schedule, sm.listing,
       sm.security, sm.exchange RESTART IDENTITY CASCADE`);
-    await client.query(`INSERT INTO sm.exchange (exchange_id, exchange_name, region, schema_type, exchange_code) VALUES
-      (1, 'K', 'us-east-1', 'mbp-10', 'KALSHI'), (2, 'P', 'us-east-1', 'mbp-10', 'POLYMARKET_US'),
-      (3, 'I', 'us-east-1', 'mbp-10', 'POLYMARKET_INTL')`);
+    await client.query(`INSERT INTO sm.exchange (exchange_id, exchange_name, region, exchange_code) VALUES
+      (1, 'K', 'us-east-1', 'KALSHI'), (2, 'P', 'us-east-1', 'POLYMARKET_US'),
+      (3, 'I', 'us-east-1', 'POLYMARKET_INTL')`);
     await client.query(`INSERT INTO sm.security (security_id, symbol, type) VALUES (1, 'K', 4), (2, 'P', 4), (3, 'I', 4)`);
     await client.query(`INSERT INTO sm.listing (listing_id, exchange_id, security_id, exchange_security_id,
       exchange_security_symbol) VALUES (500, 1, 1, 'T:yes', 'T-YES'), (600, 2, 2, 's:long', 'S-LONG'),
@@ -129,8 +129,8 @@ describeDb('fee schedule change rule, against Postgres', () => {
 
   beforeEach(async () => {
     await client.query(`TRUNCATE sm.fee_schedule, sm.exchange RESTART IDENTITY CASCADE`);
-    await client.query(`INSERT INTO sm.exchange (exchange_id, exchange_name, region, schema_type, exchange_code) VALUES
-      (1, 'K', 'us-east-1', 'mbp-10', 'KALSHI'), (3, 'I', 'us-east-1', 'mbp-10', 'POLYMARKET_INTL')`);
+    await client.query(`INSERT INTO sm.exchange (exchange_id, exchange_name, region, exchange_code) VALUES
+      (1, 'K', 'us-east-1', 'KALSHI'), (3, 'I', 'us-east-1', 'POLYMARKET_INTL')`);
   });
 
   async function schedule(exchangeId: number, scope: { group?: string; event?: string }, effectiveFrom: string,

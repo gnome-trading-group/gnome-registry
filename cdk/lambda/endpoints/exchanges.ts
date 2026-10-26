@@ -14,8 +14,8 @@ class ExchangeHandler extends ResourceHandler {
   generateInsertQuery(body: string): string {
     const exchange = JSON.parse(body) as ICreateExchange;
     return (`
-      INSERT INTO sm.exchange (exchange_code, exchange_name, region, schema_type)
-      VALUES ('${exchange.exchangeCode}', '${exchange.exchangeName}', '${exchange.region}', '${exchange.schemaType}')
+      INSERT INTO sm.exchange (exchange_code, exchange_name, region)
+      VALUES ('${exchange.exchangeCode}', '${exchange.exchangeName}', '${exchange.region}')
       RETURNING *;
     `);
   }
@@ -34,9 +34,6 @@ class ExchangeHandler extends ResourceHandler {
     if (params?.region) {
       query += ` AND region='${params.region}'`;
     }
-    if (params?.schemaType) {
-      query += ` AND schema_type='${params.schemaType}'`;
-    }
     return query;
   }
 
@@ -52,9 +49,6 @@ class ExchangeHandler extends ResourceHandler {
     }
     if (exchange.region) {
       updates.push(`region='${exchange.region}'`);
-    }
-    if (exchange.schemaType) {
-      updates.push(`schema_type='${exchange.schemaType}'`);
     }
     updates.push(`date_modified=NOW()`);
     const updateString = updates.join(", ");

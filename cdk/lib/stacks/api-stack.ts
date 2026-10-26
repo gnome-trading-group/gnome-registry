@@ -10,9 +10,13 @@ import * as cognito from 'aws-cdk-lib/aws-cognito';
 import * as ssm from 'aws-cdk-lib/aws-ssm';
 import { join } from 'path';
 import { Runtime } from 'aws-cdk-lib/aws-lambda';
-import { Stage } from '@gnome-trading-group/gnome-shared-cdk';
+import { CallerKind, GnomeApiAuthorizer, RouteMethods, Stage } from '@gnome-trading-group/gnome-shared-cdk';
 import { CONTROLLER_READ_PATHS } from '../../lambda/endpoints/controller-read-paths';
 import { ALERT_BUS_NAME } from '../../lambda/alerts/model';
+
+const SERVICE = CallerKind.SERVICE;
+const PERSON = CallerKind.PERSON;
+const BOT = CallerKind.BOT;
 
 interface Props extends cdk.StackProps {
   database: rds.DatabaseInstance;
@@ -26,13 +30,9 @@ export class ApiStack extends cdk.Stack {
   public readonly api: apigw.RestApi;
   public readonly apiKey: apigw.ApiKey;
   public static readonly USER_POOL_ARN_PARAMETER = '/gnome/cognito/user-pool-arn';
-  // People (controller UI, gnomepy CLI login) call routes under this prefix with a Cognito ID token; services call
-  // the same handlers at the root with the API key. A method takes one authorizer, so the two can't share a route,
-  // and keeping the key out of the browser bundle is the point.
-  public static readonly COGNITO_PREFIX = 'cognito';
   private nodeJsProps: lambda.NodejsFunctionProps;
   private props: Props;
-  private cognitoAuthorizer: apigw.CognitoUserPoolsAuthorizer;
+  private auth: GnomeApiAuthorizer;
 
   constructor(scope: Construct, id: string, props: Props) {
     super(scope, id, props);
@@ -44,13 +44,8 @@ export class ApiStack extends cdk.Stack {
       deployOptions: {
         stageName: ApiStack.STAGE_NAME,
       },
-      apiKeySourceType: apigw.ApiKeySourceType.HEADER,
-    });
-
-    // Only browsers send CORS preflights, and the browser only calls /cognito routes; the API-key routes serve
-    // services. Preflights there would cost an OPTIONS method per route in a stack near CloudFormation's resource cap.
-    // Every /cognito route is created under this resource and inherits its preflight.
-    this.api.root.addResource(ApiStack.COGNITO_PREFIX, {
+      // People (the controller UI) and services call the same routes, so every route takes a browser's preflight.
+      // Preflights are mock methods with no authorizer: the authorizer is set per method, never as a default.
       defaultCorsPreflightOptions: {
         allowOrigins: apigw.Cors.ALL_ORIGINS,
         allowMethods: apigw.Cors.ALL_METHODS,
@@ -64,7 +59,7 @@ export class ApiStack extends cdk.Stack {
       },
     });
 
-    // Without these, a request the Cognito authorizer rejects (401/403) comes back with no CORS headers and the
+    // Without these, a request the authorizer rejects (401/403) comes back with no CORS headers and the
     // browser reports an opaque CORS failure instead of the auth error.
     this.api.addGatewayResponse('Default4xxCors', {
       type: apigw.ResponseType.DEFAULT_4XX,
@@ -75,12 +70,15 @@ export class ApiStack extends cdk.Stack {
       responseHeaders: { 'Access-Control-Allow-Origin': "'*'" },
     });
 
-    // The pool is owned by another stack and published through SSM.
+    // Created before the routes so the authorizer can check it and its keyId can reach the launcher Lambda's env var
+    // and IAM policy.
+    this.apiKey = new apigw.ApiKey(this, 'ApiKey');
+
+    // The pool is owned by another stack and published through SSM. Services call with the API key, people with a
+    // Cognito ID token and bots with a gnome-api-scoped access token; each route below names which of them it serves.
     const userPool = cognito.UserPool.fromUserPoolArn(this, 'OperatorUserPool',
       ssm.StringParameter.valueForStringParameter(this, ApiStack.USER_POOL_ARN_PARAMETER));
-    this.cognitoAuthorizer = new apigw.CognitoUserPoolsAuthorizer(this, 'OperatorAuthorizer', {
-      cognitoUserPools: [userPool],
-    });
+    this.auth = new GnomeApiAuthorizer(this, 'Authorizer', { userPool, apiKeys: [this.apiKey] });
 
     this.nodeJsProps = {
       bundling: {
@@ -98,10 +96,7 @@ export class ApiStack extends cdk.Stack {
       },
     };
 
-    // Create API key early so its keyId can be referenced by the launcher Lambda's env var and IAM policy.
-    // UsagePlan.addApiStage must remain at the end (after all methods are registered) to avoid circular deps.
-    this.apiKey = new apigw.ApiKey(this, 'ApiKey');
-
+    // Services may do anything to the security master; people get the listed methods and bots read.
     const ALL = ['GET', 'POST', 'DELETE', 'PATCH'];
     const crudResources: [string, string[]][] = [
       ['securities', ALL],
@@ -115,54 +110,59 @@ export class ApiStack extends cdk.Stack {
       ['contract-relationships', ['GET', 'POST', 'DELETE']],
       ['hedge-keywords', ['GET', 'POST', 'DELETE']],
     ];
-    for (const [resourceName, cognitoMethods] of crudResources) {
-      this.attachMethods(resourceName, `${resourceName}.ts`, ALL, cognitoMethods);
+    for (const [resourceName, personMethods] of crudResources) {
+      const methods: RouteMethods = {};
+      for (const method of ALL) {
+        methods[method] = [SERVICE, ...(personMethods.includes(method) ? [PERSON] : []), ...(method === 'GET' ? [BOT] : [])];
+      }
+      this.routeFile(resourceName, `${resourceName}.ts`, methods);
     }
 
-    // Market-data sources and streams. Services read them with the API key; vendor sources are added and edited by a
-    // person (venue sources and listing streams are created by the database with their exchange and listing).
-    this.attachMethods('sources', 'sources.ts', ['GET'], ['GET', 'POST', 'PATCH']);
-    this.attachMethods('streams', 'streams.ts', ['GET'], ['GET']);
+    // Market-data sources and streams. Services read them; vendor sources are added and edited by a person (venue
+    // sources and listing streams are created by the database with their exchange and listing).
+    this.routeFile('sources', 'sources.ts', { GET: [SERVICE, PERSON, BOT], POST: [PERSON], PATCH: [PERSON] });
+    this.routeFile('streams', 'streams.ts', { GET: [SERVICE, PERSON, BOT] });
 
     // Fee schedules are append-only, so there is no DELETE or PATCH: a fix is a new row.
-    this.attachMethods('fees', 'fees.ts', ['GET', 'POST'], ['GET', 'POST']);
-    this.attachMethods('simulation-parameters', 'simulation-parameters.ts', ['GET', 'POST'], ['GET', 'POST']);
+    this.routeFile('fees', 'fees.ts', { GET: [SERVICE, PERSON, BOT], POST: [SERVICE, PERSON] });
+    this.routeFile('simulation-parameters', 'simulation-parameters.ts', { GET: [SERVICE, PERSON, BOT], POST: [SERVICE, PERSON] });
 
     // The controller's PnL, ledger and monitoring reads (PnL is derived from the ledger's fills and marks; nothing
-    // about it is stored). One Lambda serves them all, for people only.
+    // about it is stored). One Lambda serves them all, for people and bots.
     const controllerReads = this.createIntegration('controller-reads.ts');
     for (const path of CONTROLLER_READ_PATHS) {
-      this.attachIntegration(path, controllerReads, [], ['GET']);
+      this.route(path, controllerReads, { GET: [PERSON, BOT] });
     }
 
     // Alerts for the controller: what's open and what fired before, and closing one (people only). Alerts arrive
     // through the alerting stack's own ingest API.
-    this.attachMethods('alerts', 'alerts.ts', [], ['GET', 'PATCH']);
+    this.routeFile('alerts', 'alerts.ts', { GET: [PERSON, BOT], PATCH: [PERSON] });
 
-    // The trading ledger. Running sessions write with the API key; an operator's position adjustments are Cognito
-    // only, so each one is attributed to a person.
-    this.attachMethods('ledger/batch', 'ledger-batch.ts', ['POST']);
-    this.attachMethods('ledger/positions', 'ledger-positions.ts', ['GET'], ['GET']);
-    this.attachMethods('ledger/orders', 'ledger-orders.ts', ['GET'], ['GET']);
-    this.attachMethods('ledger/adjustments', 'ledger-adjustments.ts', [], ['POST']);
+    // The trading ledger. Running sessions write it; an operator's position adjustments are people only, so each one is
+    // attributed to a person.
+    this.routeFile('ledger/batch', 'ledger-batch.ts', { POST: [SERVICE] });
+    this.routeFile('ledger/positions', 'ledger-positions.ts', { GET: [SERVICE, PERSON, BOT] });
+    this.routeFile('ledger/orders', 'ledger-orders.ts', { GET: [SERVICE, PERSON, BOT] });
+    this.routeFile('ledger/adjustments', 'ledger-adjustments.ts', { POST: [PERSON] });
 
-    // Policy writes are Cognito-only so the audit log attributes every change to a person.
-    this.attachMethods('risk/policies', 'risk-policies.ts', ['GET'], ['GET', 'POST', 'DELETE', 'PATCH']);
-    this.attachMethods('risk/policies/history', 'risk-policy-history.ts', ['GET'], ['GET']);
-    // API key only: the OMS halts its own strategy automatically, and the handler can only ever enable a kill.
-    this.attachMethods('risk/halts', 'risk-halts.ts', ['POST']);
+    // Policy writes are people only so the audit log attributes every change to a person.
+    this.routeFile('risk/policies', 'risk-policies.ts',
+      { GET: [SERVICE, PERSON, BOT], POST: [PERSON], DELETE: [PERSON], PATCH: [PERSON] });
+    this.routeFile('risk/policies/history', 'risk-policy-history.ts', { GET: [SERVICE, PERSON, BOT] });
+    // Services only: the OMS halts its own strategy automatically, and the handler can only ever enable a kill.
+    this.routeFile('risk/halts', 'risk-halts.ts', { POST: [SERVICE] });
 
-    // Venue accounts: the account-creation Lambda registers one (API key; the credentials go to Secrets Manager, not here),
-    // a starting orchestrator reads the accounts its session was bound to (API key), and listing accounts or moving
-    // one through its lifecycle is a person's (Cognito).
+    // Venue accounts: the account-creation Lambda registers one (the credentials go to Secrets Manager, not here), a
+    // starting orchestrator reads the accounts its session was bound to, and moving an account through its lifecycle
+    // is a person's. Secret names are for the account-creation Lambda alone.
     const venueAccounts = this.createIntegration('venue-accounts.ts');
-    this.attachIntegration('venue-accounts', venueAccounts, ['POST'], ['GET']);
-    this.attachIntegration('venue-accounts/status', venueAccounts, [], ['PATCH']);
-    this.attachIntegration('strategy-sessions/accounts', venueAccounts, ['GET'], ['GET']);
-    this.attachIntegration('venue-accounts/secrets', venueAccounts, ['GET', 'PUT'], []);
+    this.route('venue-accounts', venueAccounts, { POST: [SERVICE], GET: [PERSON, BOT] });
+    this.route('venue-accounts/status', venueAccounts, { PATCH: [PERSON] });
+    this.route('strategy-sessions/accounts', venueAccounts, { GET: [SERVICE, PERSON, BOT] });
+    this.route('venue-accounts/secrets', venueAccounts, { GET: [SERVICE], PUT: [SERVICE] });
 
     // Creating an account from the controller puts its credentials in Secrets Manager, which the registry's isolated
-    // subnets can't reach, so this one runs outside the VPC and registers the account through the API. Cognito only,
+    // subnets can't reach, so this one runs outside the VPC and registers the account through the API. People only,
     // so each account is attributed to the person who created it. It also sets the per-exchange market-data keys, and
     // may only touch gnome/accounts/* and gnome/market-data/* secrets.
     const accountCreator = new lambda.NodejsFunction(this, 'venue-account-create-lambda', {
@@ -195,22 +195,23 @@ export class ApiStack extends cdk.Stack {
       resources: [`arn:aws:apigateway:${this.region}::/apikeys/${this.apiKey.keyId}`],
     }));
     const accountCreation = new apigw.LambdaIntegration(accountCreator, { scopePermissionToMethod: false });
-    this.attachIntegration('venue-accounts/create', accountCreation, [], ['POST']);
-    this.attachIntegration('venue-accounts/credentials', accountCreation, [], ['POST']);
-    this.attachIntegration('venue-accounts/delete-secrets', accountCreation, [], ['POST']);
-    this.attachIntegration('market-data-keys', accountCreation, [], ['GET', 'POST']);
+    this.route('venue-accounts/create', accountCreation, { POST: [PERSON] });
+    this.route('venue-accounts/credentials', accountCreation, { POST: [PERSON] });
+    this.route('venue-accounts/delete-secrets', accountCreation, { POST: [PERSON] });
+    // Not even bots read which market-data keys are set.
+    this.route('market-data-keys', accountCreation, { GET: [PERSON], POST: [PERSON] });
 
-    // The treasury: the venue poller posts what each account holds and reads which accounts to poll (API key); an
-    // operator reads where the money stands and records transfers, settings and manual readings (Cognito). The mark
+    // The treasury: the venue poller posts what each account holds and reads which accounts to poll (services); an
+    // operator reads where the money stands and records transfers, settings and manual readings (people). The mark
     // poller's one route shares its Lambda, rather than adding one to a stack at its resource cap.
     const treasury = this.createIntegration('treasury-api.ts');
-    this.attachIntegration('ledger/poller-marks', treasury, ['POST'], []);
-    this.attachIntegration('treasury/snapshots', treasury, ['POST'], ['POST']);
-    this.attachIntegration('treasury/poll-targets', treasury, ['GET'], []);
-    this.attachIntegration('treasury/summary', treasury, [], ['GET']);
-    this.attachIntegration('treasury/transfers', treasury, [], ['GET', 'POST']);
-    this.attachIntegration('treasury/account-config', treasury, [], ['PUT']);
-    this.attachIntegration('treasury/recon', treasury, [], ['GET']);
+    this.route('ledger/poller-marks', treasury, { POST: [SERVICE] });
+    this.route('treasury/snapshots', treasury, { POST: [SERVICE, PERSON] });
+    this.route('treasury/poll-targets', treasury, { GET: [SERVICE] });
+    this.route('treasury/summary', treasury, { GET: [PERSON, BOT] });
+    this.route('treasury/transfers', treasury, { GET: [PERSON, BOT], POST: [PERSON] });
+    this.route('treasury/account-config', treasury, { PUT: [PERSON] });
+    this.route('treasury/recon', treasury, { GET: [PERSON, BOT] });
 
     // /strategy-sessions — split into two Lambdas:
     // - In-VPC Lambda: GET/PATCH/POST (DB-only operations)
@@ -282,24 +283,16 @@ export class ApiStack extends cdk.Stack {
     const sessionsLauncherIntegration = new apigw.LambdaIntegration(
       strategySessionsLauncherLambda, { scopePermissionToMethod: false });
 
-    this.attachIntegration('strategy-sessions', sessionsDbIntegration, ['GET', 'PATCH', 'POST'], ['GET']);
-    this.attachIntegration('strategy-sessions/launch', sessionsLauncherIntegration, ['POST'], ['POST']);
-    // People stop under /cognito, attributed from their token; services (the launcher's automated shutdowns) stop
-    // with the API key and name themselves in the body, so the kill-switch audit entry still says who stopped it.
-    this.attachIntegration('strategy-sessions/stop', sessionsLauncherIntegration, ['POST'], ['POST']);
-    this.attachIntegration('strategy-sessions/logs', sessionsLauncherIntegration, ['GET'], ['GET']);
-    // A running session's liveness and health, every few seconds; API key only, from the session itself.
-    this.attachMethods('strategy-sessions/heartbeat', 'strategy-session-heartbeat.ts', ['POST']);
+    this.route('strategy-sessions', sessionsDbIntegration, { GET: [SERVICE, PERSON, BOT], PATCH: [SERVICE], POST: [SERVICE] });
+    this.route('strategy-sessions/launch', sessionsLauncherIntegration, { POST: [SERVICE, PERSON] });
+    // People stop attributed from their token; services (the launcher's automated shutdowns) name themselves in the
+    // body, so the kill-switch audit entry still says who stopped it.
+    this.route('strategy-sessions/stop', sessionsLauncherIntegration, { POST: [SERVICE, PERSON] });
+    this.route('strategy-sessions/logs', sessionsLauncherIntegration, { GET: [SERVICE, PERSON, BOT] });
+    // A running session's liveness and health, every few seconds, from the session itself.
+    this.routeFile('strategy-sessions/heartbeat', 'strategy-session-heartbeat.ts', { POST: [SERVICE] });
     // For the controller's override picker; the launcher Lambda already reads the orchestrator's SSM parameters.
-    this.attachIntegration('orchestrator/properties', sessionsLauncherIntegration, [], ['GET']);
-
-    const usagePlan = new apigw.UsagePlan(this, 'UsagePlan', {
-      name: 'Global Usage Plan',
-    });
-    usagePlan.addApiKey(this.apiKey);
-    usagePlan.addApiStage({
-      stage: this.api.deploymentStage
-    });
+    this.route('orchestrator/properties', sessionsLauncherIntegration, { GET: [PERSON, BOT] });
 
     new cdk.CfnOutput(this, 'API URL', {
       value: this.api.url,
@@ -315,25 +308,12 @@ export class ApiStack extends cdk.Stack {
     });
   }
 
-  private attachMethods(path: string, fileName: string, apiKeyMethods: string[], cognitoMethods: string[] = []) {
-    this.attachIntegration(path, this.createIntegration(fileName), apiKeyMethods, cognitoMethods);
+  private routeFile(path: string, fileName: string, methods: RouteMethods) {
+    this.route(path, this.createIntegration(fileName), methods);
   }
 
-  private attachIntegration(path: string, integration: apigw.Integration, apiKeyMethods: string[], cognitoMethods: string[]) {
-    for (const method of apiKeyMethods) {
-      this.api.root.resourceForPath(path).addMethod(method, integration, { apiKeyRequired: true });
-    }
-    for (const method of cognitoMethods) {
-      this.api.root.resourceForPath(`${ApiStack.COGNITO_PREFIX}/${path}`).addMethod(method, integration, this.cognitoMethodOptions());
-    }
-  }
-
-  private cognitoMethodOptions(): apigw.MethodOptions {
-    return {
-      apiKeyRequired: false,
-      authorizer: this.cognitoAuthorizer,
-      authorizationType: apigw.AuthorizationType.COGNITO,
-    };
+  private route(path: string, integration: apigw.Integration, methods: RouteMethods) {
+    this.auth.addRoute(this.api.root, path, integration, methods);
   }
 
   private createIntegration(fileName: string) {

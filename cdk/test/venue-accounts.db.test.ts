@@ -40,8 +40,8 @@ describeDb('venue accounts, against Postgres', () => {
     await client.query(`TRUNCATE ledger.fill, ledger.position, ledger.order, ledger.mark, strategy.session_listing,
       risk.policy, risk.policy_history, strategy.session, strategy.strategy, sm.listing, sm.security, sm.exchange,
       account_master.venue_account, account_master.venue_account_history RESTART IDENTITY CASCADE`);
-    await client.query(`INSERT INTO sm.exchange (exchange_id, exchange_name, region, schema_type, exchange_code)
-      VALUES (1, 'Kalshi', 'us-east-1', 'mbp-10', 'KALSHI'), (2, 'Polymarket', 'eu-west-1', 'mbp-10', 'POLYMARKET_INTL')`);
+    await client.query(`INSERT INTO sm.exchange (exchange_id, exchange_name, region, exchange_code)
+      VALUES (1, 'Kalshi', 'us-east-1', 'KALSHI'), (2, 'Polymarket', 'eu-west-1', 'POLYMARKET_INTL')`);
     await client.query(`INSERT INTO sm.security (security_id, symbol, type) VALUES (1, 'X', 4), (2, 'Y', 4)`);
     await client.query(`INSERT INTO sm.listing (listing_id, exchange_id, security_id) VALUES (500, 1, 1), (600, 2, 2)`);
     await client.query(`INSERT INTO strategy.strategy (name) VALUES ('arb'), ('mm')`);

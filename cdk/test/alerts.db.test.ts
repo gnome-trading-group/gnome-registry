@@ -34,8 +34,8 @@ describeDb('alerts against Postgres', () => {
     await client.query(`TRUNCATE alert.alert, ledger.fill, ledger.position, ledger.order, ledger.mark,
       strategy.session_listing, risk.policy, risk.policy_history, strategy.session, strategy.strategy,
       sm.listing_spec, sm.listing, sm.security, sm.exchange RESTART IDENTITY CASCADE`);
-    await client.query(`INSERT INTO sm.exchange (exchange_id, exchange_name, region, schema_type, exchange_code)
-      VALUES (1, 'K', 'us-east-1', 'mbp-10', 'KALSHI')`);
+    await client.query(`INSERT INTO sm.exchange (exchange_id, exchange_name, region, exchange_code)
+      VALUES (1, 'K', 'us-east-1', 'KALSHI')`);
     await client.query(`INSERT INTO sm.security (security_id, symbol, type) VALUES (1, 'X', 0)`);
     await client.query(`INSERT INTO sm.listing (listing_id, exchange_id, security_id, exchange_security_symbol)
       VALUES (500, 1, 1, 'KX-A')`);

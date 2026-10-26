@@ -29,7 +29,7 @@ const ROUTES: Record<ControllerReadPath, (event: APIGatewayProxyEvent) => Promis
 };
 
 export const handler = async (event: APIGatewayProxyEvent) => {
-  const route = ROUTES[event.resource.replace(/^\/(cognito\/)?/, '') as ControllerReadPath];
+  const route = ROUTES[event.resource.replace(/^\//, '') as ControllerReadPath];
   if (!route) return createResponse(404, { message: `No read at ${event.resource}` });
   const response = await route(event) as { statusCode?: number };
   if (response.statusCode === 413) {

@@ -49,115 +49,110 @@ function method(template: Template, resource: string, httpMethod: string) {
   return values[0].Properties;
 }
 
+// The caller kinds a method's authorizer admits, read from the ALLOWED_KINDS of the function behind it.
+function kindsOf(template: Template, path: string, httpMethod: string): string[] {
+  const props = method(template, resourceId(template, path), httpMethod);
+  const authorizer = template.findResources('AWS::ApiGateway::Authorizer')[props.AuthorizerId.Ref];
+  const fnId = JSON.stringify(authorizer.Properties.AuthorizerUri).match(/"Fn::GetAtt":\["([^"]+)","Arn"\]/)![1];
+  const fn = template.findResources('AWS::Lambda::Function')[fnId];
+  return fn.Properties.Environment.Variables.ALLOWED_KINDS.split(',');
+}
+
 describe('ApiStack auth', () => {
   const template = synthApi();
 
-  it('creates a Cognito authorizer from the SSM user pool ARN', () => {
-    template.hasResourceProperties('AWS::ApiGateway::Authorizer', {
-      Type: 'COGNITO_USER_POOLS',
-      ProviderARNs: [{ Ref: Match.stringLikeRegexp('SsmParameterValue.*gnome.*cognito.*user.*pool.*arn') }],
-    });
+  it('checks people against the Cognito pool published in SSM', () => {
+    const authorizerFns = Object.values(template.findResources('AWS::Lambda::Function'))
+      .filter((f: any) => f.Properties.Environment?.Variables?.ALLOWED_KINDS);
+    expect(authorizerFns.length).toBeGreaterThan(0);
+    for (const fn of authorizerFns as any[]) {
+      expect(JSON.stringify(fn.Properties.Environment.Variables.USER_POOL_ID)).toMatch(/SsmParameterValue.*gnome.*cognito.*user.*pool.*arn/);
+    }
   });
 
-  it('never mixes the API key and Cognito: root methods take the key, /cognito methods take a token', () => {
-    const resources = template.findResources('AWS::ApiGateway::Resource');
-    const cognitoRoot = resourceId(template, 'cognito');
-    const underCognito = (id: string): boolean => {
-      if (id === cognitoRoot) return true;
-      const parent = resources[id]?.Properties.ParentId.Ref;
-      return parent !== undefined && resources[parent] !== undefined && underCognito(parent);
-    };
-    const methods = Object.values(template.findResources('AWS::ApiGateway::Method'))
-      .map(m => m.Properties)
-      .filter(p => p.HttpMethod !== 'OPTIONS' && p.ResourceId.Ref);
-    expect(methods.length).toBeGreaterThan(0);
+  it('puts every method but the preflights behind the shared authorizer, with no API key requirement', () => {
+    const methods = Object.values(template.findResources('AWS::ApiGateway::Method')).map(m => m.Properties);
+    const routed = methods.filter(p => p.HttpMethod !== 'OPTIONS');
+    expect(routed.length).toBeGreaterThan(0);
+    for (const props of routed) {
+      expect(props.AuthorizationType).toBe('CUSTOM');
+      expect(props.AuthorizerId).toBeDefined();
+      expect(props.ApiKeyRequired).toBeFalsy();
+    }
+  });
+
+  it('has a single route tree, with no /cognito copy', () => {
+    expect(hasResource(template, 'cognito')).toBe(false);
+  });
+
+  it.each([
+    // Services alone: sessions and pollers writing what they observe, the OMS halting itself, secret names.
+    ['risk/halts', 'POST', ['service']],
+    ['ledger/batch', 'POST', ['service']],
+    ['ledger/poller-marks', 'POST', ['service']],
+    ['strategy-sessions', 'PATCH', ['service']],
+    ['strategy-sessions', 'POST', ['service']],
+    ['strategy-sessions/heartbeat', 'POST', ['service']],
+    ['venue-accounts', 'POST', ['service']],
+    ['venue-accounts/secrets', 'GET', ['service']],
+    ['venue-accounts/secrets', 'PUT', ['service']],
+    ['treasury/poll-targets', 'GET', ['service']],
+    // People alone, so the audit log attributes each change to a person.
+    ['risk/policies', 'POST', ['person']],
+    ['risk/policies', 'PATCH', ['person']],
+    ['risk/policies', 'DELETE', ['person']],
+    ['ledger/adjustments', 'POST', ['person']],
+    ['venue-accounts/status', 'PATCH', ['person']],
+    ['venue-accounts/create', 'POST', ['person']],
+    ['venue-accounts/credentials', 'POST', ['person']],
+    ['venue-accounts/delete-secrets', 'POST', ['person']],
+    ['market-data-keys', 'GET', ['person']],
+    ['market-data-keys', 'POST', ['person']],
+    ['treasury/transfers', 'POST', ['person']],
+    ['treasury/account-config', 'PUT', ['person']],
+    ['sources', 'POST', ['person']],
+    ['sources', 'PATCH', ['person']],
+    ['alerts', 'PATCH', ['person']],
+    ['listings', 'PATCH', ['person', 'service']],
+    ['hedge-keywords', 'DELETE', ['person', 'service']],
+    // Services and people.
+    ['strategy-sessions/launch', 'POST', ['person', 'service']],
+    ['strategy-sessions/stop', 'POST', ['person', 'service']],
+    ['treasury/snapshots', 'POST', ['person', 'service']],
+    ['fees', 'POST', ['person', 'service']],
+    // Reads a bot may make for an operator.
+    ['pnl/series', 'GET', ['bot', 'person']],
+    ['monitoring/attention', 'GET', ['bot', 'person']],
+    ['alerts', 'GET', ['bot', 'person']],
+    ['venue-accounts', 'GET', ['bot', 'person']],
+    ['treasury/summary', 'GET', ['bot', 'person']],
+    ['treasury/recon', 'GET', ['bot', 'person']],
+    ['orchestrator/properties', 'GET', ['bot', 'person']],
+    ['risk/policies', 'GET', ['bot', 'person', 'service']],
+    ['risk/policies/history', 'GET', ['bot', 'person', 'service']],
+    ['strategy-sessions', 'GET', ['bot', 'person', 'service']],
+    ['strategy-sessions/logs', 'GET', ['bot', 'person', 'service']],
+    ['strategy-sessions/accounts', 'GET', ['bot', 'person', 'service']],
+    ['ledger/positions', 'GET', ['bot', 'person', 'service']],
+    ['ledger/orders', 'GET', ['bot', 'person', 'service']],
+    ['sources', 'GET', ['bot', 'person', 'service']],
+    ['streams', 'GET', ['bot', 'person', 'service']],
+    ['listings', 'GET', ['bot', 'person', 'service']],
+  ])('%s %s admits %j', (path, httpMethod, kinds) => {
+    expect(kindsOf(template, path, httpMethod)).toEqual(kinds);
+  });
+
+  it('only ever lets a bot read', () => {
+    const methods = Object.values(template.findResources('AWS::ApiGateway::Method')).map(m => m.Properties)
+      .filter(p => p.HttpMethod !== 'OPTIONS');
+    const authorizers = template.findResources('AWS::ApiGateway::Authorizer');
+    const functions = template.findResources('AWS::Lambda::Function');
     for (const props of methods) {
-      if (underCognito(props.ResourceId.Ref)) {
-        expect(props.AuthorizationType).toBe('COGNITO_USER_POOLS');
-        expect(props.ApiKeyRequired).toBeFalsy();
-      } else {
-        expect(props.ApiKeyRequired).toBe(true);
-        expect(props.AuthorizationType).toBe('NONE');
+      const fnId = JSON.stringify(authorizers[props.AuthorizerId.Ref].Properties.AuthorizerUri).match(/"Fn::GetAtt":\["([^"]+)","Arn"\]/)![1];
+      if (functions[fnId].Properties.Environment.Variables.ALLOWED_KINDS.split(',').includes('bot')) {
+        expect(props.HttpMethod).toBe('GET');
       }
     }
-  });
-
-  it.each([
-    ['cognito/risk/policies', 'GET'],
-    ['cognito/risk/policies', 'POST'],
-    ['cognito/risk/policies', 'PATCH'],
-    ['cognito/risk/policies', 'DELETE'],
-    ['cognito/risk/policies/history', 'GET'],
-    ['cognito/strategy-sessions', 'GET'],
-    ['cognito/strategy-sessions/launch', 'POST'],
-    ['cognito/strategy-sessions/stop', 'POST'],
-    ['cognito/strategy-sessions/logs', 'GET'],
-    ['cognito/listings', 'PATCH'],
-    ['cognito/hedge-keywords', 'DELETE'],
-    ['cognito/ledger/adjustments', 'POST'],
-    ['cognito/pnl/series', 'GET'],
-    ['cognito/sources', 'GET'],
-    ['cognito/sources', 'POST'],
-    ['cognito/sources', 'PATCH'],
-    ['cognito/streams', 'GET'],
-  ])('%s %s is reachable with a Cognito token', (path, httpMethod) => {
-    const props = method(template, resourceId(template, path), httpMethod);
-    expect(props.AuthorizerId).toBeDefined();
-  });
-
-  it.each([
-    ['risk/policies', 'GET'],
-    ['risk/policies/history', 'GET'],
-    ['risk/halts', 'POST'],
-    ['strategy-sessions/launch', 'POST'],
-    ['ledger/batch', 'POST'],
-    ['ledger/positions', 'GET'],
-    ['ledger/orders', 'GET'],
-    ['strategy-sessions/stop', 'POST'],
-    ['strategy-sessions/accounts', 'GET'],
-    ['venue-accounts', 'POST'],
-    ['treasury/snapshots', 'POST'],
-    ['treasury/poll-targets', 'GET'],
-    ['sources', 'GET'],
-    ['streams', 'GET'],
-  ])('%s %s stays on the API key for services', (path, httpMethod) => {
-    method(template, resourceId(template, path), httpMethod);
-  });
-
-  it.each([
-    ['risk/policies', 'POST'],
-    ['risk/policies', 'PATCH'],
-    ['risk/policies', 'DELETE'],
-    ['venue-accounts', 'GET'],
-    ['sources', 'POST'],
-    ['sources', 'PATCH'],
-  ])('%s %s is not exposed to the API key', (path, httpMethod) => {
-    const methods = template.findResources('AWS::ApiGateway::Method', {
-      Properties: { HttpMethod: httpMethod, ResourceId: { Ref: resourceId(template, path) } },
-    });
-    expect(Object.keys(methods)).toHaveLength(0);
-  });
-
-  it('keeps position adjustments Cognito-only, so each is attributed to a person', () => {
-    expect(hasResource(template, 'ledger/adjustments')).toBe(false);
-  });
-
-  it('keeps transfers, account settings and treasury reads Cognito-only', () => {
-    for (const path of ['treasury/summary', 'treasury/transfers', 'treasury/account-config', 'treasury/recon']) {
-      expect(hasResource(template, path)).toBe(false);
-      expect(hasResource(template, `cognito/${path}`)).toBe(true);
-    }
-  });
-
-  it('keeps creating an account and deleting its secrets Cognito-only, and reads secret names with the API key', () => {
-    for (const path of ['venue-accounts/create', 'venue-accounts/credentials', 'venue-accounts/delete-secrets',
-      'market-data-keys']) {
-      expect(hasResource(template, path)).toBe(false);
-      expect(hasResource(template, `cognito/${path}`)).toBe(true);
-    }
-    method(template, resourceId(template, 'venue-accounts/secrets'), 'GET');
-    method(template, resourceId(template, 'venue-accounts/secrets'), 'PUT');
-    expect(hasResource(template, 'cognito/venue-accounts/secrets')).toBe(false);
   });
 
   it('lets the account creator touch only venue account and market data secrets', () => {
@@ -171,50 +166,21 @@ describe('ApiStack auth', () => {
     expect([statements[0].Resource].flat()).toHaveLength(2);
   });
 
-  it('keeps moving an account through its lifecycle Cognito-only', () => {
-    expect(hasResource(template, 'venue-accounts/status')).toBe(false);
-    expect(hasResource(template, 'cognito/venue-accounts/status')).toBe(true);
-  });
-
   it('stays well under the CloudFormation limit of 500 resources per stack', () => {
     expect(Object.keys(template.toJSON().Resources).length).toBeLessThan(450);
   });
 
   it.each([
-    ['cognito/risk/halts', 'POST'],
-    ['cognito/ledger/batch', 'POST'],
-    ['cognito/strategy-sessions', 'PATCH'],
-    ['cognito/strategy-sessions', 'POST'],
-  ])('keeps service-only %s %s off /cognito', (path, httpMethod) => {
-    if (!hasResource(template, path)) return;
-    const methods = template.findResources('AWS::ApiGateway::Method', {
-      Properties: { HttpMethod: httpMethod, ResourceId: { Ref: resourceId(template, path) } },
-    });
-    expect(Object.keys(methods)).toHaveLength(0);
-  });
-
-  it.each([
-    ['cognito/risk/policies'],
-    ['cognito/strategy-sessions/stop'],
-    ['cognito/sources'],
+    ['risk/policies'],
+    ['strategy-sessions/stop'],
+    ['sources'],
   ])('leaves the %s CORS preflight unauthenticated', path => {
     const props = method(template, resourceId(template, path), 'OPTIONS');
     expect(props.AuthorizationType).toBe('NONE');
     expect(props.ApiKeyRequired).toBeFalsy();
   });
 
-  it.each([
-    ['risk/policies'],
-    ['risk/halts'],
-    ['sources'],
-  ])('has no CORS preflight on the service route %s', path => {
-    const methods = template.findResources('AWS::ApiGateway::Method', {
-      Properties: { HttpMethod: 'OPTIONS', ResourceId: { Ref: resourceId(template, path) } },
-    });
-    expect(Object.keys(methods)).toHaveLength(0);
-  });
-
-  it('returns CORS headers on gateway 4xx so Cognito rejections are readable in the browser', () => {
+  it('returns CORS headers on gateway 4xx so authorizer rejections are readable in the browser', () => {
     template.hasResourceProperties('AWS::ApiGateway::GatewayResponse', {
       ResponseType: 'DEFAULT_4XX',
       ResponseParameters: { 'gatewayresponse.header.Access-Control-Allow-Origin': "'*'" },
