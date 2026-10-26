@@ -125,4 +125,23 @@ describeDb('market-data sources and streams, against Postgres', () => {
     const vendor = await sources.modifyOne({ code: 'PANDASCORE' }, JSON.stringify({ homeRegion: 'us-east-1', active: false }));
     expect(JSON.parse(vendor.body)).toMatchObject({ home_region: 'us-east-1', active: false });
   });
+
+  it('sets a source\'s connection capacity, clears a limit with null, and refuses nonsense', async () => {
+    const sources = withClient(new SourceHandler());
+    const defaults = (await client.query("SELECT * FROM md.source WHERE code = 'KALSHI'")).rows[0];
+    expect(defaults).toMatchObject({ max_per_connection: 50, connection_scope: 'IP', connections_per_scope: null });
+
+    const changed = await sources.modifyOne({ code: 'KALSHI' }, JSON.stringify(
+      { maxPerConnection: 250, connectionScope: 'KEY', connectionsPerScope: 180, clientMessagesPerMinute: 60 }));
+    expect(JSON.parse(changed.body)).toMatchObject(
+      { max_per_connection: 250, connection_scope: 'KEY', connections_per_scope: 180, client_messages_per_minute: 60 });
+
+    const cleared = await sources.modifyOne({ code: 'KALSHI' }, JSON.stringify({ clientMessagesPerMinute: null }));
+    expect(JSON.parse(cleared.body)).toMatchObject({ client_messages_per_minute: null, connections_per_scope: 180 });
+
+    await expect(sources.modifyOne({ code: 'KALSHI' }, JSON.stringify({ maxPerConnection: 0 })))
+      .rejects.toThrow(ValidationError);
+    await expect(sources.modifyOne({ code: 'KALSHI' }, JSON.stringify({ connectionScope: 'HOST' })))
+      .rejects.toThrow(ValidationError);
+  });
 });

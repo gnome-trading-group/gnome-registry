@@ -19,6 +19,7 @@ Alarms named `Bot-…`, all Warning:
 | Worker fault count | the worker Lambda crashed or timed out |
 | Answers AnswerFailures | the worker couldn't answer 3+ times in 5 minutes (it posted an error in the thread instead) |
 | Interact fault count | a Slack button click ("Attempt fix") failed before it could start the fix run |
+| GithubWebhook fault count | GitHub's PR-comment deliveries are failing, so `@gnome-bot` on PRs isn't heard (GitHub shows failed deliveries under the App's Advanced settings) |
 | GithubCallback fault count | a fix run's report back failed, so its thread may never get the PR link (the run itself is on the gnome-bot repo's Actions page) |
 
 ## Impact

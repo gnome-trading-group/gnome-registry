@@ -54,6 +54,11 @@ export interface IModifySource {
   adapter?: string;
   families?: string[];
   active?: boolean;
+  maxPerConnection?: number;
+  connectionScope?: 'IP' | 'KEY' | 'ACCOUNT';
+  // null clears a limit.
+  connectionsPerScope?: number | null;
+  clientMessagesPerMinute?: number | null;
 }
 
 interface IListingBase {

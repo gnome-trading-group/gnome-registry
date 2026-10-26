@@ -5,6 +5,18 @@ import { ICreateSource, IModifySource } from '../types';
 const sqlText = (value: string) => `'${value.replace(/'/g, "''")}'`;
 const sqlTextArray = (values: string[]) => `ARRAY[${values.map(sqlText).join(',')}]::VARCHAR[]`;
 
+function requirePositive(value: unknown, name: string): number {
+  if (typeof value !== 'number' || !Number.isInteger(value) || value <= 0) {
+    throw new ValidationError(`${name} must be a positive whole number`);
+  }
+  return value;
+}
+
+/** A limit, or null for none. */
+function optionalPositive(value: unknown, name: string): string {
+  return value === null ? 'NULL' : String(requirePositive(value, name));
+}
+
 function requireFamilies(families: unknown): string[] {
   if (!Array.isArray(families) || families.length === 0 || !families.every((f) => typeof f === 'string' && f)) {
     throw new ValidationError('families must be a non-empty list of family names');
@@ -68,6 +80,23 @@ export class SourceHandler extends ResourceHandler {
     }
     if (source.active != null) {
       updates.push(`active=${source.active === true}`);
+    }
+    if (source.maxPerConnection !== undefined) {
+      updates.push(`max_per_connection=${requirePositive(source.maxPerConnection, 'maxPerConnection')}`);
+    }
+    if (source.connectionScope !== undefined) {
+      if (!['IP', 'KEY', 'ACCOUNT'].includes(source.connectionScope)) {
+        throw new ValidationError('connectionScope must be IP, KEY or ACCOUNT');
+      }
+      updates.push(`connection_scope=${sqlText(source.connectionScope)}`);
+    }
+    if (source.connectionsPerScope !== undefined) {
+      updates.push(`connections_per_scope=${optionalPositive(source.connectionsPerScope, 'connectionsPerScope')}`);
+    }
+    if (source.clientMessagesPerMinute !== undefined) {
+      updates.push(
+        `client_messages_per_minute=${optionalPositive(source.clientMessagesPerMinute, 'clientMessagesPerMinute')}`,
+      );
     }
     updates.push('date_modified=NOW()');
     return `UPDATE md.source SET ${updates.join(', ')} WHERE source_id=${row.source_id} RETURNING *`;

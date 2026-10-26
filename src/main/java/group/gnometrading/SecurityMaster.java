@@ -105,7 +105,7 @@ public final class SecurityMaster {
     private static final Event EMPTY_EVENT = new Event(-1, null, null, null, false, 0L, 0L);
     private static final SimulationParameters NO_SIMULATION_PARAMETERS = new SimulationParameters(-1, -1, null, null);
     private static final EventContract EMPTY_EVENT_CONTRACT = new EventContract(-1, -1, -1, null);
-    private static final Source EMPTY_SOURCE = new Source(-1, null, null, 0, null, null, null, false);
+    private static final Source EMPTY_SOURCE = new Source(-1, null, null, 0, null, null, null, false, 0, null, 0, 0);
     private static final Stream EMPTY_STREAM = new Stream(-1, -1, null, null, 0, null, null, null, 0, 0L, 0L, false);
 
     private final RegistryConnection registryConnection;

@@ -334,7 +334,9 @@ class SecurityMasterTest {
                 .thenReturn(ByteBuffer.wrap(
                         """
                         [{"source_id": 9, "code": "PANDASCORE", "kind": "VENDOR", "exchange_id": null,
-                          "home_region": "eu-west-1", "adapter": "PANDASCORE", "families": ["esports"], "active": true}]"""
+                          "home_region": "eu-west-1", "adapter": "PANDASCORE", "families": ["esports"], "active": true,
+                          "max_per_connection": 40, "connection_scope": "KEY", "connections_per_scope": 10,
+                          "client_messages_per_minute": null}]"""
                                 .getBytes()));
 
         final group.gnometrading.md.Source source = securityMaster.getSource("PANDASCORE");
@@ -342,6 +344,10 @@ class SecurityMasterTest {
         assertEquals(group.gnometrading.md.SourceKind.VENDOR, source.kind());
         assertEquals(0, source.exchangeId());
         assertArrayEquals(new String[] {"esports"}, source.families());
+        assertEquals(40, source.maxPerConnection());
+        assertEquals("KEY", source.connectionScope());
+        assertEquals(10, source.connectionsPerScope());
+        assertEquals(0, source.clientMessagesPerMinute(), "no limit");
         assertSame(source, securityMaster.getSource(9));
         verify(registryConnection, times(1)).get(any());
     }
