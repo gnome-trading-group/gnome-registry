@@ -30,7 +30,9 @@ import group.gnometrading.strings.MutableString;
 import group.gnometrading.strings.ViewString;
 import java.io.IOException;
 import java.nio.ByteBuffer;
+import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 
 /**
@@ -50,6 +52,8 @@ public final class SecurityMaster {
     private static final String SIMULATION_PARAMETERS_ENDPOINT = "/api/simulation-parameters?";
     private static final String SOURCE_ENDPOINT = "/api/sources?";
     private static final String STREAM_ENDPOINT = "/api/streams?";
+    // Ids per bulk stream request: keeps the URL well under API Gateway's limit.
+    static final int STREAMS_PER_REQUEST = 200;
     private static final String SOURCE_ACCOUNT_ENDPOINT = "/api/sources/accounts?";
     // Every spec a listing has had, each from when it held at the venue.
     private static final String SPEC_HISTORY_PARAMETER = "&from=1970-01-01T00:00:00Z";
@@ -305,6 +309,25 @@ public final class SecurityMaster {
     /** Every market-data account of every source, as the registry has it now. Not cached, as {@link #getSources()}. */
     public SourceAccount[] getSourceAccounts() {
         return fetch(new ViewString(SOURCE_ACCOUNT_ENDPOINT), SourceAccount[].class);
+    }
+
+    /**
+     * Streams by id, as the registry has them now, in requests of {@link #STREAMS_PER_REQUEST}: missing ids are left
+     * out. Not cached: {@code active} follows the stream's listing, and the collection reconciler retires a stream
+     * whose listing went inactive.
+     */
+    public List<Stream> getStreams(final int[] streamIds) {
+        final List<Stream> streams = new ArrayList<>(streamIds.length);
+        for (int from = 0; from < streamIds.length; from += STREAMS_PER_REQUEST) {
+            final StringBuilder path = new StringBuilder(STREAM_ENDPOINT).append("streamIds=");
+            final int to = Math.min(streamIds.length, from + STREAMS_PER_REQUEST);
+            for (int i = from; i < to; i++) {
+                path.append(i == from ? "" : ",").append(streamIds[i]);
+            }
+            path.append("&limit=").append(STREAMS_PER_REQUEST);
+            streams.addAll(List.of(fetch(new ViewString(path.toString()), Stream[].class)));
+        }
+        return streams;
     }
 
     private <T> T fetch(final ViewString path, final Class<T> type) {

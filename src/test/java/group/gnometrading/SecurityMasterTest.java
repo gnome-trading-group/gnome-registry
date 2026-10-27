@@ -415,6 +415,37 @@ class SecurityMasterTest {
     }
 
     @Test
+    void testStreamsAreFetchedInBulkTwoHundredARequest() {
+        when(registryConnection.get(any())).thenAnswer(invocation -> {
+            final String path = invocation.getArgument(0).toString();
+            final String ids = path.substring(path.indexOf("streamIds=") + 10, path.indexOf("&limit="));
+            final StringBuilder json = new StringBuilder("[");
+            for (String id : ids.split(",")) {
+                json.append(json.length() > 1 ? "," : "")
+                        .append("{\"stream_id\":")
+                        .append(id)
+                        .append(",\"source_id\":4,\"source_code\":\"KALSHI\",\"subject_kind\":\"LISTING\",")
+                        .append("\"resolved_region\":\"us-east-1\",\"active\":")
+                        .append(Integer.parseInt(id) % 2 == 0)
+                        .append("}");
+            }
+            return ByteBuffer.wrap(json.append("]").toString().getBytes());
+        });
+        final int[] ids = new int[450];
+        for (int i = 0; i < ids.length; i++) {
+            ids[i] = i + 1;
+        }
+
+        final java.util.List<group.gnometrading.md.Stream> streams = securityMaster.getStreams(ids);
+
+        assertEquals(450, streams.size());
+        assertEquals("us-east-1", streams.get(0).resolvedRegion());
+        assertFalse(streams.get(0).active());
+        assertTrue(streams.get(1).active());
+        verify(registryConnection, times(3)).get(any());
+    }
+
+    @Test
     void testAMissingSourceAccountIsNull() {
         when(registryConnection.get(new ViewString("/api/sources/accounts?sourceCode=KALSHI&label=md-9")))
                 .thenReturn(ByteBuffer.wrap("[]".getBytes()));
