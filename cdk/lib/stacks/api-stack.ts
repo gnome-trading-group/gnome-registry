@@ -125,6 +125,9 @@ export class ApiStack extends cdk.Stack {
     // sources and listing streams are created by the database with their exchange and listing).
     this.routeFile('sources', 'sources.ts', { GET: [SERVICE, PERSON, BOT], POST: [PERSON], PATCH: [PERSON] });
     this.routeFile('streams', 'streams.ts', { GET: [SERVICE, PERSON, BOT] });
+    // A source's market-data accounts: shards read the one they are bound to; the account-creation Lambda records one
+    // once it has written its key (people set keys there, not here); retiring one or changing its budget is a person's.
+    this.routeFile('sources/accounts', 'source-accounts.ts', { GET: [SERVICE, PERSON, BOT], POST: [SERVICE], PATCH: [PERSON] });
 
     // Fee schedules are append-only, so there is no DELETE or PATCH: a fix is a new row.
     this.routeFile('fees', 'fees.ts', { GET: [SERVICE, PERSON, BOT], POST: [SERVICE, PERSON] });
@@ -203,6 +206,7 @@ export class ApiStack extends cdk.Stack {
     this.route('venue-accounts/delete-secrets', accountCreation, { POST: [PERSON] });
     // Not even bots read which market-data keys are set.
     this.route('market-data-keys', accountCreation, { GET: [PERSON], POST: [PERSON] });
+    this.route('market-data-accounts', accountCreation, { GET: [PERSON], POST: [PERSON] });
 
     // The treasury: the venue poller posts what each account holds and reads which accounts to poll (services); an
     // operator reads where the money stands and records transfers, settings and manual readings (people). The mark

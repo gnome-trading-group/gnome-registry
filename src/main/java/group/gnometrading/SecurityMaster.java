@@ -10,6 +10,7 @@ import group.gnometrading.collections.IntMap;
 import group.gnometrading.collections.LongHashMap;
 import group.gnometrading.collections.LongMap;
 import group.gnometrading.md.Source;
+import group.gnometrading.md.SourceAccount;
 import group.gnometrading.md.Stream;
 import group.gnometrading.sm.AssetClass;
 import group.gnometrading.sm.ContractRelationship;
@@ -48,6 +49,7 @@ public final class SecurityMaster {
     private static final String SIMULATION_PARAMETERS_ENDPOINT = "/api/simulation-parameters?";
     private static final String SOURCE_ENDPOINT = "/api/sources?";
     private static final String STREAM_ENDPOINT = "/api/streams?";
+    private static final String SOURCE_ACCOUNT_ENDPOINT = "/api/sources/accounts?";
     // Every spec a listing has had, each from when it held at the venue.
     private static final String SPEC_HISTORY_PARAMETER = "&from=1970-01-01T00:00:00Z";
     private static final long NANOS_PER_MILLI = 1_000_000L;
@@ -270,6 +272,25 @@ public final class SecurityMaster {
             this.sourceByCodeCache.put(code, EMPTY_SOURCE);
         }
         return source;
+    }
+
+    /**
+     * A source's market-data account by label, or null if there is none. Not cached: a shard looks one up as it opens a
+     * connection, and must see an account retired since.
+     */
+    public SourceAccount getSourceAccount(final String sourceCode, final String label) {
+        final MutableString path = new ExpandingMutableString(SOURCE_ACCOUNT_ENDPOINT);
+        path.appendString("sourceCode=");
+        path.appendString(sourceCode);
+        path.appendString("&label=");
+        path.appendString(label);
+        final ByteBuffer response = this.registryConnection.get(path);
+        try {
+            final SourceAccount[] result = OBJECT_MAPPER.readValue(toByteArray(response), SourceAccount[].class);
+            return result.length == 0 ? null : result[0];
+        } catch (IOException e) {
+            throw new RuntimeException(e);
+        }
     }
 
     private Source fetchSource() {

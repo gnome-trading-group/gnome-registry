@@ -353,6 +353,41 @@ class SecurityMasterTest {
     }
 
     @Test
+    void testSourceAccountIsLookedUpEveryTimeSoARetirementIsSeen() {
+        final ViewString path = new ViewString("/api/sources/accounts?sourceCode=KALSHI&label=md-1");
+        when(registryConnection.get(path))
+                .thenReturn(ByteBuffer.wrap(
+                        """
+                        [{"account_id": 3, "source_id": 4, "source_code": "KALSHI", "label": "md-1",
+                          "secret_name": "gnome/market-data/kalshi/md-1", "connection_budget": null,
+                          "status": "ACTIVE", "note": null, "created_by": "ops"}]"""
+                                .getBytes()))
+                .thenReturn(ByteBuffer.wrap(
+                        """
+                        [{"account_id": 3, "source_id": 4, "source_code": "KALSHI", "label": "md-1",
+                          "secret_name": "gnome/market-data/kalshi/md-1", "connection_budget": 150,
+                          "status": "RETIRED"}]"""
+                                .getBytes()));
+
+        final group.gnometrading.md.SourceAccount account = securityMaster.getSourceAccount("KALSHI", "md-1");
+        assertEquals("gnome/market-data/kalshi/md-1", account.secretName());
+        assertEquals(0, account.connectionBudget(), "the source's own limit");
+        assertTrue(account.active());
+
+        final group.gnometrading.md.SourceAccount later = securityMaster.getSourceAccount("KALSHI", "md-1");
+        assertFalse(later.active());
+        assertEquals(150, later.connectionBudget());
+        verify(registryConnection, times(2)).get(any());
+    }
+
+    @Test
+    void testAMissingSourceAccountIsNull() {
+        when(registryConnection.get(new ViewString("/api/sources/accounts?sourceCode=KALSHI&label=md-9")))
+                .thenReturn(ByteBuffer.wrap("[]".getBytes()));
+        assertNull(securityMaster.getSourceAccount("KALSHI", "md-9"));
+    }
+
+    @Test
     void testStreamDirectoryResolvesStreamsListingsAndVenueIds() {
         when(registryConnection.get(new ViewString("/api/streams?listingId=789")))
                 .thenReturn(ByteBuffer.wrap(LISTING_STREAM_JSON.getBytes()));

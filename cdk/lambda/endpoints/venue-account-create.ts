@@ -8,6 +8,7 @@ import { registryFetch, resolveApiKey } from '../sync/registry-client';
 import { getActor } from './base';
 import { gamertag } from './gamertag';
 import { identityChange } from './venue-accounts';
+import { LABEL_PATTERN } from './source-accounts';
 import { createResponse, isPositiveInt } from './ledger-common';
 
 // Registers a venue account from the controller: its credentials go into Secrets Manager under a fresh gamer-tag
@@ -307,8 +308,8 @@ export const MARKET_DATA_EXCHANGES: Record<string, string> = Object.fromEntries(
 const UPDATED_BY_TAG = 'updated-by';
 const API_KEY_ID_TAG = 'api-key-id';
 
-export interface MarketDataKeyStatus {
-  exchangeCode: string;
+/** A market-data secret as Secrets Manager describes it, never its value. */
+export interface SecretStatus {
   secretName: string;
   exists: boolean;
   apiKeyId: string | null;
@@ -319,15 +320,13 @@ export interface MarketDataKeyStatus {
   inSync: boolean;
 }
 
-export function marketDataKeyStatus(
-  exchangeCode: string, described: DescribeSecretCommandOutput | null,
-): MarketDataKeyStatus {
-  const secretName = MARKET_DATA_EXCHANGES[exchangeCode];
+export interface MarketDataKeyStatus extends SecretStatus {
+  exchangeCode: string;
+}
+
+export function secretStatus(secretName: string, described: DescribeSecretCommandOutput | null): SecretStatus {
   if (!described) {
-    return {
-      exchangeCode, secretName, exists: false, apiKeyId: null, updatedBy: null, lastChangedAt: null, replicas: [],
-      inSync: false,
-    };
+    return { secretName, exists: false, apiKeyId: null, updatedBy: null, lastChangedAt: null, replicas: [], inSync: false };
   }
   const tag = (key: string) => described.Tags?.find(t => t.Key === key)?.Value ?? null;
   const replicas = REPLICA_REGIONS.map(region => {
@@ -335,21 +334,31 @@ export function marketDataKeyStatus(
     return { region, status: r?.Status ?? 'Missing', message: r?.StatusMessage ?? null };
   });
   return {
-    exchangeCode, secretName, exists: true, apiKeyId: tag(API_KEY_ID_TAG), updatedBy: tag(UPDATED_BY_TAG),
+    secretName, exists: true, apiKeyId: tag(API_KEY_ID_TAG), updatedBy: tag(UPDATED_BY_TAG),
     lastChangedAt: described.LastChangedDate ? new Date(described.LastChangedDate).toISOString() : null,
     replicas, inSync: replicas.every(r => r.status === 'InSync'),
   };
 }
 
-async function describeMarketDataKey(exchangeCode: string): Promise<MarketDataKeyStatus> {
+export function marketDataKeyStatus(
+  exchangeCode: string, described: DescribeSecretCommandOutput | null,
+): MarketDataKeyStatus {
+  return { exchangeCode, ...secretStatus(MARKET_DATA_EXCHANGES[exchangeCode], described) };
+}
+
+async function describeSecret(secretName: string): Promise<DescribeSecretCommandOutput | null> {
   try {
-    const described = await secrets.send(new DescribeSecretCommand({ SecretId: MARKET_DATA_EXCHANGES[exchangeCode] }));
+    const described = await secrets.send(new DescribeSecretCommand({ SecretId: secretName }));
     // A secret scheduled for deletion still describes, but nothing can read it.
-    return marketDataKeyStatus(exchangeCode, described.DeletedDate ? null : described);
+    return described.DeletedDate ? null : described;
   } catch (error) {
-    if (error instanceof ResourceNotFoundException) return marketDataKeyStatus(exchangeCode, null);
+    if (error instanceof ResourceNotFoundException) return null;
     throw error;
   }
+}
+
+async function describeMarketDataKey(exchangeCode: string): Promise<MarketDataKeyStatus> {
+  return marketDataKeyStatus(exchangeCode, await describeSecret(MARKET_DATA_EXCHANGES[exchangeCode]));
 }
 
 export async function listMarketDataKeys(): Promise<MarketDataKeyStatus[]> {
@@ -373,6 +382,73 @@ export async function setMarketDataKey(body: { exchangeCode?: string; credential
   return describeMarketDataKey(exchangeCode);
 }
 
+// A source's market-data accounts: keys of dedicated, unfunded accounts that shards collect with, one secret per
+// account under the session key's name plus its label. The registry records each account; the key lives only here.
+export function accountSecretName(sourceCode: string, label: string): string {
+  return `${MARKET_DATA_EXCHANGES[sourceCode]}/${label}`;
+}
+
+interface AccountRow {
+  account_id: number;
+  source_code: string;
+  label: string;
+  secret_name: string;
+  connection_budget: number | null;
+  status: string;
+  note: string | null;
+  created_by: string;
+}
+
+export async function listMarketDataAccounts() {
+  const apiKey = await resolveApiKey();
+  const accounts = await registryFetch<AccountRow[]>('/sources/accounts', 'GET', apiKey);
+  return Promise.all(accounts.map(async account => ({
+    ...account, key: secretStatus(account.secret_name, await describeSecret(account.secret_name)),
+  })));
+}
+
+interface SetAccountRequest {
+  sourceCode?: string;
+  label?: string;
+  credentials?: Fields;
+  connectionBudget?: number | null;
+  note?: string;
+}
+
+/** Writes an account's key (new or replacing) and records the account; a key written for a new account it can't record is deleted. */
+export async function setMarketDataAccount(body: SetAccountRequest, actor: string) {
+  const sourceCode = body.sourceCode ?? '';
+  if (!(sourceCode in MARKET_DATA_EXCHANGES)) {
+    throw new CreateError(400, `sourceCode must be one of ${Object.keys(MARKET_DATA_EXCHANGES).join(', ')}; other feeds need no key`);
+  }
+  if (typeof body.label !== 'string' || !LABEL_PATTERN.test(body.label)) {
+    throw new CreateError(400, 'label must be lowercase letters, digits and dashes, like md-1');
+  }
+  if (body.connectionBudget != null && !isPositiveInt(body.connectionBudget)) {
+    throw new CreateError(400, 'connectionBudget must be a positive integer or null');
+  }
+  if (body.credentials === null || typeof body.credentials !== 'object') throw new CreateError(400, 'credentials are required');
+  const { secret } = credentialsFor(sourceCode, body.credentials, 'credentials');
+  const name = accountSecretName(sourceCode, body.label);
+  const apiKey = await resolveApiKey();
+  const created = await writeSecret(name, secret, `Market data account ${body.label} for ${sourceCode}, set from the controller`);
+  try {
+    await secrets.send(new TagResourceCommand({
+      SecretId: name,
+      Tags: [{ Key: UPDATED_BY_TAG, Value: actor }, { Key: API_KEY_ID_TAG, Value: secret.apiKey }],
+    }));
+    const account = await registryFetch<AccountRow>('/sources/accounts', 'POST', apiKey, {
+      sourceCode, label: body.label, secretName: name, connectionBudget: body.connectionBudget ?? null,
+      note: typeof body.note === 'string' && body.note.trim() ? body.note.trim() : undefined, actor,
+    });
+    console.log(`Set ${sourceCode} market data account ${body.label} for ${actor}`);
+    return { ...account, key: secretStatus(name, await describeSecret(name)) };
+  } catch (error) {
+    if (created) await deleteSecret(name, null).catch(() => undefined);
+    throw registryRefusal(error) ?? error;
+  }
+}
+
 export const handler = async (event: APIGatewayProxyEvent) => {
   const resource = event.resource ?? '';
   try {
@@ -388,6 +464,12 @@ export const handler = async (event: APIGatewayProxyEvent) => {
     }
     if (resource === '/market-data-keys' && event.httpMethod === 'POST') {
       return createResponse(200, await setMarketDataKey(body, getActor(event)));
+    }
+    if (resource === '/market-data-accounts' && event.httpMethod === 'GET') {
+      return createResponse(200, await listMarketDataAccounts());
+    }
+    if (resource === '/market-data-accounts' && event.httpMethod === 'POST') {
+      return createResponse(200, await setMarketDataAccount(body, getActor(event)));
     }
     if (resource === '/venue-accounts/delete-secrets' && event.httpMethod === 'POST') {
       return createResponse(200, await deleteAccountSecrets(body.accountId));
