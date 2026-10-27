@@ -381,6 +381,40 @@ class SecurityMasterTest {
     }
 
     @Test
+    void testEverySourceAndAccountIsReadFreshEachTime() {
+        when(registryConnection.get(new ViewString("/api/sources?")))
+                .thenAnswer(invocation -> ByteBuffer.wrap(
+                        """
+                        [{"source_id": 4, "code": "KALSHI", "kind": "VENUE", "exchange_id": 5, "home_region": null,
+                          "adapter": "KALSHI", "families": ["book"], "active": true, "max_per_connection": 250,
+                          "connection_scope": "ACCOUNT", "connections_per_scope": 180,
+                          "client_messages_per_minute": null}]"""
+                                .getBytes()));
+        when(registryConnection.get(new ViewString("/api/sources/accounts?")))
+                .thenAnswer(invocation -> ByteBuffer.wrap(
+                        """
+                        [{"account_id": 3, "source_id": 4, "source_code": "KALSHI", "label": "md-1",
+                          "secret_name": "gnome/market-data/kalshi/md-1", "connection_budget": null,
+                          "status": "ACTIVE"},
+                         {"account_id": 7, "source_id": 4, "source_code": "KALSHI", "label": "md-2",
+                          "secret_name": "gnome/market-data/kalshi/md-2", "connection_budget": 150,
+                          "status": "RETIRED"}]"""
+                                .getBytes()));
+
+        final group.gnometrading.md.Source[] sources = securityMaster.getSources();
+        assertEquals(1, sources.length);
+        assertEquals("ACCOUNT", sources[0].connectionScope());
+        assertEquals(180, sources[0].connectionsPerScope());
+        final group.gnometrading.md.SourceAccount[] accounts = securityMaster.getSourceAccounts();
+        assertEquals(2, accounts.length);
+        assertFalse(accounts[1].active());
+
+        securityMaster.getSources();
+        securityMaster.getSourceAccounts();
+        verify(registryConnection, times(4)).get(any());
+    }
+
+    @Test
     void testAMissingSourceAccountIsNull() {
         when(registryConnection.get(new ViewString("/api/sources/accounts?sourceCode=KALSHI&label=md-9")))
                 .thenReturn(ByteBuffer.wrap("[]".getBytes()));

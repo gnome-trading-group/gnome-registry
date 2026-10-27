@@ -27,6 +27,7 @@ import group.gnometrading.sm.fee.FeeTimeline;
 import group.gnometrading.sm.fee.FeeTimelineJson;
 import group.gnometrading.strings.ExpandingMutableString;
 import group.gnometrading.strings.MutableString;
+import group.gnometrading.strings.ViewString;
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.util.HashMap;
@@ -288,6 +289,28 @@ public final class SecurityMaster {
         try {
             final SourceAccount[] result = OBJECT_MAPPER.readValue(toByteArray(response), SourceAccount[].class);
             return result.length == 0 ? null : result[0];
+        } catch (IOException e) {
+            throw new RuntimeException(e);
+        }
+    }
+
+    /**
+     * Every source, as the registry has it now. Not cached: the collection reconciler places streams by these
+     * capacities, and must see one changed since.
+     */
+    public Source[] getSources() {
+        return fetch(new ViewString(SOURCE_ENDPOINT), Source[].class);
+    }
+
+    /** Every market-data account of every source, as the registry has it now. Not cached, as {@link #getSources()}. */
+    public SourceAccount[] getSourceAccounts() {
+        return fetch(new ViewString(SOURCE_ACCOUNT_ENDPOINT), SourceAccount[].class);
+    }
+
+    private <T> T fetch(final ViewString path, final Class<T> type) {
+        final ByteBuffer response = this.registryConnection.get(path);
+        try {
+            return OBJECT_MAPPER.readValue(toByteArray(response), type);
         } catch (IOException e) {
             throw new RuntimeException(e);
         }
