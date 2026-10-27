@@ -242,9 +242,19 @@ describe('POST /strategy-sessions/launch', () => {
     expect(input.ImageId).toBe('ami-16');
     expect(input.InstanceType).toBe('c7i.4xlarge');
     expect(input.SubnetId).toBe('subnet-a');
+    expect(input.SecurityGroupIds).toEqual(['sg-1']);
     expect(input.Placement).toBeUndefined();
     expect(input.TagSpecifications.map((t: any) => t.ResourceType)).toEqual(['instance', 'volume']);
     expect(input.TagSpecifications[0].Tags).toContainEqual({ Key: 'gnome:purpose', Value: 'orchestrator-ec2' });
+  });
+
+  it('finds the subnet and security group in the platform network, by its tag', async () => {
+    await launcher.handler(apiEvent('/strategy-sessions/launch', launchBody()));
+
+    for (const kind of ['DescribeSubnets', 'DescribeSecurityGroups']) {
+      const call = ec2Calls.find((c) => c.kind === kind)!;
+      expect(call.input.Filters).toEqual([{ Name: 'tag:gnome:network', Values: ['platform'] }]);
+    }
   });
 
   it('passes the session config to the instance as JSON', async () => {
@@ -345,7 +355,7 @@ describe('POST /strategy-sessions/launch', () => {
     [{ instanceType: 'c7i.large' }, {}, 'too small to isolate'],
     [{ instanceType: 't3.small' }, {}, 'too small to isolate'],
     [{}, { 'latency.profile': 'turbo' }, 'Unknown latency.profile'],
-    [{ availabilityZone: 'us-east-1z' }, {}, 'No orchestrator subnet'],
+    [{ availabilityZone: 'us-east-1z' }, {}, 'No platform network subnet'],
   ])('rejects %p %p before creating anything', async (overrides, config, message) => {
     const response = await launcher.handler(apiEvent('/strategy-sessions/launch', launchBody(overrides, config)));
 

@@ -6,6 +6,7 @@ import {
   RunInstancesCommand,
   TerminateInstancesCommand,
 } from '@aws-sdk/client-ec2';
+import { PLATFORM_NETWORK_TAG } from '@gnome-trading-group/gnome-shared-cdk/dist/regions';
 import { SSMClient, GetParameterCommand } from '@aws-sdk/client-ssm';
 import { APIGatewayClient, GetApiKeyCommand } from '@aws-sdk/client-api-gateway';
 import { CloudWatchLogsClient, GetLogEventsCommand } from '@aws-sdk/client-cloudwatch-logs';
@@ -17,9 +18,10 @@ const REGISTRY_API_URL = (process.env.REGISTRY_API_URL ?? '').replace(/\/$/, '')
 const REGISTRY_API_KEY_ID = process.env.REGISTRY_API_KEY_ID ?? '';
 const STAGE = process.env.STAGE ?? '';
 
-// Subnets and the security group keep their original tag; only the compute moved from Fargate to EC2.
-const NETWORK_TAG_KEY = 'gnome:purpose';
-const NETWORK_TAG_VALUE = 'orchestrator-ecs';
+// Sessions run in the platform network (gnome-shared-infra): its subnets and security group carry this tag, and the
+// launcher passes both, so where a session runs is decided here alone, not partly by the launch template.
+const NETWORK_TAG_KEY = PLATFORM_NETWORK_TAG.key;
+const NETWORK_TAG_VALUE = PLATFORM_NETWORK_TAG.value;
 const INSTANCE_PURPOSE = 'orchestrator-ec2';
 // A live session runs under the live template's role, the only one allowed to read venue account credentials.
 const LAUNCH_TEMPLATE_NAME = 'gnome-orchestrator';
@@ -201,9 +203,9 @@ async function discoverNetworkConfig(region: string): Promise<NetworkConfig> {
     })),
   ]);
   const subnets = (subnetsRes.Subnets ?? []).map(s => ({ subnetId: s.SubnetId!, availabilityZone: s.AvailabilityZone! }));
-  if (subnets.length === 0) throw new Error(`No orchestrator subnets found in ${region}`);
+  if (subnets.length === 0) throw new Error(`No platform network subnets found in ${region}`);
   const sg = sgsRes.SecurityGroups?.[0];
-  if (!sg?.GroupId) throw new Error(`No orchestrator security group found in ${region}`);
+  if (!sg?.GroupId) throw new Error(`No platform network security group found in ${region}`);
   return { subnets, securityGroupId: sg.GroupId };
 }
 
@@ -459,7 +461,7 @@ async function handleLaunch(body: string | null) {
     : network.subnets[0];
   if (!subnet) {
     return createResponse(400, {
-      message: `No orchestrator subnet in ${s.availabilityZone}; available: ${network.subnets.map(n => n.availabilityZone).join(', ')}`,
+      message: `No platform network subnet in ${s.availabilityZone}; available: ${network.subnets.map(n => n.availabilityZone).join(', ')}`,
     });
   }
 
@@ -515,6 +517,7 @@ async function handleLaunch(body: string | null) {
       ImageId: imageId,
       InstanceType: instanceType as any,
       SubnetId: subnet.subnetId,
+      SecurityGroupIds: [network.securityGroupId],
       MinCount: 1,
       MaxCount: 1,
       UserData: Buffer.from(userData).toString('base64'),

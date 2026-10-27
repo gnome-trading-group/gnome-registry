@@ -4,6 +4,7 @@ import {
   ResourceExistsException, ResourceNotFoundException, SecretsManagerClient, TagResourceCommand,
 } from '@aws-sdk/client-secrets-manager';
 import { createPrivateKey } from 'crypto';
+import { replicaRegions } from '@gnome-trading-group/gnome-shared-cdk/dist/regions';
 import { registryFetch, resolveApiKey } from '../sync/registry-client';
 import { getActor } from './base';
 import { gamertag } from './gamertag';
@@ -20,8 +21,8 @@ import { createResponse, isPositiveInt } from './ledger-common';
 // (gnome-orchestrator gateways/credentials), all as strings.
 
 const PRIMARY_REGION = 'us-east-1';
-// Orchestrators trade from every one of these, so each needs its own copy of an account's credentials.
-const REPLICA_REGIONS = ['ap-northeast-1', 'eu-west-1'];
+// Orchestrators trade from every platform region, so each needs its own copy of an account's credentials.
+const REPLICA_REGIONS = replicaRegions();
 const RECOVERY_WINDOW_DAYS = 7;
 const LABEL_ATTEMPTS = 20;
 
