@@ -102,7 +102,9 @@ synth step, so run `npm test` yourself before handing off.
 - What runs:
   - ApiStack: the Registry API (stage `api`), one Lambda per resource in the VPC; the strategy-session launcher
     (launch/stop/logs, outside the VPC, starts EC2 orchestrators) and the venue-account creator (Secrets Manager,
-    outside the VPC) call back through the API.
+    outside the VPC) call back through the API. The creator also sets market-data keys: the sessions' per-exchange
+    key (`/market-data-keys`, `gnome/market-data/<exchange>`) and collection's accounts (`/market-data-accounts`,
+    `gnome/market-data/<source>/<label>`, recorded in `md.source_account` through `/sources/accounts`).
   - DatabaseStack: RDS Postgres 16 (`gnome` db) in isolated subnets, plus the migration Lambda and a query Lambda
     (`{"query": "..."}`, returns rows) for read-only inspection.
   - ExchangeSyncStack: hourly security-master sync (Hyperliquid, Lighter adapters); in prod it reports to `#gnome-security-master`.
