@@ -17,6 +17,10 @@ export const START_STUCK_AFTER_MS = 15 * 60_000;
 export const STOP_STUCK_AFTER_MS = 10 * 60_000;
 // Each bad-book resync forces a reconnect, and ten gateway errors a minute exit the session.
 export const BOOK_RESYNCS_PER_5M = 3;
+// A listing's book flagged bad data, so its OMS refuses new orders on it. A resync takes seconds; a minute is a feed
+// that isn't coming back by itself, and five with a position held is risk nobody can trade out of.
+export const MARKET_DATA_BAD_AFTER_MS = 60_000;
+export const MARKET_DATA_BAD_HELD_AFTER_MS = 5 * 60_000;
 // Orders with a fill in this window have their venue fees checked against the registry's schedules; a cent per order
 // covers the one Polymarket US rounding we couldn't explain (2026-10-15).
 export const FEE_LOOKBACK_MS = 24 * 3_600_000;

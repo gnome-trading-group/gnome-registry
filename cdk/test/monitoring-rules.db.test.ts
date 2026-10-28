@@ -72,6 +72,29 @@ describeDb('monitoring rules against Postgres', () => {
     ]);
   });
 
+  it('reports a listing whose book stays bad, and more loudly once a position is held through five minutes of it', async () => {
+    await client.query(`INSERT INTO sm.security (security_id, symbol, type) VALUES (1, 'X', 0)`);
+    await client.query(`INSERT INTO sm.listing (listing_id, exchange_id, security_id, exchange_security_id,
+        exchange_security_symbol) VALUES (7, 1, 1, 'X', 'X'), (8, 1, 1, 'Y', 'Y'), (9, 1, 1, 'Z', 'Z')`);
+    await client.query(`INSERT INTO ledger.position (strategy_id, listing_id, mode, net_quantity, total_cost, version)
+      VALUES (1, 7, 'paper', 5000000, 0, 1), (1, 8, 'paper', 0, 0, 1)`);
+    await session('s1', { health: { ...HEALTHY, listings: [
+      { listingId: 7, priceUnchangedMs: 0, marketDataBadMs: 6 * 60_000 },
+      { listingId: 8, priceUnchangedMs: 0, marketDataBadMs: 6 * 60_000 },
+      { listingId: 9, priceUnchangedMs: 0, marketDataBadMs: 30_000 },
+    ] } });
+
+    // Held with no recent mark, listing 7 also shows as NO_PRICE (the positions rule); only this rule's are checked.
+    const findings = (await runRules(client, now)).filter(f => f.kind.startsWith('MARKET_DATA_BAD'));
+
+    expect(findings.map(f => [f.kind, f.key]).sort()).toEqual([
+      ['MARKET_DATA_BAD', 'MARKET_DATA_BAD:s1:listing 7'],
+      ['MARKET_DATA_BAD', 'MARKET_DATA_BAD:s1:listing 8'],
+      ['MARKET_DATA_BAD_HELD', 'MARKET_DATA_BAD_HELD:s1:listing 7'],
+    ]);
+    expect(findings.find(f => f.kind === 'MARKET_DATA_BAD_HELD')?.listingId).toBe(7);
+  });
+
   const GB = 1024 ** 3;
   const host = (f: Record<string, number> = {}) => ({
     cpuBusyPermille: 400, cpuStealPermille: 0, memAvailableBytes: GB, memTotalBytes: 2 * GB,
@@ -162,8 +185,8 @@ describeDb('monitoring rules against Postgres', () => {
   it('every kind a rule can produce has an alert type', async () => {
     const kinds = ['GLOBAL_HALT', 'EXCHANGE_HALT', 'STRATEGY_HALT', 'STRATEGY_EXCHANGE_HALT', 'LISTING_HALT',
       'SESSION_HALT', 'SILENT', 'LEDGER_FENCED', 'LEDGER_FAILING', 'RISK_STALE', 'RISK_UNGUARDED', 'POLICY_UNBUILDABLE',
-      'LATCHES_DROPPED', 'AGENT_EXITED', 'AGENT_STALLED', 'RECONNECTING', 'BOOK_RESYNCS', 'RATE_LIMIT_THROTTLING',
-      'FAILED', 'START_STUCK', 'STOP_STUCK', 'NEEDS_REVIEW', 'NO_PRICE', 'SETTLEMENT_PENDING', 'SETTLEMENT_BLOCKED',
+      'LATCHES_DROPPED', 'AGENT_EXITED', 'AGENT_STALLED', 'RECONNECTING', 'BOOK_RESYNCS', 'MARKET_DATA_BAD',
+      'MARKET_DATA_BAD_HELD', 'RATE_LIMIT_THROTTLING', 'FAILED', 'START_STUCK', 'STOP_STUCK', 'NEEDS_REVIEW', 'NO_PRICE', 'SETTLEMENT_PENDING', 'SETTLEMENT_BLOCKED',
       'RECON_MISMATCH', 'RECON_STALE', 'BALANCE_LOW', 'SHARD_BALANCE_LOW', 'ALLOCATION_EXCEEDS_BALANCE',
       'DRAINING_EXPOSURE', 'ACCOUNT_DUE_FOR_ROTATION', 'ACCOUNT_READY_TO_RETIRE', 'FEE_MISMATCH',
       'FEE_SCHEDULE_MISSING', 'FEE_SCHEDULE_CHANGED', 'FEE_TYPE_UNSUPPORTED', 'HOST_CPU_HIGH', 'HOST_MEMORY_LOW',

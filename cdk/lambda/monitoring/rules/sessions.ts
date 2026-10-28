@@ -3,12 +3,14 @@ import { Finding, finding, Mode, seconds } from './types';
 import {
   BOOK_RESYNCS_PER_5M, DISK_FREE_MIN_BYTES, DISK_FREE_MIN_SEGMENTS, HOST_CPU_BUSY_PERMILLE, HOST_CPU_STEAL_PERMILLE,
   HOST_MEM_AVAILABLE_MIN_PERCENT, HOT_PATH_STALL_MS, JOURNAL_BACKLOG_AGE_MS, JOURNAL_BACKLOG_SEGMENTS,
-  NO_HEARTBEAT_AFTER_MS, SILENT_AFTER_MS,
+  MARKET_DATA_BAD_AFTER_MS, MARKET_DATA_BAD_HELD_AFTER_MS, NO_HEARTBEAT_AFTER_MS, SILENT_AFTER_MS,
 } from './thresholds';
 
 // The heartbeat's health (see the orchestrator's SessionHeartbeatAgent). Older sessions omit the newer parts.
 interface Health {
   agents?: { name: string; hotPath: boolean; stalledMs: number; exited: boolean }[];
+  // marketDataBadMs: how long the listing's book has been flagged bad data, its OMS refusing new orders; 0 trusted.
+  listings?: { listingId: number; priceUnchangedMs: number; marketDataBadMs?: number }[];
   gateways?: { name: string; reconnecting: boolean; resyncsLast5m?: number }[];
   ledger?: { consecutiveFailures: number; fenced: boolean } | null;
   risk?: { stale: boolean; unguarded: boolean; unbuildablePolicies: number; droppedLatches: number } | null;
@@ -89,12 +91,32 @@ export async function sessions(client: PoolClient, now: Date): Promise<Finding[]
           { facts: { resyncsLast5m: resyncs } });
       }
     }
+    for (const listing of health.listings ?? []) {
+      const badMs = listing.marketDataBadMs ?? 0;
+      if (badMs < MARKET_DATA_BAD_AFTER_MS) continue;
+      const subject = `listing ${listing.listingId}`;
+      const extra = { listingId: listing.listingId, facts: { marketDataBadMs: badMs } };
+      on('warning', 'MARKET_DATA_BAD', subject, `Book bad for ${seconds(badMs)}; new orders refused`, extra);
+      if (badMs >= MARKET_DATA_BAD_HELD_AFTER_MS
+          && await holds(client, s.strategy_id, listing.listingId, mode)) {
+        on('critical', 'MARKET_DATA_BAD_HELD', subject,
+          `Book bad for ${seconds(badMs)} with a position held; new orders refused`, extra);
+      }
+    }
     for (const limiter of health.rateLimit ?? []) {
       if (limiter.throttling) on('warning', 'RATE_LIMIT_THROTTLING', limiter.account, `${limiter.account} is rate limited`);
     }
     hostFindings(health, on);
   }
   return findings;
+}
+
+async function holds(client: PoolClient, strategyId: number, listingId: number, mode: Mode): Promise<boolean> {
+  const rows = (await client.query(`
+    SELECT 1 FROM ledger.position
+    WHERE strategy_id = $1 AND listing_id = $2 AND mode = $3 AND net_quantity <> 0 LIMIT 1`,
+  [strategyId, listingId, mode])).rows;
+  return rows.length > 0;
 }
 
 type On = (severity: 'critical' | 'warning', kind: string, subject: string | null, title: string,

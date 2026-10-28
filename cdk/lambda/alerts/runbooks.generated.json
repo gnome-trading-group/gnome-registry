@@ -280,6 +280,24 @@
       ],
       "url": "https://github.com/gnome-trading-group/gnome-registry/blob/main/docs/runbooks/alerts/LISTING_HALT.md"
     },
+    "MARKET_DATA_BAD": {
+      "summary": "A session's book for a listing has been flagged bad data for over a minute, so its OMS refuses new orders there.",
+      "firstSteps": [
+        "Check the session's gateway alerts (RECONNECTING, BOOK_RESYNCS) and the venue's status.",
+        "Open the session's logs for ORDER_REJECTED_MARKET_DATA_BAD and the gateway's resync lines.",
+        "Check whether the session holds a position or resting orders on the listing."
+      ],
+      "url": "https://github.com/gnome-trading-group/gnome-registry/blob/main/docs/runbooks/alerts/MARKET_DATA_BAD.md"
+    },
+    "MARKET_DATA_BAD_HELD": {
+      "summary": "A listing's book has been bad for over five minutes while the session holds a position there; nothing can trade out of it.",
+      "firstSteps": [
+        "Check the position and resting orders on the listing in the controller.",
+        "Check the venue's status and whether the market is still trading.",
+        "Decide whether to flatten by hand on the venue or wait for the book."
+      ],
+      "url": "https://github.com/gnome-trading-group/gnome-registry/blob/main/docs/runbooks/alerts/MARKET_DATA_BAD_HELD.md"
+    },
     "NEEDS_REVIEW": {
       "summary": "A position lost ledger events; recovery refuses to trade it until it's adjusted.",
       "firstSteps": [
