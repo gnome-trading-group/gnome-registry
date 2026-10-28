@@ -30,6 +30,8 @@ describeDb('events by volume, against Postgres', () => {
       (2, 'B', 1, 'B', 'Politics', ARRAY['us'], '2026-12-01', false, NULL, NULL, '2026-10-01'),
       (3, 'C', 1, 'C', 'Sports', ARRAY['nba', 'nfl'], '2026-11-15', true, 90000, NOW(), '2026-10-01'),
       (4, 'D', 2, 'D', 'Sports', ARRAY['nfl'], '2026-11-02', false, 20000, NOW(), '2026-10-01')`);
+    // Past the explicit ids above, for events the tests create.
+    await client.query(`SELECT setval('sm.event_event_id_seq', 100)`);
   });
 
   function handler(): EventHandler {
@@ -78,6 +80,22 @@ describeDb('events by volume, against Postgres', () => {
       { event_id: 1, volume_24h: null, fresh: true, modified: '2026-10-01' },
       { event_id: 2, volume_24h: 1234.5, fresh: true, modified: '2026-10-01' },
     ]);
+  });
+
+  it('creates an event with its volume reading, and one without when none is given', async () => {
+    const response = await handler().createMany(JSON.stringify([
+      { title: 'New', exchangeId: 1, nativeEventId: 'NEW', volume24h: 750.25 },
+      { title: 'Bare', exchangeId: 1, nativeEventId: 'BARE' },
+    ]));
+    expect(response.statusCode).toBe(200);
+    const { rows } = await client.query(`SELECT native_event_id, volume_24h, volume_updated_at IS NOT NULL AS read
+      FROM sm.event WHERE native_event_id IN ('NEW', 'BARE') ORDER BY native_event_id`);
+    expect(rows).toEqual([
+      { native_event_id: 'BARE', volume_24h: null, read: false },
+      { native_event_id: 'NEW', volume_24h: 750.25, read: true },
+    ]);
+    await expect(handler().createMany(JSON.stringify([{ title: 'X', exchangeId: 1, nativeEventId: 'X', volume24h: 'lots' }])))
+      .rejects.toThrow(ValidationError);
   });
 
   it('still stamps the modified time when an edit carries other fields', async () => {

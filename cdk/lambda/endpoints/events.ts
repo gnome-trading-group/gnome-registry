@@ -16,6 +16,15 @@ function sqlTimestamp(name: string, value: string): string {
   return `'${new Date(millis).toISOString()}'`;
 }
 
+/** A 24h volume as a SQL literal: NULL when absent; anything not a number is refused. */
+function volumeLiteral(volume: number | null | undefined): string {
+  if (volume === undefined || volume === null) return 'NULL';
+  if (!Number.isFinite(Number(volume))) {
+    throw new ValidationError(`volume24h must be a number or null, got ${volume}`);
+  }
+  return String(Number(volume));
+}
+
 export class EventHandler extends ResourceHandler {
   getPrimaryKey(): string { return 'event_id'; }
   getCamelPrimaryKey(): string { return 'eventId'; }
@@ -42,10 +51,14 @@ export class EventHandler extends ResourceHandler {
       ? `ARRAY[${event.tags.map(t => `'${t.replace(/'/g, "''")}'`).join(',')}]::text[]`
       : 'NULL';
     const nativeUrl = event.nativeUrl ? `'${event.nativeUrl.replace(/'/g, "''")}'` : 'NULL';
+    // The classifier reads an event's volume in the same fetch that finds it, so a new event has it from the start.
+    const volume = volumeLiteral(event.volume24h);
     return `
-      INSERT INTO sm.event (title, description, category, expiry, tags, exchange_id, native_event_id, native_url)
+      INSERT INTO sm.event (title, description, category, expiry, tags, exchange_id, native_event_id, native_url,
+                            volume_24h, volume_updated_at)
       VALUES ('${event.title.replace(/'/g, "''")}', ${description}, ${category}, ${expiry}, ${tags},
-              ${event.exchangeId}, '${event.nativeEventId.replace(/'/g, "''")}', ${nativeUrl})
+              ${event.exchangeId}, '${event.nativeEventId.replace(/'/g, "''")}', ${nativeUrl},
+              ${volume}, ${volume === 'NULL' ? 'NULL' : 'NOW()'})
       RETURNING *;
     `;
   }
@@ -122,10 +135,7 @@ export class EventHandler extends ResourceHandler {
     // A volume refresh is the classifier's reading, not an edit of the event, so it leaves date_modified alone.
     if (updates.length > 0) updates.push('date_modified = NOW()');
     if (event.volume24h !== undefined) {
-      if (event.volume24h !== null && !Number.isFinite(Number(event.volume24h))) {
-        throw new ValidationError(`volume24h must be a number or null, got ${event.volume24h}`);
-      }
-      updates.push(`volume_24h = ${event.volume24h === null ? 'NULL' : Number(event.volume24h)}`, 'volume_updated_at = NOW()');
+      updates.push(`volume_24h = ${volumeLiteral(event.volume24h)}`, 'volume_updated_at = NOW()');
     }
     if (updates.length === 0) updates.push('date_modified = NOW()');
     return `UPDATE sm.event SET ${updates.join(', ')} WHERE event_id = ${row['event_id']} RETURNING *`;
