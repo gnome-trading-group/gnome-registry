@@ -17,6 +17,7 @@ import group.gnometrading.sm.ContractRelationship;
 import group.gnometrading.sm.ContractType;
 import group.gnometrading.sm.Event;
 import group.gnometrading.sm.EventContract;
+import group.gnometrading.sm.EventQuery;
 import group.gnometrading.sm.Exchange;
 import group.gnometrading.sm.Listing;
 import group.gnometrading.sm.ListingSpec;
@@ -29,7 +30,10 @@ import group.gnometrading.strings.ExpandingMutableString;
 import group.gnometrading.strings.MutableString;
 import group.gnometrading.strings.ViewString;
 import java.io.IOException;
+import java.net.URLEncoder;
 import java.nio.ByteBuffer;
+import java.nio.charset.StandardCharsets;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
@@ -54,6 +58,8 @@ public final class SecurityMaster {
     private static final String STREAM_ENDPOINT = "/api/streams?";
     // Ids per bulk stream request: keeps the URL well under API Gateway's limit.
     static final int STREAMS_PER_REQUEST = 200;
+    // Events per stream-by-event request: an event has a few streams, so the answer stays under the API's page size.
+    static final int EVENTS_PER_REQUEST = 100;
     private static final String SOURCE_ACCOUNT_ENDPOINT = "/api/sources/accounts?";
     // Every spec a listing has had, each from when it held at the venue.
     private static final String SPEC_HISTORY_PARAMETER = "&from=1970-01-01T00:00:00Z";
@@ -109,7 +115,7 @@ public final class SecurityMaster {
             0);
     private static final Exchange EMPTY_EXCHANGE = new Exchange(-1, null, null, null);
     private static final ListingSpecHistory NO_SPECS = new ListingSpecHistory(new long[0], new ListingSpec[0]);
-    private static final Event EMPTY_EVENT = new Event(-1, null, null, null, false, 0L, 0L);
+    private static final Event EMPTY_EVENT = new Event(-1, 0, null, null, null, false, 0L, 0L, 0.0);
     private static final SimulationParameters NO_SIMULATION_PARAMETERS = new SimulationParameters(-1, -1, null, null);
     private static final EventContract EMPTY_EVENT_CONTRACT = new EventContract(-1, -1, -1, null);
     private static final Source EMPTY_SOURCE = new Source(-1, null, null, 0, null, null, null, false, 0, null, 0, 0);
@@ -328,6 +334,55 @@ public final class SecurityMaster {
             streams.addAll(List.of(fetch(new ViewString(path.toString()), Stream[].class)));
         }
         return streams;
+    }
+
+    /**
+     * Open events matching {@code query}, in its order. Not cached: collection rules select events by a volume the
+     * classifier keeps updating.
+     */
+    public List<Event> getEvents(final EventQuery query) {
+        final StringBuilder path = new StringBuilder(EVENT_ENDPOINT).append("resolved=false");
+        appendList(path, "exchangeIds", query.exchangeIds());
+        appendList(path, "categories", query.categories());
+        appendList(path, "tags", query.tags());
+        if (query.expiresBeforeMillis() > 0) {
+            path.append("&expiryTo=").append(Instant.ofEpochMilli(query.expiresBeforeMillis()));
+        }
+        if (query.minVolume24h() > 0) {
+            path.append("&minVolume24h=").append(query.minVolume24h());
+        }
+        path.append(query.order() == EventQuery.Order.VOLUME ? "&sortBy=volume_24h&sortOrder=desc" : "&sortBy=expiry");
+        path.append("&limit=").append(query.limit());
+        return List.of(fetch(new ViewString(path.toString()), Event[].class));
+    }
+
+    /**
+     * Every stream of these events, as the registry has them now: both sides of each contract's listings, and vendor
+     * streams of the event; each names its event. In requests of {@link #EVENTS_PER_REQUEST} events. Not cached, as
+     * {@link #getStreams(int[])}.
+     */
+    public List<Stream> getStreamsForEvents(final int[] eventIds) {
+        final List<Stream> streams = new ArrayList<>();
+        for (int from = 0; from < eventIds.length; from += EVENTS_PER_REQUEST) {
+            final StringBuilder path = new StringBuilder(STREAM_ENDPOINT).append("eventIds=");
+            final int to = Math.min(eventIds.length, from + EVENTS_PER_REQUEST);
+            for (int i = from; i < to; i++) {
+                path.append(i == from ? "" : ",").append(eventIds[i]);
+            }
+            streams.addAll(List.of(fetch(new ViewString(path.toString()), Stream[].class)));
+        }
+        return streams;
+    }
+
+    private static void appendList(final StringBuilder path, final String name, final List<?> values) {
+        if (values == null || values.isEmpty()) {
+            return;
+        }
+        path.append('&').append(name).append('=');
+        for (int i = 0; i < values.size(); i++) {
+            path.append(i == 0 ? "" : ",")
+                    .append(URLEncoder.encode(String.valueOf(values.get(i)), StandardCharsets.UTF_8));
+        }
     }
 
     private <T> T fetch(final ViewString path, final Class<T> type) {

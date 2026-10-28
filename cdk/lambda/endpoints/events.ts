@@ -1,8 +1,22 @@
 import { APIGatewayProxyEvent, APIGatewayProxyEventQueryStringParameters } from 'aws-lambda';
-import { ResourceHandler } from './base';
+import { parseIdList, ResourceHandler, ValidationError } from './base';
 import { ICreateEvent, IDeleteEvent } from '../types';
 
-class EventHandler extends ResourceHandler {
+const sqlText = (value: string) => `'${value.replace(/'/g, "''")}'`;
+
+/** Comma-separated text values, e.g. "Sports,Politics", as a SQL list; empty items are dropped. */
+const sqlTextList = (value: string) => value.split(',').map((v) => v.trim()).filter(Boolean).map(sqlText).join(',');
+
+/** An ISO-8601 time from a query param, as a SQL timestamp literal; anything unparseable is refused. */
+function sqlTimestamp(name: string, value: string): string {
+  const millis = Date.parse(value);
+  if (Number.isNaN(millis)) {
+    throw new ValidationError(`${name} must be an ISO-8601 time, got ${value}`);
+  }
+  return `'${new Date(millis).toISOString()}'`;
+}
+
+export class EventHandler extends ResourceHandler {
   getPrimaryKey(): string { return 'event_id'; }
   getCamelPrimaryKey(): string { return 'eventId'; }
 
@@ -56,9 +70,36 @@ class EventHandler extends ResourceHandler {
     if (params?.tag) {
       query += ` AND '${params.tag.replace(/'/g, "''")}' = ANY(tags)`;
     }
+    if (params?.exchangeIds !== undefined) {
+      const ids = parseIdList(params.exchangeIds);
+      query += ids.length > 0 ? ` AND exchange_id IN (${ids.join(',')})` : ' AND FALSE';
+    }
+    if (params?.categories) {
+      query += ` AND category IN (${sqlTextList(params.categories)})`;
+    }
+    if (params?.tags) {
+      query += ` AND tags && ARRAY[${sqlTextList(params.tags)}]::text[]`;
+    }
+    if (params?.expiryFrom) {
+      query += ` AND expiry >= ${sqlTimestamp('expiryFrom', params.expiryFrom)}`;
+    }
+    if (params?.expiryTo) {
+      query += ` AND expiry < ${sqlTimestamp('expiryTo', params.expiryTo)}`;
+    }
+    if (params?.minVolume24h) {
+      const minVolume = Number(params.minVolume24h);
+      if (!Number.isFinite(minVolume)) {
+        throw new ValidationError(`minVolume24h must be a number, got ${params.minVolume24h}`);
+      }
+      query += ` AND volume_24h >= ${minVolume}`;
+    }
     if (params?.search) {
       const escaped = params.search.replace(/'/g, "''");
       query += ` AND (title ILIKE '%${escaped}%' OR description ILIKE '%${escaped}%')`;
+    }
+    // By volume, events with none yet sort last either way, and ties keep a stable order for paging.
+    if (params?.sortBy === 'volume_24h') {
+      query += ` ORDER BY volume_24h ${params.sortOrder === 'desc' ? 'DESC' : 'ASC'} NULLS LAST, event_id`;
     }
     return query;
   }
@@ -74,7 +115,15 @@ class EventHandler extends ResourceHandler {
     if (event.nativeUrl !== undefined) updates.push(`native_url = ${event.nativeUrl ? `'${event.nativeUrl.replace(/'/g, "''")}'` : 'NULL'}`);
     if ((event as any).resolved !== undefined) updates.push(`resolved = ${(event as any).resolved}`);
     if ((event as any).resolvedAt !== undefined) updates.push(`resolved_at = ${(event as any).resolvedAt ? `'${(event as any).resolvedAt}'` : 'NULL'}`);
-    updates.push('date_modified = NOW()');
+    // A volume refresh is the classifier's reading, not an edit of the event, so it leaves date_modified alone.
+    if (updates.length > 0) updates.push('date_modified = NOW()');
+    if (event.volume24h !== undefined) {
+      if (event.volume24h !== null && !Number.isFinite(Number(event.volume24h))) {
+        throw new ValidationError(`volume24h must be a number or null, got ${event.volume24h}`);
+      }
+      updates.push(`volume_24h = ${event.volume24h === null ? 'NULL' : Number(event.volume24h)}`, 'volume_updated_at = NOW()');
+    }
+    if (updates.length === 0) updates.push('date_modified = NOW()');
     return `UPDATE sm.event SET ${updates.join(', ')} WHERE event_id = ${row['event_id']} RETURNING *`;
   }
 }

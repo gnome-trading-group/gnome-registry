@@ -12,8 +12,8 @@ first_steps:
 Alarms named `MarketData-…`:
 
 - `ReconcilerLambda-Fault-Count-Error` (RECONCILER_FAILING): 3 or more failed reconciler ticks in the alarm's period. A tick that fails is retried by the next minute's, so this means it keeps failing: nothing is placed, handed off, rolled, scaled down or alerted on.
-- `InventoryProcessorLambda-…`, `QualityCheckLambda-…`: any fault in that function.
-- `market-data-<queue>-queue-DLQ-…` / `-Queue-Message-Age-…`: work dead-lettered, or a consumer falling behind.
+- `InventoryProcessorLambda-…`: any fault in that function.
+- `market-data-inventory-queue-DLQ-…` / `-Queue-Message-Age-…`: work dead-lettered, or the inventory processor falling behind.
 
 ## Impact
 

@@ -6,6 +6,8 @@ import static org.mockito.Mockito.*;
 import group.gnometrading.sm.AssetClass;
 import group.gnometrading.sm.ContractRelationship;
 import group.gnometrading.sm.ContractType;
+import group.gnometrading.sm.Event;
+import group.gnometrading.sm.EventQuery;
 import group.gnometrading.sm.Exchange;
 import group.gnometrading.sm.Listing;
 import group.gnometrading.sm.ListingSpec;
@@ -443,6 +445,79 @@ class SecurityMasterTest {
         assertFalse(streams.get(0).active());
         assertTrue(streams.get(1).active());
         verify(registryConnection, times(3)).get(any());
+    }
+
+    @Test
+    void testEventsAreQueriedByEveryFilterAndReadWithTheirVolume() {
+        when(registryConnection.get(new ViewString("/api/events?resolved=false&exchangeIds=1,2&categories=Sports"
+                        + "&tags=nfl,college+football&expiryTo=2026-11-01T00:00:00Z&minVolume24h=5000.0"
+                        + "&sortBy=volume_24h&sortOrder=desc&limit=30")))
+                .thenReturn(ByteBuffer.wrap(
+                        """
+                        [{"event_id": 7, "exchange_id": 1, "title": "A", "resolved": false,
+                          "expiry": "2026-10-30T12:00:00.000Z", "volume_24h": 12500.5},
+                         {"event_id": 8, "exchange_id": 2, "title": "B", "resolved": false, "volume_24h": null}]"""
+                                .getBytes()));
+
+        final java.util.List<Event> events = securityMaster.getEvents(new EventQuery(
+                java.util.List.of(1, 2),
+                java.util.List.of("Sports"),
+                java.util.List.of("nfl", "college football"),
+                java.time.Instant.parse("2026-11-01T00:00:00Z").toEpochMilli(),
+                5000,
+                EventQuery.Order.VOLUME,
+                30));
+
+        assertEquals(2, events.size());
+        assertEquals(12500.5, events.get(0).volume24h());
+        assertEquals(
+                java.time.Instant.parse("2026-10-30T12:00:00Z").toEpochMilli(),
+                events.get(0).expiry());
+        assertEquals(2, events.get(1).exchangeId());
+        assertEquals(0.0, events.get(1).volume24h());
+    }
+
+    @Test
+    void testAnUnfilteredEventQueryAsksOnlyForOpenEventsBySoonestExpiry() {
+        when(registryConnection.get(new ViewString("/api/events?resolved=false&sortBy=expiry&limit=10")))
+                .thenReturn(ByteBuffer.wrap("[]".getBytes()));
+        assertEquals(
+                0,
+                securityMaster
+                        .getEvents(new EventQuery(null, java.util.List.of(), null, 0, 0, EventQuery.Order.EXPIRY, 10))
+                        .size());
+    }
+
+    @Test
+    void testStreamsForEventsAreFetchedAHundredEventsARequest() {
+        when(registryConnection.get(any())).thenAnswer(invocation -> {
+            final String path = invocation.getArgument(0).toString();
+            final String[] events =
+                    path.substring(path.indexOf("eventIds=") + 9).split(",");
+            final StringBuilder json = new StringBuilder("[");
+            for (String event : events) {
+                for (String side : new String[] {"1", "2"}) {
+                    json.append(json.length() > 1 ? "," : "")
+                            .append("{\"stream_id\":")
+                            .append(event)
+                            .append(side)
+                            .append(",\"subject_kind\":\"LISTING\",\"event_id\":")
+                            .append(event)
+                            .append("}");
+                }
+            }
+            return ByteBuffer.wrap(json.append("]").toString().getBytes());
+        });
+        final int[] ids = new int[150];
+        for (int i = 0; i < ids.length; i++) {
+            ids[i] = i + 1;
+        }
+
+        final java.util.List<group.gnometrading.md.Stream> streams = securityMaster.getStreamsForEvents(ids);
+
+        assertEquals(300, streams.size());
+        assertEquals(1, streams.get(1).eventId());
+        verify(registryConnection, times(2)).get(any());
     }
 
     @Test

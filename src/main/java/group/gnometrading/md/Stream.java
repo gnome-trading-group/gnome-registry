@@ -6,7 +6,8 @@ import group.gnometrading.sm.EpochMillisDeserializer;
 
 /**
  * One thing collected from a source: a listing's book ({@code subjectKind} LISTING) or a vendor subject such as an
- * esports match. {@code listingId} and {@code eventId} are 0 when absent. {@code startsAt} and {@code endsAt} are epoch
+ * esports match. {@code eventId} is a vendor subject's event, or a listing's through its contract. {@code listingId}
+ * and {@code eventId} are 0 when absent. {@code startsAt} and {@code endsAt} are epoch
  * millis, 0 for a listing's stream, whose lifetime is the listing's. {@code resolvedRegion} is where the stream is
  * collected.
  */

@@ -115,6 +115,24 @@ describeDb('market-data sources and streams, against Postgres', () => {
     expect(match).toMatchObject({ source_code: 'PANDASCORE', subject_kind: 'MATCH', resolved_region: 'eu-west-1' });
   });
 
+  it('finds an event\'s streams, both sides of each contract and its vendor streams, and names the event on each', async () => {
+    await client.query(`INSERT INTO sm.event (event_id, title, exchange_id, native_event_id) VALUES (7, 'E', 1, 'E'), (8, 'F', 1, 'F')`);
+    await client.query(`INSERT INTO sm.event_contract (event_id, security_id, outcome_label) VALUES (7, 1, 'X'), (8, 2, 'Y')`);
+    await client.query(`INSERT INTO sm.listing (listing_id, exchange_id, security_id, exchange_security_id, active)
+      VALUES (502, 1, 2, 'OTHER:yes', true)`);
+    const vendor = JSON.parse((await withClient(new SourceHandler()).createOne(JSON.stringify(
+      { code: 'PANDASCORE', homeRegion: 'eu-west-1', adapter: 'PANDASCORE', families: ['esports'] }))).body);
+    await client.query(`INSERT INTO md.stream (source_id, subject_kind, native_subject_id, family, active, event_id)
+      VALUES ($1, 'MATCH', '12345', 'esports', true, 7)`, [vendor.source_id]);
+
+    const ofSeven = await getStreams({ eventIds: '7' });
+    expect(ofSeven.map((s: any) => s.native_subject_id).sort()).toEqual(['12345', 'MKT:no', 'MKT:yes']);
+    expect(ofSeven.every((s: any) => s.event_id === 7)).toBe(true);
+    expect((await getStreams({ eventIds: '7,8' }))).toHaveLength(4);
+    expect((await getStreams({ eventId: '8' })).map((s: any) => s.listing_id)).toEqual([502]);
+    expect(await getStreams({ eventIds: '' })).toEqual([]);
+  });
+
   it('lets a vendor source be edited but not a venue source\'s region', async () => {
     const sources = withClient(new SourceHandler());
     await expect(sources.modifyOne({ code: 'KALSHI' }, JSON.stringify({ homeRegion: 'eu-west-1' })))
