@@ -1,7 +1,7 @@
 import { isAutomaticActor, normalizeType, severityOf } from '../lambda/alerts/alert-types';
 import { sinksFor } from '../lambda/alerts/routes';
 import { deliveredEvent, deliverUnrecorded, fromAlarm, fromCostNotification } from '../lambda/alerts/alert-router';
-import { acknowledgedMessage, escape, firingMessage, resolvedMessage } from '../lambda/alerts/sinks/slack';
+import { acknowledgedMessage, escape, firingMessage, resolvedMessage, sendToSlack } from '../lambda/alerts/sinks/slack';
 import { eventFor } from '../lambda/alerts/sinks/incidentio';
 import { parseAlert } from '../lambda/alerts/alerts-ingest';
 import { AlertEvent, Delivery } from '../lambda/alerts/model';
@@ -174,6 +174,38 @@ describe('sinks', () => {
       .toBe('by mason@gnome.group  ·  Critical  ·  open 10m  ·  resolves when it clears  ·  prod');
     expect((message.attachments[0].blocks as any[])[1].text.text).toBe('> venue maintenance &lt;until 3pm&gt;');
     expect(eventFor(acked, 'https://controller').status).toBe('resolved');
+  });
+
+  describe('resolving an alert whose message can\'t be edited', () => {
+    const slackTarget = { token: 'xoxb', channel: 'C1', controllerUrl: 'https://controller', stage: 'dev' };
+    const calls: { method: string; body: any }[] = [];
+    const answer = (method: string) => (method === 'chat.update' ? { ok: false, error: updateError } : { ok: true, ts: '200.2' });
+    let updateError = '';
+    const realFetch = global.fetch;
+
+    beforeEach(() => {
+      calls.length = 0;
+      global.fetch = jest.fn(async (url: any, init: any) => {
+        const method = String(url).split('/').pop()!;
+        calls.push({ method, body: JSON.parse(init.body) });
+        return new Response(JSON.stringify(answer(method)), { status: 200 });
+      }) as any;
+    });
+    afterEach(() => { global.fetch = realFetch; });
+
+    it.each(['cant_update_message', 'message_not_found'])('posts it anew after %s, and keeps the new message', async (code) => {
+      updateError = code;
+      const ts = await sendToSlack(delivery({ status: 'RESOLVED', slackTs: '100.1' }), slackTarget);
+      expect(calls.map(c => c.method)).toEqual(['chat.update', 'chat.postMessage']);
+      expect(calls[1].body.text).toContain('Resolved');
+      expect(ts).toBe('200.2');
+    });
+
+    it('lets any other Slack error fail the delivery, so the next tick retries it', async () => {
+      updateError = 'ratelimited';
+      await expect(sendToSlack(delivery({ status: 'RESOLVED', slackTs: '100.1' }), slackTarget)).rejects.toThrow('ratelimited');
+      expect(calls.map(c => c.method)).toEqual(['chat.update']);
+    });
   });
 
   it('sends incident.io the key it deduplicates on and the runbook', () => {

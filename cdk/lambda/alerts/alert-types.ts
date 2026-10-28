@@ -86,6 +86,14 @@ export const ALERT_TYPES: Record<string, AlertType> = {
   // A strategy ending its own session; WARNING when it couldn't close everything it held before its time ran out.
   SESSION_EXITED: { severity: e => e.severity === 'WARNING' ? 'WARNING' : 'INFO', debounce: 1, aboutStopping: true },
   // A scheduled run's output feeds trading (a launcher rule reads it); whoever started a run by hand saw it fail.
+  // The collection reconciler (gnome-market-data), per shard or per source and region. It waits before raising them
+  // (a shard 5 min without a healthy task, streams 10 min not live or 5 min stale), so none debounces again. Market
+  // data collection is behind trading: research collection never pages. TODO(Phase 10): a production stream (a
+  // session's lease) stale or not live pages, once the reconciler labels alerts with priority.
+  COLLECTOR_SHARD_DOWN: { severity: 'ERROR', debounce: 1 },
+  STREAM_NOT_LIVE: { severity: 'WARNING', debounce: 1 },
+  STREAM_STALE: { severity: 'WARNING', debounce: 1 },
+  COLLECTION_BUDGET: { severity: 'ERROR', debounce: 1 },
   PIPELINE_FAILED: { severity: e => e.labels?.trigger === 'scheduled' ? 'ERROR' : 'INFO', debounce: 1 },
   CUSTOM: { severity: e => e.severity ?? 'WARNING', debounce: 1 },
 

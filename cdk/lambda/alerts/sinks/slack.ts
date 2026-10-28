@@ -110,6 +110,16 @@ export function resolvedMessage(d: Delivery, target: Pick<SlackTarget, 'stage'>,
   };
 }
 
+export class SlackApiError extends Error {
+  constructor(method: string, status: number, readonly code: string) {
+    super(`Slack ${method} failed: ${status} ${code}`);
+  }
+}
+
+// The alert's message can never be edited: it was deleted, or another Slack app posted it (Slack lets an app edit
+// only its own messages, so this follows replacing a stage's app). Retrying can't help, so a new message replaces it.
+const UNEDITABLE = new Set(['cant_update_message', 'message_not_found']);
+
 async function call(method: string, token: string, payload: unknown): Promise<any> {
   const res = await sendWithRetry(() => fetch(`https://slack.com/api/${method}`, {
     method: 'POST',
@@ -117,7 +127,7 @@ async function call(method: string, token: string, payload: unknown): Promise<an
     body: JSON.stringify(payload),
   }));
   const json = await res.json() as { ok: boolean; error?: string; ts?: string };
-  if (!res.ok || !json.ok) throw new Error(`Slack ${method} failed: ${res.status} ${json.error ?? ''}`);
+  if (!res.ok || !json.ok) throw new SlackApiError(method, res.status, json.error ?? '');
   return json;
 }
 
@@ -154,6 +164,12 @@ export async function sendToSlack(d: Delivery, target: SlackTarget, now = new Da
     const posted = await call('chat.postMessage', token, { channel, ...message });
     return posted.ts ?? null;
   }
-  await call('chat.update', token, { channel, ts: d.slackTs, ...message });
-  return d.slackTs;
+  try {
+    await call('chat.update', token, { channel, ts: d.slackTs, ...message });
+    return d.slackTs;
+  } catch (error) {
+    if (!(error instanceof SlackApiError && UNEDITABLE.has(error.code))) throw error;
+    const posted = await call('chat.postMessage', token, { channel, ...message });
+    return posted.ts ?? null;
+  }
 }

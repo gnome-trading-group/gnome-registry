@@ -72,6 +72,24 @@
       ],
       "url": "https://github.com/gnome-trading-group/gnome-registry/blob/main/docs/runbooks/alerts/CLOUDWATCH_ALARM.md"
     },
+    "COLLECTION_BUDGET": {
+      "summary": "Streams can't be placed because the source's market-data accounts have no connections left.",
+      "firstSteps": [
+        "The alert key is `COLLECTION_BUDGET:<source>`; the `unplaced` label counts the streams.",
+        "Open Market Data → Credentials and check the source's market-data accounts (ACTIVE, connection budget).",
+        "Decide whether to add an account or collect fewer streams."
+      ],
+      "url": "https://github.com/gnome-trading-group/gnome-registry/blob/main/docs/runbooks/alerts/COLLECTION_BUDGET.md"
+    },
+    "COLLECTOR_SHARD_DOWN": {
+      "summary": "A market-data collection shard has had no healthy task for 5 minutes.",
+      "firstSteps": [
+        "Open the shard on the controller's Market Data → Shards page (its id is in the alert key, `COLLECTOR_SHARD_DOWN:<shard>`).",
+        "Read its task logs there, or `/collection/shards-<region>` in CloudWatch.",
+        "Check the ECS service `shard-<shard>` in `CollectionCluster-<region>` for stopped-task reasons."
+      ],
+      "url": "https://github.com/gnome-trading-group/gnome-registry/blob/main/docs/runbooks/alerts/COLLECTOR_SHARD_DOWN.md"
+    },
     "COST_ANOMALY": {
       "summary": "AWS Cost Anomaly Detection saw a service's spend jump well above its usual pattern.",
       "firstSteps": [
@@ -474,6 +492,24 @@
         "Fix the cause, then disable the kill switch on Risk Policies."
       ],
       "url": "https://github.com/gnome-trading-group/gnome-registry/blob/main/docs/runbooks/alerts/STRATEGY_HALT.md"
+    },
+    "STREAM_NOT_LIVE": {
+      "summary": "Streams a rule wants have not been collected for 10 minutes, in one source and region.",
+      "firstSteps": [
+        "The alert key is `STREAM_NOT_LIVE:<source>:<region>`; its title counts the streams.",
+        "Open Market Data → Shards and filter to that source and region; look for streams not LIVE, or none placed.",
+        "If a shard is down too, follow COLLECTOR_SHARD_DOWN first."
+      ],
+      "url": "https://github.com/gnome-trading-group/gnome-registry/blob/main/docs/runbooks/alerts/STREAM_NOT_LIVE.md"
+    },
+    "STREAM_STALE": {
+      "summary": "Collected streams have been stale or quarantined for 5 minutes, in one source and region.",
+      "firstSteps": [
+        "The alert key is `STREAM_STALE:<source>:<region>`; its title counts the streams.",
+        "On Market Data → Shards, find the streams in STALE or QUARANTINED and the connections they're on.",
+        "Check whether the venue itself is degraded before changing anything."
+      ],
+      "url": "https://github.com/gnome-trading-group/gnome-registry/blob/main/docs/runbooks/alerts/STREAM_STALE.md"
     }
   },
   "cloudwatch": {
@@ -523,11 +559,11 @@
       "url": "https://github.com/gnome-trading-group/gnome-registry/blob/main/docs/runbooks/cloudwatch/Launcher.md"
     },
     "MarketData": {
-      "summary": "A market-data pipeline Lambda failed.",
+      "summary": "A market-data Lambda failed, or the collection reconciler keeps failing.",
       "firstSteps": [
         "Open the alarm to see which function.",
         "Read its CloudWatch logs.",
-        "Check Market Data → Gaps / Transform Jobs in the controller."
+        "For the reconciler (`MarketData--ReconcilerLambda-…`), check Market Data → Shards still updates."
       ],
       "url": "https://github.com/gnome-trading-group/gnome-registry/blob/main/docs/runbooks/cloudwatch/MarketData.md"
     },
