@@ -264,6 +264,42 @@ describeDb('alerts against Postgres', () => {
     expect(retried.delivery.sinks).toEqual(['slack']);
   });
 
+  it('an alarm that fires again before its resolve went out drops the old notification, so nothing is owed for good', async () => {
+    const alarm = (action: 'FIRING' | 'RESOLVED', when: Date): AlertEvent => ({
+      action, key: 'cw:arn:alarm', type: 'CLOUDWATCH_ALARM', source: 'cloudwatch', severity: 'WARNING',
+      title: 'Classifier--WorkerHealth-ClosureChecksSkipped-Warning', stateAt: when.toISOString(),
+    });
+    const fired = await record(client, alarm('FIRING', at(0)), at(0)) as Extract<RecordResult, { notify: true }>;
+    for (const sink of fired.delivery.sinks) await markDelivered(client, fired.delivery.alertId!, sink, 'ts-1');
+    const resolved = await record(client, alarm('RESOLVED', at(1)), at(1)) as Extract<RecordResult, { notify: true }>;
+    expect(resolved.notify).toBe(true);
+    // Slack refused the resolve, so it's still owed when the alarm fires again.
+    const again = await record(client, alarm('FIRING', at(2)), at(2)) as Extract<RecordResult, { notify: true }>;
+    expect(again.notify).toBe(true);
+    expect(again.delivery.alertId).not.toBe(fired.delivery.alertId);
+    for (const sink of again.delivery.sinks) await markDelivered(client, again.delivery.alertId!, sink, 'ts-2');
+
+    expect((await detect(client, at(5))).filter(e => e.action === 'REDELIVER')).toEqual([]);
+    const owed = (await client.query(`SELECT alert_id FROM alert.alert WHERE pending_sinks <> '{}'`)).rows;
+    expect(owed).toEqual([]);
+  });
+
+  it('a newer alert still owed a sink keeps being retried', async () => {
+    const alarm = (action: 'FIRING' | 'RESOLVED', when: Date): AlertEvent => ({
+      action, key: 'cw:arn:alarm', type: 'CLOUDWATCH_ALARM', source: 'cloudwatch', severity: 'WARNING',
+      title: 'Classifier--WorkerHealth-ClosureChecksSkipped-Warning', stateAt: when.toISOString(),
+    });
+    const fired = await record(client, alarm('FIRING', at(0)), at(0)) as Extract<RecordResult, { notify: true }>;
+    for (const sink of fired.delivery.sinks) await markDelivered(client, fired.delivery.alertId!, sink, 'ts-1');
+    await record(client, alarm('RESOLVED', at(1)), at(1));
+    const again = await record(client, alarm('FIRING', at(2)), at(2)) as Extract<RecordResult, { notify: true }>;
+
+    const redeliver = (await detect(client, at(5))).find(e => e.action === 'REDELIVER')!;
+    const retried = await record(client, redeliver, at(5)) as Extract<RecordResult, { notify: true }>;
+    expect(retried.delivery.alertId).toBe(again.delivery.alertId);
+    expect(retried.delivery.status).toBe('FIRING');
+  });
+
   it('reported events close quietly after a day; unknown types are kept as CUSTOM', async () => {
     await record(client, ingest({ type: 'SOMETHING_NEW', severity: 'CRITICAL' }), t0);
     const row = (await client.query('SELECT type, severity, labels FROM alert.alert')).rows[0];

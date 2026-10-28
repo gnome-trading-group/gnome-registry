@@ -51,6 +51,17 @@ export async function detect(client: PoolClient, now: Date): Promise<AlertEvent[
       }
     }
 
+    // An alert that fired again before an older notification of the same key went out supersedes it: the new alert
+    // has its own message, and a redelivery (looked up by key) would only ever find the new one, so the old row's
+    // owed sinks are dropped rather than left to hold the delivery backlog up for good.
+    const superseded = (await client.query(
+      `UPDATE alert.alert a SET pending_sinks = '{}'
+       WHERE pending_sinks <> '{}' AND EXISTS (SELECT 1 FROM alert.alert b WHERE b.key = a.key AND b.alert_id > a.alert_id)
+       RETURNING alert_id, key`)).rows;
+    for (const row of superseded) {
+      console.log(`Dropped the owed notifications of alert ${row.alert_id} (${row.key}): a newer alert superseded it`);
+    }
+
     const undelivered = (await client.query(
       `SELECT DISTINCT ON (key) key, type, source FROM alert.alert
        WHERE pending_sinks <> '{}' AND notified_at < $1 ORDER BY key, alert_id DESC`,
