@@ -489,6 +489,21 @@ class SecurityMasterTest {
     }
 
     @Test
+    void testEventsByIdAreFetchedResolvedOrNot() {
+        when(registryConnection.get(new ViewString("/api/events?eventIds=7,8")))
+                .thenReturn(ByteBuffer.wrap(
+                        """
+                        [{"event_id": 7, "resolved": true, "resolved_at": "2026-10-28T12:00:00.000Z"},
+                         {"event_id": 8, "resolved": false}]"""
+                                .getBytes()));
+
+        final java.util.List<Event> events = securityMaster.getEventsByIds(new int[] {7, 8});
+
+        assertTrue(events.get(0).resolved());
+        assertFalse(events.get(1).resolved());
+    }
+
+    @Test
     void testStreamsForEventsAreFetchedAHundredEventsARequest() {
         when(registryConnection.get(any())).thenAnswer(invocation -> {
             final String path = invocation.getArgument(0).toString();

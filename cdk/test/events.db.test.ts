@@ -51,6 +51,8 @@ describeDb('events by volume, against Postgres', () => {
     expect(await ids({ expiryFrom: '2026-11-02T00:00:00Z', expiryTo: '2026-12-01T00:00:00Z' })).toEqual([3, 4]);
     expect(await ids({ minVolume24h: '10000' })).toEqual([3, 4]);
     expect(await ids({ exchangeIds: '' })).toEqual([]);
+    expect(await ids({ eventIds: '2,3,99' })).toEqual([2, 3]);
+    expect(await ids({ eventIds: '2,3', resolved: 'true' })).toEqual([3]);
   });
 
   it('sorts by volume either way with events lacking one last, and pages stably', async () => {

@@ -357,6 +357,23 @@ public final class SecurityMaster {
     }
 
     /**
+     * These events as the registry has them now, resolved or not, in requests of {@link #EVENTS_PER_REQUEST}; missing
+     * ids are left out. Not cached: the collection reconciler drops events from its rules once they resolve.
+     */
+    public List<Event> getEventsByIds(final int[] eventIds) {
+        final List<Event> events = new ArrayList<>(eventIds.length);
+        for (int from = 0; from < eventIds.length; from += EVENTS_PER_REQUEST) {
+            final StringBuilder path = new StringBuilder(EVENT_ENDPOINT).append("eventIds=");
+            final int to = Math.min(eventIds.length, from + EVENTS_PER_REQUEST);
+            for (int i = from; i < to; i++) {
+                path.append(i == from ? "" : ",").append(eventIds[i]);
+            }
+            events.addAll(List.of(fetch(new ViewString(path.toString()), Event[].class)));
+        }
+        return events;
+    }
+
+    /**
      * Every stream of these events, as the registry has them now: both sides of each contract's listings, and vendor
      * streams of the event; each names its event. In requests of {@link #EVENTS_PER_REQUEST} events. Not cached, as
      * {@link #getStreams(int[])}.

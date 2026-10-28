@@ -70,6 +70,10 @@ export class EventHandler extends ResourceHandler {
     if (params?.tag) {
       query += ` AND '${params.tag.replace(/'/g, "''")}' = ANY(tags)`;
     }
+    if (params?.eventIds !== undefined) {
+      const ids = parseIdList(params.eventIds);
+      query += ids.length > 0 ? ` AND event_id IN (${ids.join(',')})` : ' AND FALSE';
+    }
     if (params?.exchangeIds !== undefined) {
       const ids = parseIdList(params.exchangeIds);
       query += ids.length > 0 ? ` AND exchange_id IN (${ids.join(',')})` : ' AND FALSE';
