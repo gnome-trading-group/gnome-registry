@@ -1,6 +1,7 @@
 import { Pool, PoolClient } from 'pg';
 import { connectExclusive, LOCK_TIMEOUT_MS, release } from './ledger-db';
 import { ResourceHandler } from '../lambda/endpoints/base';
+import { ContractRelationshipHandler } from '../lambda/endpoints/contract-relationships';
 import { EventHandler } from '../lambda/endpoints/events';
 import { ExchangeHandler } from '../lambda/endpoints/exchanges';
 import { ListingHandler } from '../lambda/endpoints/listings';
@@ -135,6 +136,33 @@ describeDb('resource handlers round-trip awkward values, against Postgres', () =
       .toMatchObject({ session_id: 's-2', strategy_id: strategy.strategy_id, parameters: {}, enabled: true });
     expect(await ok(policies.get({ forStrategy: String(strategy.strategy_id), forSession: 's-2',
       forListings: String(listingId) }))).toHaveLength(1);
+  });
+
+  it('contract relationships: a classifier write never replaces a manual row', async () => {
+    const security = async (symbol: string) => (await ok(on(new SecurityHandler()).createOne(JSON.stringify({
+      symbol, description: symbol, type: 1,
+    })))).security_id;
+    const [a, b, c] = [await security('a'), await security('b'), await security('c')];
+    const relationships = on(new ContractRelationshipHandler());
+    const rel = (securityIdA: number, securityIdB: number, relationshipType: string, method: string) => ({
+      securityIdA, securityIdB, relationshipType, confidence: 0.9, method,
+    });
+
+    await ok(relationships.createOne(JSON.stringify(rel(a, b, 'EQUIVALENT', 'manual'))));
+    await ok(relationships.createOne(JSON.stringify(rel(a, c, 'IMPLIES', 'embedding'))));
+    const bulk = await ok(relationships.createMany(JSON.stringify([
+      rel(a, b, 'IMPLIES', 'embedding'),
+      rel(a, c, 'EQUIVALENT', 'embedding'),
+    ])));
+    expect(bulk).toMatchObject([
+      { security_id_b: b, relationship_type: 'EQUIVALENT', method: 'manual' },
+      { security_id_b: c, relationship_type: 'EQUIVALENT', method: 'embedding' },
+    ]);
+
+    expect(await ok(relationships.createOne(JSON.stringify(rel(a, b, 'IMPLIES', 'manual')))))
+      .toMatchObject({ relationship_type: 'IMPLIES', method: 'manual' });
+    expect(await ok(relationships.createOne(JSON.stringify(rel(a, c, 'IMPLIES', 'manual')))))
+      .toMatchObject({ relationship_type: 'IMPLIES', method: 'manual' });
   });
 
   it('refuses a value Postgres cannot read as the column type', async () => {

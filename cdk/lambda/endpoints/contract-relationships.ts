@@ -3,7 +3,7 @@ import { ResourceHandler, ValidationError } from './base';
 import { join, raw, set, Sql, sql, where } from './sql';
 import { ICreateContractRelationship, IDeleteContractRelationship } from '../types';
 
-class ContractRelationshipHandler extends ResourceHandler {
+export class ContractRelationshipHandler extends ResourceHandler {
   allowedSortColumns(): string[] {
     return ['relationship_id', 'security_id_a', 'security_id_b', 'relationship_type', 'confidence', 'method', 'date_created'];
   }
@@ -15,15 +15,18 @@ class ContractRelationshipHandler extends ResourceHandler {
 
   generateInsertQuery(body: string): Sql {
     const rel = JSON.parse(body) as ICreateContractRelationship;
+    // A manual row is a person's call and only another manual write replaces it. The conflict still updates (to the
+    // same values) rather than skipping, so the insert returns a row and one kept pair doesn't fail a bulk create.
+    const keep = raw("contract_relationship.method = 'manual' AND EXCLUDED.method <> 'manual'");
     return sql`
       INSERT INTO sm.contract_relationship
         (security_id_a, security_id_b, relationship_type, confidence, method)
       VALUES
         (${rel.securityIdA}, ${rel.securityIdB}, ${rel.relationshipType}, ${rel.confidence}, ${rel.method})
       ON CONFLICT (security_id_a, security_id_b) DO UPDATE SET
-        relationship_type = EXCLUDED.relationship_type,
-        confidence = EXCLUDED.confidence,
-        method = EXCLUDED.method
+        relationship_type = CASE WHEN ${keep} THEN contract_relationship.relationship_type ELSE EXCLUDED.relationship_type END,
+        confidence = CASE WHEN ${keep} THEN contract_relationship.confidence ELSE EXCLUDED.confidence END,
+        method = CASE WHEN ${keep} THEN contract_relationship.method ELSE EXCLUDED.method END
       RETURNING *`;
   }
 
