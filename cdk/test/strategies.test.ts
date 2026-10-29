@@ -4,31 +4,36 @@ const handler = new StrategyHandler();
 
 describe('strategy archiving', () => {
   it('filters by archived', () => {
-    expect(handler.generateSelectQuery({ archived: 'false' })).toContain('AND archived=false');
-    expect(handler.generateSelectQuery({ archived: 'true' })).toContain('AND archived=true');
-    expect(handler.generateSelectQuery({ archived: 'True' })).toContain('AND archived=true');
+    for (const [param, value] of [['false', false], ['true', true], ['True', true]] as const) {
+      const query = handler.generateSelectQuery({ archived: param });
+      expect(query.text).toContain('archived = $1');
+      expect(query.values).toEqual([value]);
+    }
   });
 
-  it('ignores anything but true/false so nothing else reaches the SQL', () => {
-    expect(handler.generateSelectQuery({ archived: '1 OR 1=1' })).not.toContain('archived');
+  it('ignores anything but true/false', () => {
+    expect(handler.generateSelectQuery({ archived: '1 OR 1=1' }).text).not.toContain('archived');
   });
 
   it('creates strategies unarchived unless asked', () => {
-    expect(handler.generateInsertQuery(JSON.stringify({ name: 'mm' }))).toContain("'mm', null, false,");
-    expect(handler.generateInsertQuery(JSON.stringify({ name: 'mm', archived: true }))).toContain("'mm', null, true,");
+    expect(handler.generateInsertQuery(JSON.stringify({ name: 'mm' })).values).toEqual(['mm', null, false, null]);
+    expect(handler.generateInsertQuery(JSON.stringify({ name: 'mm', archived: true })).values)
+      .toEqual(['mm', null, true, null]);
   });
 
   it('archives and unarchives on update', () => {
-    expect(handler.generateModifyQuery({ strategy_id: 7 }, JSON.stringify({ archived: true }))).toContain('archived=true');
-    expect(handler.generateModifyQuery({ strategy_id: 7 }, JSON.stringify({ archived: false }))).toContain('archived=false');
-    expect(handler.generateModifyQuery({ strategy_id: 7 }, JSON.stringify({ archived: 'yes' }))).not.toContain('archived');
+    const archive = handler.generateModifyQuery({ strategy_id: 7 }, JSON.stringify({ archived: true }));
+    expect(archive.text).toContain('archived = $1');
+    expect(archive.values).toEqual([true, 7]);
+    expect(handler.generateModifyQuery({ strategy_id: 7 }, JSON.stringify({ archived: false })).values).toEqual([false, 7]);
+    expect(handler.generateModifyQuery({ strategy_id: 7 }, JSON.stringify({ archived: 'yes' })).text).not.toContain('archived');
   });
 });
 
 describe('strategy status removal', () => {
   it('no longer reads or writes a status column', () => {
-    expect(handler.generateSelectQuery({ status: '1' } as never)).not.toContain('status');
-    expect(handler.generateInsertQuery(JSON.stringify({ name: 'mm', status: 1 }))).not.toContain('status');
-    expect(handler.generateModifyQuery({ strategy_id: 7 }, JSON.stringify({ status: 1, name: 'x' }))).not.toContain('status');
+    expect(handler.generateSelectQuery({ status: '1' } as never).text).not.toContain('status');
+    expect(handler.generateInsertQuery(JSON.stringify({ name: 'mm', status: 1 })).text).not.toContain('status');
+    expect(handler.generateModifyQuery({ strategy_id: 7 }, JSON.stringify({ status: 1, name: 'x' })).text).not.toContain('status');
   });
 });

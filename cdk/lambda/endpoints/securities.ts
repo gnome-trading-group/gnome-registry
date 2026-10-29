@@ -1,5 +1,6 @@
 import { APIGatewayProxyEvent, APIGatewayProxyEventQueryStringParameters } from 'aws-lambda';
 import { parseIdList, ResourceHandler } from './base';
+import { anyId, NOW, raw, set, Sql, sql, where } from './sql';
 import { ICreateSecurity, IDeleteSecurity } from '../types';
 
 function currencyColumns(alias: string): string {
@@ -17,108 +18,83 @@ export class SecurityHandler extends ResourceHandler {
     return ['security_id', 'symbol', 'type', 'asset_class', 'active', 'date_created', 'date_modified'];
   }
 
-  generateDeleteQuery(body: string): string {
+  generateDeleteQuery(body: string): Sql {
     const security = JSON.parse(body) as IDeleteSecurity;
-    return `
-      DELETE FROM sm.security
-      WHERE security_id = ${security.securityId}
-      RETURNING *;
-    `;
+    return sql`DELETE FROM sm.security WHERE security_id = ${security.securityId} RETURNING *`;
   }
 
-  generateInsertQuery(body: string): string {
+  generateInsertQuery(body: string): Sql {
     const s = JSON.parse(body) as ICreateSecurity;
-    return `
+    return sql`
       WITH ins AS (
         INSERT INTO sm.security (
           symbol, description, type, contract_type, asset_class,
           base_currency_id, quote_currency_id, settle_currency_id,
           inverse, is_quanto, expiry, strike_price, active, underlying_security_id
         ) VALUES (
-          '${s.symbol}',
-          ${s.description ? `'${s.description}'` : 'null'},
+          ${s.symbol},
+          ${s.description || null},
           ${s.type},
           ${s.contractType ?? 0},
           ${s.assetClass ?? 0},
-          ${s.baseCurrencyId ?? 'null'},
-          ${s.quoteCurrencyId ?? 'null'},
-          ${s.settleCurrencyId ?? 'null'},
+          ${s.baseCurrencyId ?? null},
+          ${s.quoteCurrencyId ?? null},
+          ${s.settleCurrencyId ?? null},
           ${s.inverse ?? false},
           ${s.quanto ?? false},
-          ${s.expiry != null ? `'${s.expiry}'` : 'null'},
-          ${s.strikePrice ?? 'null'},
+          ${s.expiry ?? null},
+          ${s.strikePrice ?? null},
           ${s.active ?? true},
-          ${s.underlyingSecurityId ?? 'null'}
+          ${s.underlyingSecurityId ?? null}
         )
         RETURNING *
       )
-      SELECT ins.*,${currencyColumns('ins')}
-      FROM ins
-    `;
+      SELECT ins.*,${raw(currencyColumns('ins'))}
+      FROM ins`;
   }
 
-  generateSelectQuery(params: APIGatewayProxyEventQueryStringParameters | null): string {
-    let query = `
-      SELECT s.*,${currencyColumns('s')}
-      FROM sm.security s
-      WHERE 1=1`;
-
-    if (params?.securityId) {
-      query += ` AND s.security_id=${params.securityId}`;
-    }
-    if (params?.securityIds !== undefined) {
-      const ids = parseIdList(params.securityIds);
-      query += ids.length > 0 ? ` AND s.security_id IN (${ids.join(',')})` : ' AND FALSE';
-    }
-    if (params?.symbol) {
-      query += ` AND s.symbol='${params.symbol}'`;
-    }
-    if (params?.type) {
-      query += ` AND s.type=${params.type}`;
-    }
-    if (params?.active) {
-      query += ` AND s.active=${params.active}`;
-    }
-    if (params?.contractType) {
-      query += ` AND s.contract_type=${params.contractType}`;
-    }
-    if (params?.assetClass) {
-      query += ` AND s.asset_class=${params.assetClass}`;
-    }
-    if (params?.search) {
-      const escaped = params.search.replace(/'/g, "''");
-      query += ` AND (s.symbol ILIKE '%${escaped}%' OR s.description ILIKE '%${escaped}%')`;
-    }
-    return query;
+  generateSelectQuery(params: APIGatewayProxyEventQueryStringParameters | null): Sql {
+    const pattern = `%${params?.search}%`;
+    return sql`
+      SELECT s.*,${raw(currencyColumns('s'))}
+      FROM sm.security s${where([
+        params?.securityId && sql`s.security_id = ${params.securityId}`,
+        params?.securityIds !== undefined && anyId('s.security_id', parseIdList(params.securityIds)),
+        params?.symbol && sql`s.symbol = ${params.symbol}`,
+        params?.type && sql`s.type = ${params.type}`,
+        params?.active && sql`s.active = ${params.active}`,
+        params?.contractType && sql`s.contract_type = ${params.contractType}`,
+        params?.assetClass && sql`s.asset_class = ${params.assetClass}`,
+        params?.search && sql`(s.symbol ILIKE ${pattern} OR s.description ILIKE ${pattern})`,
+      ])}`;
   }
 
-  generateModifyQuery(row: any, body: string): string {
+  generateModifyQuery(row: any, body: string): Sql {
     const s = JSON.parse(body) as ICreateSecurity;
-    const updates: string[] = [];
-    if (s.description !== undefined) updates.push(`description=${s.description ? `'${s.description}'` : 'null'}`);
-    if (s.symbol) updates.push(`symbol='${s.symbol}'`);
-    if (s.type != null) updates.push(`type=${s.type}`);
-    if (s.contractType != null) updates.push(`contract_type=${s.contractType}`);
-    if (s.assetClass != null) updates.push(`asset_class=${s.assetClass}`);
-    if (s.baseCurrencyId !== undefined) updates.push(`base_currency_id=${s.baseCurrencyId ?? 'null'}`);
-    if (s.quoteCurrencyId !== undefined) updates.push(`quote_currency_id=${s.quoteCurrencyId ?? 'null'}`);
-    if (s.settleCurrencyId !== undefined) updates.push(`settle_currency_id=${s.settleCurrencyId ?? 'null'}`);
-    if (s.inverse != null) updates.push(`inverse=${s.inverse}`);
-    if (s.quanto != null) updates.push(`is_quanto=${s.quanto}`);
-    if (s.expiry !== undefined) updates.push(`expiry=${s.expiry != null ? `'${s.expiry}'` : 'null'}`);
-    if (s.strikePrice !== undefined) updates.push(`strike_price=${s.strikePrice ?? 'null'}`);
-    if (s.active != null) updates.push(`active=${s.active}`);
-    if (s.underlyingSecurityId !== undefined) updates.push(`underlying_security_id=${s.underlyingSecurityId ?? 'null'}`);
-    updates.push(`date_modified=NOW()`);
-    return `
+    return sql`
       WITH upd AS (
-        UPDATE sm.security SET ${updates.join(', ')}
-        WHERE security_id=${row['security_id']}
+        UPDATE sm.security SET ${set({
+          description: s.description === undefined ? undefined : s.description || null,
+          symbol: s.symbol || undefined,
+          type: s.type ?? undefined,
+          contract_type: s.contractType ?? undefined,
+          asset_class: s.assetClass ?? undefined,
+          base_currency_id: s.baseCurrencyId,
+          quote_currency_id: s.quoteCurrencyId,
+          settle_currency_id: s.settleCurrencyId,
+          inverse: s.inverse ?? undefined,
+          is_quanto: s.quanto ?? undefined,
+          expiry: s.expiry,
+          strike_price: s.strikePrice,
+          active: s.active ?? undefined,
+          underlying_security_id: s.underlyingSecurityId,
+          date_modified: NOW,
+        })}
+        WHERE security_id = ${row['security_id']}
         RETURNING *
       )
-      SELECT upd.*,${currencyColumns('upd')}
-      FROM upd
-    `;
+      SELECT upd.*,${raw(currencyColumns('upd'))}
+      FROM upd`;
   }
 }
 

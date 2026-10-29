@@ -75,10 +75,12 @@ synth step, so run `npm test` yourself before handing off.
 - The API stack must stay under 450 CloudFormation resources (test-enforced; the hard limit is 500). Integrations
   use `scopePermissionToMethod: false` for this reason. Don't merge unrelated routes into one Lambda just to save
   resources; give a new resource its own Lambda.
-- SQL: older `ResourceHandler` endpoints (strategy-sessions, strategies, exchanges, listings) build SQL by
-  interpolating query params and body fields. Callers must validate what they pass; these are internal routes, so
-  match each file's existing style rather than rewriting it. Newer code (ledger, treasury) uses `$n` parameters;
-  prefer that for new queries.
+- SQL: never interpolate a value into query text. `ResourceHandler`'s `generate*Query` methods return `Sql`
+  (pg's `{ text, values }`), built with the helpers in `cdk/lambda/endpoints/sql.ts`: the ``sql`...` `` tag turns
+  values into `$n` placeholders and composes fragments; `where()`, `set()` and `anyId()` cover optional filters,
+  partial updates and id lists, and `raw()` is only for identifiers or keywords from code. Other code (ledger,
+  treasury) passes `client.query(text, values)` directly. Postgres input errors (22P02, 22003, 22007, 22008) become
+  400s in `ResourceHandler`. ILIKE searches bind the whole pattern; `%`, `_` and `\` in a search are still wildcards.
 - Migrations: add a new `NNN_name.sql` with the next number; never edit an applied one. Each file runs in one
   transaction (5-minute Lambda timeout). They are not applied on deploy: the `DatabaseInitLambda` must be invoked by
   hand after a release, dev first, then prod. If a migration drops something old clients still read, sequence it

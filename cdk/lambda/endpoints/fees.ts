@@ -2,6 +2,7 @@ import { APIGatewayProxyEvent, APIGatewayProxyEventQueryStringParameters } from 
 import { parseIdList, ResourceHandler, UNKNOWN_ACTOR, ValidationError } from './base';
 import { validateDefinition } from '../fees/definition';
 import { loadTimelines } from '../fees/timeline';
+import { Sql, sql, where } from './sql';
 
 // Fee schedules (sm.fee_schedule). Writes are append-only: a venue change is a row effective from when it happened,
 // and a fix is a row with the effective_from of the row it corrects (the later recorded_at wins). Reads resolve a
@@ -37,8 +38,6 @@ interface ICreateFeeSchedule {
   sourceRef?: string;
 }
 
-const quote = (value: string) => `'${value.replace(/'/g, "''")}'`;
-
 function optionalKey(name: string, value: unknown): string | null {
   if (value == null) return null;
   if (typeof value !== 'string' || value.trim() === '') throw new ValidationError(`${name} must be a non-empty string`);
@@ -61,18 +60,18 @@ export class FeeScheduleHandler extends ResourceHandler {
     return this.createResponse(200, listingIds.map((listingId) => ({ listingId, timeline: timelines.get(listingId) })));
   }
 
-  generateSelectQuery(params: APIGatewayProxyEventQueryStringParameters | null): string {
-    let where = '1=1';
-    if (params?.exchangeId) where += ` AND exchange_id=${optionalId('exchangeId', Number(params.exchangeId))}`;
-    if (params?.feeGroup) where += ` AND fee_group=${quote(params.feeGroup)}`;
-    if (params?.feeEvent) where += ` AND fee_event=${quote(params.feeEvent)}`;
-    if (params?.scopeListingId) where += ` AND listing_id=${optionalId('scopeListingId', Number(params.scopeListingId))}`;
-    return `SELECT * FROM sm.fee_schedule WHERE ${where} ORDER BY effective_from DESC, recorded_at DESC`;
+  generateSelectQuery(params: APIGatewayProxyEventQueryStringParameters | null): Sql {
+    return sql`SELECT * FROM sm.fee_schedule${where([
+      params?.exchangeId && sql`exchange_id = ${optionalId('exchangeId', Number(params.exchangeId))}`,
+      params?.feeGroup && sql`fee_group = ${params.feeGroup}`,
+      params?.feeEvent && sql`fee_event = ${params.feeEvent}`,
+      params?.scopeListingId && sql`listing_id = ${optionalId('scopeListingId', Number(params.scopeListingId))}`,
+    ])} ORDER BY effective_from DESC, recorded_at DESC`;
   }
 
   // A row names the exchange, optionally narrowed to one fee group or fee event, or names a listing (which implies
   // its exchange).
-  generateInsertQuery(body: string): string {
+  generateInsertQuery(body: string): Sql {
     const s = JSON.parse(body) as ICreateFeeSchedule;
     const exchangeId = optionalId('exchangeId', s.exchangeId);
     const listingId = optionalId('listingId', s.listingId);
@@ -88,24 +87,22 @@ export class FeeScheduleHandler extends ResourceHandler {
     const effectiveFrom = isoTimestamp('effectiveFrom', s.effectiveFrom);
     const definition = s.definition === null ? null : validateDefinition(s.definition);
     if (!SOURCES.has(s.source)) throw new ValidationError(`source must be one of ${[...SOURCES].join(', ')}`);
-    const exchange = exchangeId !== null ? String(exchangeId) : `(SELECT exchange_id FROM sm.listing WHERE listing_id=${listingId})`;
-    const text = (value: string | null) => (value === null ? 'NULL' : quote(value));
-    const actor = this.audit && this.audit.actor !== UNKNOWN_ACTOR ? quote(this.audit.actor) : 'NULL';
-    return `
+    const exchange = exchangeId !== null ? exchangeId : sql`(SELECT exchange_id FROM sm.listing WHERE listing_id = ${listingId})`;
+    const actor = this.audit && this.audit.actor !== UNKNOWN_ACTOR ? this.audit.actor : null;
+    return sql`
       INSERT INTO sm.fee_schedule (exchange_id, fee_group, fee_event, listing_id, effective_from, definition, source,
         source_ref, actor)
-      VALUES (${exchange}, ${text(feeGroup)}, ${text(feeEvent)}, ${listingId ?? 'NULL'}, '${effectiveFrom}',
-        ${definition === null ? 'NULL' : `${quote(JSON.stringify(definition))}::jsonb`}, '${s.source}',
-        ${s.sourceRef == null ? 'NULL' : quote(String(s.sourceRef))}, ${actor})
-      RETURNING *;
-    `;
+      VALUES (${exchange}, ${feeGroup}, ${feeEvent}, ${listingId}, ${effectiveFrom},
+        ${definition === null ? null : JSON.stringify(definition)}::jsonb, ${s.source},
+        ${s.sourceRef == null ? null : String(s.sourceRef)}, ${actor})
+      RETURNING *`;
   }
 
-  generateDeleteQuery(_body: string): string {
+  generateDeleteQuery(_body: string): Sql {
     throw new ValidationError('fee schedules are append-only: record a correction with the same effectiveFrom');
   }
 
-  generateModifyQuery(_row: any, _body: string): string {
+  generateModifyQuery(_row: any, _body: string): Sql {
     throw new ValidationError('fee schedules are append-only: record a correction with the same effectiveFrom');
   }
 }

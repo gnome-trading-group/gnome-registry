@@ -1,5 +1,6 @@
 import { APIGatewayProxyEvent, APIGatewayProxyEventQueryStringParameters } from 'aws-lambda';
 import { ResourceHandler, ValidationError } from './base';
+import { NOW, set, Sql, sql, where } from './sql';
 
 // A policy applies to exactly the ids it carries: none is global, a strategy covers every session of it, a listing
 // covers every strategy on it, an exchange covers every listing on it, and a session narrows a strategy to one
@@ -73,10 +74,10 @@ function optionalId(name: string, value: unknown): number | null {
   return value;
 }
 
-function idList(name: string, value: string): string {
+function idList(name: string, value: string): number[] {
   const ids = value.split(',').map(id => optionalId(name, Number(id)));
   if (ids.length === 0 || ids.some(id => id === null)) throw new ValidationError(`${name} must list positive integers`);
-  return ids.join(',');
+  return ids as number[];
 }
 
 function optionalSessionId(value: unknown): string | null {
@@ -87,7 +88,7 @@ function optionalSessionId(value: unknown): string | null {
   return value;
 }
 
-class RiskPolicyHandler extends ResourceHandler {
+export class RiskPolicyHandler extends ResourceHandler {
   auditWrites(): boolean {
     return true;
   }
@@ -112,83 +113,64 @@ class RiskPolicyHandler extends ResourceHandler {
     }
   }
 
-  generateSelectQuery(params: APIGatewayProxyEventQueryStringParameters | null): string {
-    let query = 'SELECT * FROM risk.policy WHERE 1=1';
-    if (params?.policyId) query += ` AND policy_id=${optionalId('policyId', Number(params.policyId))}`;
-    if (params?.strategyId) query += ` AND strategy_id=${optionalId('strategyId', Number(params.strategyId))}`;
-    if (params?.listingId) query += ` AND listing_id=${optionalId('listingId', Number(params.listingId))}`;
-    if (params?.exchangeId) query += ` AND exchange_id=${optionalId('exchangeId', Number(params.exchangeId))}`;
-    // What one running OMS needs: rows for every strategy or its own, and for no session or its own. Without
-    // these an OMS would load every session's and strategy's rows and hit its policy cap fleet-wide.
-    if (params?.forStrategy) {
-      query += ` AND (strategy_id IS NULL OR strategy_id=${optionalId('forStrategy', Number(params.forStrategy))})`;
-    }
-    if (params?.forSession === 'none') {
-      query += ' AND session_id IS NULL';
-    } else if (params?.forSession) {
-      query += ` AND (session_id IS NULL OR session_id='${optionalSessionId(params.forSession)}')`;
-    }
-    // Rows naming no strategy reach every session, so a session also narrows them to the listings and exchanges it
-    // trades; otherwise the firm's listing and exchange rows together would overflow every OMS's policy cap.
-    if (params?.forListings) {
-      query += ` AND (listing_id IS NULL OR listing_id IN (${idList('forListings', params.forListings)}))`;
-    }
-    if (params?.forExchanges) {
-      query += ` AND (exchange_id IS NULL OR exchange_id IN (${idList('forExchanges', params.forExchanges)}))`;
-    }
-    if (params?.enabled === 'true' || params?.enabled === 'false') query += ` AND enabled=${params.enabled}`;
-    // The OMS reads policies into a fixed-size array, so a stable order keeps refreshes deterministic.
-    query += ' ORDER BY policy_id';
-    return query;
+  // The OMS reads policies into a fixed-size array, so the stable order keeps refreshes deterministic.
+  generateSelectQuery(params: APIGatewayProxyEventQueryStringParameters | null): Sql {
+    return sql`SELECT * FROM risk.policy${where([
+      params?.policyId && sql`policy_id = ${optionalId('policyId', Number(params.policyId))}`,
+      params?.strategyId && sql`strategy_id = ${optionalId('strategyId', Number(params.strategyId))}`,
+      params?.listingId && sql`listing_id = ${optionalId('listingId', Number(params.listingId))}`,
+      params?.exchangeId && sql`exchange_id = ${optionalId('exchangeId', Number(params.exchangeId))}`,
+      // What one running OMS needs: rows for every strategy or its own, and for no session or its own. Without
+      // these an OMS would load every session's and strategy's rows and hit its policy cap fleet-wide.
+      params?.forStrategy
+        && sql`(strategy_id IS NULL OR strategy_id = ${optionalId('forStrategy', Number(params.forStrategy))})`,
+      params?.forSession === 'none'
+        ? sql`session_id IS NULL`
+        : params?.forSession && sql`(session_id IS NULL OR session_id = ${optionalSessionId(params.forSession)})`,
+      // Rows naming no strategy reach every session, so a session also narrows them to the listings and exchanges it
+      // trades; otherwise the firm's listing and exchange rows together would overflow every OMS's policy cap.
+      params?.forListings
+        && sql`(listing_id IS NULL OR listing_id = ANY(${idList('forListings', params.forListings)}::int[]))`,
+      params?.forExchanges
+        && sql`(exchange_id IS NULL OR exchange_id = ANY(${idList('forExchanges', params.forExchanges)}::int[]))`,
+      (params?.enabled === 'true' || params?.enabled === 'false') && sql`enabled = ${params.enabled === 'true'}`,
+    ])} ORDER BY policy_id`;
   }
 
-  generateInsertQuery(body: string): string {
+  generateInsertQuery(body: string): Sql {
     const p = JSON.parse(body) as ICreateRiskPolicy;
     validateParameters(p.policyType, p.parameters);
     const sessionId = optionalSessionId(p.sessionId);
     const strategyId = optionalId('strategyId', p.strategyId);
-    const exchangeId = optionalId('exchangeId', p.exchangeId) ?? 'null';
-    const listingId = optionalId('listingId', p.listingId) ?? 'null';
-    if (exchangeId !== 'null' && listingId !== 'null') {
+    const exchangeId = optionalId('exchangeId', p.exchangeId);
+    const listingId = optionalId('listingId', p.listingId);
+    if (exchangeId !== null && listingId !== null) {
       throw new ValidationError('a policy names an exchange or a listing, not both');
     }
-    const enabled = p.enabled !== false;
     // A session row carries its session's strategy; one naming another strategy fails the foreign key.
-    const strategy = sessionId == null
-      ? (strategyId ?? 'null')
-      : (strategyId ?? `(SELECT strategy_id FROM strategy.session WHERE session_id='${sessionId}')`);
-    const session = sessionId == null ? 'null' : `'${sessionId}'`;
-    return `
+    const strategy = sessionId == null || strategyId != null
+      ? strategyId
+      : sql`(SELECT strategy_id FROM strategy.session WHERE session_id = ${sessionId})`;
+    return sql`
       INSERT INTO risk.policy (policy_type, session_id, strategy_id, exchange_id, listing_id, parameters, enabled)
-      VALUES ('${p.policyType}', ${session}, ${strategy}, ${exchangeId}, ${listingId}, '${JSON.stringify(p.parameters)}',
-        ${enabled})
-      RETURNING *;
-    `;
+      VALUES (${p.policyType}, ${sessionId}, ${strategy}, ${exchangeId}, ${listingId}, ${JSON.stringify(p.parameters)},
+        ${p.enabled !== false})
+      RETURNING *`;
   }
 
-  generateDeleteQuery(body: string): string {
+  generateDeleteQuery(body: string): Sql {
     const p = JSON.parse(body) as { policyId: number; reason?: string };
-    return `
-      DELETE FROM risk.policy
-      WHERE policy_id = ${optionalId('policyId', p.policyId)}
-      RETURNING *;
-    `;
+    return sql`DELETE FROM risk.policy WHERE policy_id = ${optionalId('policyId', p.policyId)} RETURNING *`;
   }
 
-  generateModifyQuery(row: any, body: string): string {
+  generateModifyQuery(row: any, body: string): Sql {
     const p = JSON.parse(body) as IUpdateRiskPolicy;
-    const updates: string[] = [];
-    if (p.parameters != null) {
-      validateParameters(row['policy_type'], p.parameters);
-      updates.push(`parameters='${JSON.stringify(p.parameters)}'`);
-    }
-    if (p.enabled != null) updates.push(`enabled=${p.enabled === true}`);
-    updates.push(`date_modified=NOW()`);
-    return `
-      UPDATE risk.policy SET ${updates.join(', ')}
-      WHERE policy_id=${row['policy_id']}
-      RETURNING *;
-    `;
+    if (p.parameters != null) validateParameters(row['policy_type'], p.parameters);
+    return sql`UPDATE risk.policy SET ${set({
+      parameters: p.parameters != null ? JSON.stringify(p.parameters) : undefined,
+      enabled: p.enabled != null ? p.enabled === true : undefined,
+      date_modified: NOW,
+    })} WHERE policy_id = ${row['policy_id']} RETURNING *`;
   }
 }
 

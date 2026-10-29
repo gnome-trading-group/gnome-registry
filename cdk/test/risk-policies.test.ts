@@ -24,8 +24,12 @@ beforeEach(() => {
   mockQuery.mockImplementation(async () => ({ rowCount: 1, rows: [{ policy_id: 3 }] }));
 });
 
+function textOf(query: string | { text: string }): string {
+  return typeof query === 'string' ? query : query.text;
+}
+
 function statements(): string[] {
-  return mockQuery.mock.calls.map(c => String(c[0]).trim().split(/\s+/)[0]);
+  return mockQuery.mock.calls.map(c => textOf(c[0]).trim().split(/\s+/)[0]);
 }
 
 describe('risk policy writes are audited', () => {
@@ -43,8 +47,8 @@ describe('risk policy writes are audited', () => {
   });
 
   it('DELETE rolls back when the delete fails', async () => {
-    mockQuery.mockImplementation(async (sql: string) => {
-      if (sql.includes('DELETE FROM')) throw new Error('boom');
+    mockQuery.mockImplementation(async (query: string | { text: string }) => {
+      if (textOf(query).includes('DELETE FROM')) throw new Error('boom');
       return { rowCount: null, rows: [] };
     });
     jest.spyOn(console, 'error').mockImplementation(() => undefined);
@@ -62,7 +66,7 @@ describe('risk policy writes are audited', () => {
 
 describe('risk policy GET filters', () => {
   function selectSql(): string {
-    return String(mockQuery.mock.calls[0][0]).replace(/\s+/g, ' ');
+    return textOf(mockQuery.mock.calls[0][0]).replace(/\s+/g, ' ');
   }
 
   beforeEach(() => {
@@ -71,42 +75,44 @@ describe('risk policy GET filters', () => {
 
   it.each(['true', 'false'])('filters on enabled=%s and orders by policy_id', async (enabled) => {
     await handler(event('GET', null, undefined, { enabled }));
-    expect(selectSql()).toContain(`AND enabled=${enabled} ORDER BY policy_id LIMIT`);
+    expect(selectSql()).toContain('WHERE enabled = $1 ORDER BY policy_id LIMIT');
+    expect(mockQuery.mock.calls[0][0].values[0]).toBe(enabled === 'true');
   });
 
   it('ignores enabled values other than true/false', async () => {
     await handler(event('GET', null, undefined, { enabled: 'yes' }));
-    expect(selectSql()).not.toContain('enabled=');
+    expect(selectSql()).not.toContain('enabled');
     expect(selectSql()).toContain('ORDER BY policy_id');
   });
 
   it('orders unfiltered results by policy_id', async () => {
     await handler(event('GET', null));
-    expect(selectSql()).toContain('WHERE 1=1 ORDER BY policy_id LIMIT');
+    expect(selectSql()).toContain('FROM risk.policy ORDER BY policy_id LIMIT');
   });
 });
 
 describe('risk policy targets and validation', () => {
-  function insertSql(): string {
-    return String(mockQuery.mock.calls.find(c => String(c[0]).includes('INSERT INTO'))?.[0]).replace(/\s+/g, ' ');
+  function insert(): { text: string; values: unknown[] } {
+    const query = mockQuery.mock.calls.find(c => textOf(c[0]).includes('INSERT INTO'))?.[0];
+    return { text: query.text.replace(/\s+/g, ' '), values: query.values };
   }
 
   it('stores exactly the ids it is given, as nulls when absent', async () => {
     await handler(event('POST', { policyType: 'MAX_POSITION', listingId: 500, parameters: { maxPosition: 10 } }));
-    expect(insertSql()).toContain("VALUES ('MAX_POSITION', null, null, null, 500, '{\"maxPosition\":10}', true)");
+    expect(insert().values).toEqual(['MAX_POSITION', null, null, null, 500, '{"maxPosition":10}', true]);
   });
 
   it('stores a strategy\'s budget on one exchange', async () => {
     await handler(event('POST', {
       policyType: 'MAX_COMMITTED_CAPITAL', strategyId: 7, exchangeId: 3, parameters: { maxCapital: 500_000_000_000 },
     }));
-    expect(insertSql()).toContain(
-      "VALUES ('MAX_COMMITTED_CAPITAL', null, 7, 3, null, '{\"maxCapital\":500000000000}', true)");
+    expect(insert().values).toEqual(['MAX_COMMITTED_CAPITAL', null, 7, 3, null, '{"maxCapital":500000000000}', true]);
   });
 
   it('fills a session row\'s strategy from its session', async () => {
     await handler(event('POST', { policyType: 'KILL_SWITCH', sessionId: 'abc', parameters: {} }));
-    expect(insertSql()).toContain("'abc', (SELECT strategy_id FROM strategy.session WHERE session_id='abc')");
+    expect(insert().text).toContain('$2, (SELECT strategy_id FROM strategy.session WHERE session_id = $3)');
+    expect(insert().values).toEqual(['KILL_SWITCH', 'abc', 'abc', null, null, '{}', true]);
   });
 
   it.each([
@@ -129,8 +135,8 @@ describe('risk policy targets and validation', () => {
   });
 
   it('maps a constraint violation (e.g. a session running another strategy) to a 400', async () => {
-    mockQuery.mockImplementation(async (sql: string) => {
-      if (sql.includes('INSERT INTO')) throw Object.assign(new Error('violates foreign key'), { code: '23503' });
+    mockQuery.mockImplementation(async (query: string | { text: string }) => {
+      if (textOf(query).includes('INSERT INTO')) throw Object.assign(new Error('violates foreign key'), { code: '23503' });
       return { rowCount: 1, rows: [] };
     });
     const response = await handler(event('POST', { policyType: 'KILL_SWITCH', sessionId: 'abc', strategyId: 9, parameters: {} }));
@@ -154,20 +160,22 @@ describe('risk policy targets and validation', () => {
   it('filters to what one running OMS needs', async () => {
     mockQuery.mockImplementation(async () => ({ rowCount: 0, rows: [] }));
     await handler(event('GET', null, undefined, { enabled: 'true', forStrategy: '7', forSession: 'abc' }));
-    const sql = String(mockQuery.mock.calls[0][0]);
-    expect(sql).toContain('(strategy_id IS NULL OR strategy_id=7)');
-    expect(sql).toContain("(session_id IS NULL OR session_id='abc')");
+    const query = mockQuery.mock.calls[0][0];
+    expect(query.text).toContain('(strategy_id IS NULL OR strategy_id = $1)');
+    expect(query.text).toContain('(session_id IS NULL OR session_id = $2)');
+    expect(query.values.slice(0, 3)).toEqual([7, 'abc', true]);
     mockQuery.mockClear();
     await handler(event('GET', null, undefined, { forSession: 'none' }));
-    expect(String(mockQuery.mock.calls[0][0])).toContain('session_id IS NULL');
+    expect(textOf(mockQuery.mock.calls[0][0])).toContain('session_id IS NULL');
   });
 
   it('narrows rows naming no strategy to the session\'s listings and exchanges', async () => {
     mockQuery.mockImplementation(async () => ({ rowCount: 0, rows: [] }));
     await handler(event('GET', null, undefined, { forStrategy: '7', forListings: '500,501', forExchanges: '3' }));
-    const sql = String(mockQuery.mock.calls[0][0]);
-    expect(sql).toContain('(listing_id IS NULL OR listing_id IN (500,501))');
-    expect(sql).toContain('(exchange_id IS NULL OR exchange_id IN (3))');
+    const query = mockQuery.mock.calls[0][0];
+    expect(query.text).toContain('(listing_id IS NULL OR listing_id = ANY($2::int[]))');
+    expect(query.text).toContain('(exchange_id IS NULL OR exchange_id = ANY($3::int[]))');
+    expect(query.values.slice(0, 3)).toEqual([7, [500, 501], [3]]);
     mockQuery.mockClear();
     const bad = await handler(event('GET', null, undefined, { forListings: '500,x' }));
     expect(bad.statusCode).toBe(400);
@@ -176,6 +184,6 @@ describe('risk policy targets and validation', () => {
   it('lists every row, session rows included, by default', async () => {
     mockQuery.mockImplementation(async () => ({ rowCount: 0, rows: [] }));
     await handler(event('GET', null));
-    expect(String(mockQuery.mock.calls[0][0])).not.toContain('session_id');
+    expect(textOf(mockQuery.mock.calls[0][0])).not.toContain('session_id');
   });
 });

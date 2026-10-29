@@ -1,5 +1,6 @@
 import { APIGatewayProxyEvent, APIGatewayProxyEventQueryStringParameters } from 'aws-lambda';
 import { ResourceHandler } from './base';
+import { NOW, set, Sql, sql, where } from './sql';
 
 interface ICurrency {
   currencyId: number;
@@ -13,53 +14,36 @@ class CurrencyHandler extends ResourceHandler {
     return ['currency_id', 'symbol', 'name', 'decimals', 'date_created', 'date_modified'];
   }
 
-  generateSelectQuery(params: APIGatewayProxyEventQueryStringParameters | null): string {
-    let query = 'SELECT * FROM sm.currency WHERE 1=1';
-    if (params?.currencyId) {
-      query += ` AND currency_id=${params.currencyId}`;
-    }
-    if (params?.symbol) {
-      query += ` AND symbol='${params.symbol}'`;
-    }
-    if (params?.search) {
-      const escaped = params.search.replace(/'/g, "''");
-      query += ` AND (symbol ILIKE '%${escaped}%' OR name ILIKE '%${escaped}%')`;
-    }
-    return query;
+  generateSelectQuery(params: APIGatewayProxyEventQueryStringParameters | null): Sql {
+    const pattern = `%${params?.search}%`;
+    return sql`SELECT * FROM sm.currency${where([
+      params?.currencyId && sql`currency_id = ${params.currencyId}`,
+      params?.symbol && sql`symbol = ${params.symbol}`,
+      params?.search && sql`(symbol ILIKE ${pattern} OR name ILIKE ${pattern})`,
+    ])}`;
   }
 
-  generateInsertQuery(body: string): string {
+  generateInsertQuery(body: string): Sql {
     const currency = JSON.parse(body) as Partial<ICurrency>;
-    const name = currency.name ? `'${currency.name}'` : 'null';
-    const decimals = currency.decimals ?? 8;
-    return `
+    return sql`
       INSERT INTO sm.currency (symbol, name, decimals)
-      VALUES ('${currency.symbol}', ${name}, ${decimals})
-      RETURNING *;
-    `;
+      VALUES (${currency.symbol}, ${currency.name || null}, ${currency.decimals ?? 8})
+      RETURNING *`;
   }
 
-  generateDeleteQuery(body: string): string {
+  generateDeleteQuery(body: string): Sql {
     const currency = JSON.parse(body) as Pick<ICurrency, 'currencyId'>;
-    return `
-      DELETE FROM sm.currency
-      WHERE currency_id = ${currency.currencyId}
-      RETURNING *;
-    `;
+    return sql`DELETE FROM sm.currency WHERE currency_id = ${currency.currencyId} RETURNING *`;
   }
 
-  generateModifyQuery(row: any, body: string): string {
+  generateModifyQuery(row: any, body: string): Sql {
     const currency = JSON.parse(body) as Partial<ICurrency>;
-    const updates: string[] = [];
-    if (currency.symbol) updates.push(`symbol='${currency.symbol}'`);
-    if (currency.name !== undefined) updates.push(`name=${currency.name ? `'${currency.name}'` : 'null'}`);
-    if (currency.decimals != null) updates.push(`decimals=${currency.decimals}`);
-    updates.push(`date_modified=NOW()`);
-    return `
-      UPDATE sm.currency SET ${updates.join(', ')}
-      WHERE currency_id=${row['currency_id']}
-      RETURNING *;
-    `;
+    return sql`UPDATE sm.currency SET ${set({
+      symbol: currency.symbol || undefined,
+      name: currency.name === undefined ? undefined : currency.name || null,
+      decimals: currency.decimals ?? undefined,
+      date_modified: NOW,
+    })} WHERE currency_id = ${row['currency_id']} RETURNING *`;
   }
 }
 

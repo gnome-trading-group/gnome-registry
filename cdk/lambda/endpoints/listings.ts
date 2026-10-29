@@ -1,8 +1,7 @@
 import { APIGatewayProxyEvent, APIGatewayProxyEventQueryStringParameters } from 'aws-lambda';
 import { parseIdList, ResourceHandler } from './base';
 import { ICreateListing, IDeleteListing } from '../types';
-
-const sqlText = (value: string | null | undefined) => (value == null ? 'NULL' : `'${value.replace(/'/g, "''")}'`);
+import { anyId, NOW, raw, set, Sql, sql, where } from './sql';
 
 export class ListingHandler extends ResourceHandler {
   getPrimaryKey(): string { return 'listing_id'; }
@@ -12,100 +11,59 @@ export class ListingHandler extends ResourceHandler {
     return ['listing_id', 'security_id', 'exchange_id', 'exchange_security_symbol', 'date_created', 'date_modified'];
   }
 
-  generateDeleteQuery(body: string): string {
+  generateDeleteQuery(body: string): Sql {
     const listing = JSON.parse(body) as IDeleteListing;
-    return `
-      DELETE FROM sm.listing
-      WHERE listing_id = ${listing.listingId};
-    `;
+    return sql`DELETE FROM sm.listing WHERE listing_id = ${listing.listingId}`;
   }
 
-  generateInsertQuery(body: string): string {
+  generateInsertQuery(body: string): Sql {
     const listing = JSON.parse(body) as ICreateListing;
-    return `
-      INSERT INTO sm.listing (exchange_id,security_id,exchange_security_id,exchange_security_symbol,fee_group,fee_event)
-      VALUES (${listing.exchangeId},${listing.securityId},'${listing.exchangeSecurityId.replace(/'/g, "''")}','${listing.exchangeSecuritySymbol.replace(/'/g, "''")}',${sqlText(listing.feeGroup)},${sqlText(listing.feeEvent)})
-      RETURNING *;
-    `;
+    return sql`
+      INSERT INTO sm.listing (exchange_id, security_id, exchange_security_id, exchange_security_symbol, fee_group, fee_event)
+      VALUES (${listing.exchangeId}, ${listing.securityId}, ${listing.exchangeSecurityId}, ${listing.exchangeSecuritySymbol},
+              ${listing.feeGroup ?? null}, ${listing.feeEvent ?? null})
+      RETURNING *`;
   }
 
-  generateSelectQuery(params: APIGatewayProxyEventQueryStringParameters | null): string {
+  generateSelectQuery(params: APIGatewayProxyEventQueryStringParameters | null): Sql {
     const denormalize = params?.denormalize === 'true';
+    const column = (name: string) => (denormalize ? `l.${name}` : name);
+    const pattern = `%${params?.search}%`;
 
-    let query = denormalize
-      ? `SELECT l.*, e.exchange_name, s.symbol AS security_symbol, s.type AS security_type, s.active AS security_active
+    const from = denormalize
+      ? sql`SELECT l.*, e.exchange_name, s.symbol AS security_symbol, s.type AS security_type, s.active AS security_active
          FROM sm.listing l
          JOIN sm.exchange e ON l.exchange_id = e.exchange_id
-         JOIN sm.security s ON l.security_id = s.security_id
-         WHERE 1=1`
-      : 'SELECT * FROM sm.listing WHERE 1=1';
+         JOIN sm.security s ON l.security_id = s.security_id`
+      : sql`SELECT * FROM sm.listing`;
 
-    if (params?.listingId) {
-      query += denormalize ? ` AND l.listing_id=${params.listingId}` : ` AND listing_id=${params.listingId}`;
-    }
-    if (params?.listingIds !== undefined) {
-      // Batch lookup for UIs labelling many listings at once; ids are parsed to integers, so nothing else reaches the SQL.
-      const ids = parseIdList(params.listingIds);
-      query += ids.length > 0
-        ? ` AND ${denormalize ? 'l.' : ''}listing_id IN (${ids.join(',')})`
-        : ' AND FALSE';
-    }
-    if (params?.securityId) {
-      query += denormalize ? ` AND l.security_id=${params.securityId}` : ` AND security_id=${params.securityId}`;
-    }
-    if (params?.exchangeId) {
-      query += denormalize ? ` AND l.exchange_id=${params.exchangeId}` : ` AND exchange_id=${params.exchangeId}`;
-    }
-    if (params?.exchangeSecurityId) {
-      query += denormalize
-        ? ` AND l.exchange_security_id='${params.exchangeSecurityId}'`
-        : ` AND exchange_security_id='${params.exchangeSecurityId}'`;
-    }
-    if (params?.exchangeSecuritySymbol) {
-      query += denormalize
-        ? ` AND l.exchange_security_symbol='${params.exchangeSecuritySymbol}'`
-        : ` AND exchange_security_symbol='${params.exchangeSecuritySymbol}'`;
-    }
-    if (params?.search && denormalize) {
-      const escaped = params.search.replace(/'/g, "''");
-      query += ` AND (s.symbol ILIKE '%${escaped}%' OR e.exchange_name ILIKE '%${escaped}%' OR l.exchange_security_symbol ILIKE '%${escaped}%' OR l.listing_id::text = '${escaped}')`;
-    }
-    if (params?.active !== undefined) {
-      query += denormalize ? ` AND l.active=${params.active === 'true'}` : ` AND active=${params.active === 'true'}`;
-    }
-    return query;
+    return sql`${from}${where([
+      params?.listingId && sql`${raw(column('listing_id'))} = ${params.listingId}`,
+      // Batch lookup for UIs labelling many listings at once.
+      params?.listingIds !== undefined && anyId(column('listing_id'), parseIdList(params.listingIds)),
+      params?.securityId && sql`${raw(column('security_id'))} = ${params.securityId}`,
+      params?.exchangeId && sql`${raw(column('exchange_id'))} = ${params.exchangeId}`,
+      params?.exchangeSecurityId && sql`${raw(column('exchange_security_id'))} = ${params.exchangeSecurityId}`,
+      params?.exchangeSecuritySymbol && sql`${raw(column('exchange_security_symbol'))} = ${params.exchangeSecuritySymbol}`,
+      params?.search && denormalize
+        && sql`(s.symbol ILIKE ${pattern} OR e.exchange_name ILIKE ${pattern} OR l.exchange_security_symbol ILIKE ${pattern} OR l.listing_id::text = ${params.search})`,
+      params?.active !== undefined && sql`${raw(column('active'))} = ${params.active === 'true'}`,
+    ])}`;
   }
 
-  generateModifyQuery(row: any, body: string): string {
+  generateModifyQuery(row: any, body: string): Sql {
     const listing = JSON.parse(body) as ICreateListing;
-    let query = "UPDATE sm.listing SET ";
-    const updates: string[] = [];
-    if (listing.exchangeId) {
-      updates.push(`exchange_id=${listing.exchangeId}`);
-    }
-    if (listing.exchangeSecurityId) {
-      updates.push(`exchange_security_id='${listing.exchangeSecurityId}'`)
-    }
-    if (listing.exchangeSecuritySymbol) {
-      updates.push(`exchange_security_symbol='${listing.exchangeSecuritySymbol}'`);
-    }
-    if (listing.securityId) {
-      updates.push(`security_id=${listing.securityId}`);
-    }
-    if (listing.active != null) {
-      updates.push(`active=${listing.active}`);
-    }
-    // Present-but-null clears a fee key: a venue that stops grouping a listing's fees.
-    if ('feeGroup' in listing) {
-      updates.push(`fee_group=${sqlText(listing.feeGroup)}`);
-    }
-    if ('feeEvent' in listing) {
-      updates.push(`fee_event=${sqlText(listing.feeEvent)}`);
-    }
-    updates.push(`date_modified=NOW()`);
-    const updateString = updates.join(", ");
-    query += `${updateString} WHERE listing_id=${row['listing_id']} RETURNING *`;
-    return query;
+    return sql`UPDATE sm.listing SET ${set({
+      exchange_id: listing.exchangeId || undefined,
+      exchange_security_id: listing.exchangeSecurityId || undefined,
+      exchange_security_symbol: listing.exchangeSecuritySymbol || undefined,
+      security_id: listing.securityId || undefined,
+      active: listing.active ?? undefined,
+      // Present-but-null clears a fee key: a venue that stops grouping a listing's fees.
+      fee_group: 'feeGroup' in listing ? listing.feeGroup ?? null : undefined,
+      fee_event: 'feeEvent' in listing ? listing.feeEvent ?? null : undefined,
+      date_modified: NOW,
+    })} WHERE listing_id = ${row['listing_id']} RETURNING *`;
   }
 }
 

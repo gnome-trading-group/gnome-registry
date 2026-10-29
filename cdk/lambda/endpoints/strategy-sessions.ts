@@ -1,6 +1,7 @@
 import { APIGatewayProxyEvent, APIGatewayProxyEventQueryStringParameters } from 'aws-lambda';
 import { PoolClient } from 'pg';
 import { parseIdList, ResourceHandler, withTransaction } from './base';
+import { anyId, NOW, raw, set, Sql, sql, where } from './sql';
 import { LaunchCheckError } from './launch-checks';
 import { AccountAssignmentError, bindAccounts } from './venue-account-assignment';
 
@@ -34,14 +35,6 @@ interface IUpdateSession {
   expectedStatus?: string | string[];
 }
 
-function quoted(value: string): string {
-  return `'${value.replace(/'/g, "''")}'`;
-}
-
-function sqlList(values: string[]): string {
-  return values.map(v => `'${v}'`).join(', ');
-}
-
 export function parseStatuses(status: string | string[] | undefined): string[] {
   if (status == null) return [];
   const list = Array.isArray(status) ? status : status.split(',');
@@ -53,10 +46,10 @@ export const NO_INSTANCE_RELEASE_AUDIT = { actor: 'system', reason: 'stopped bef
 // A session stopped before it ever got an instance goes straight to STOPPED, and the instance monitor, which
 // releases a stopped session's kill once its instance is gone, never hears about it. Nothing can trade on such a
 // session, so its kill is released as it stops.
-export function generateNoInstanceKillReleaseQuery(sessionId: string): string {
-  return `
+export function generateNoInstanceKillReleaseQuery(sessionId: string): Sql {
+  return sql`
     UPDATE risk.policy SET enabled=false, date_modified=NOW()
-    WHERE policy_type='KILL_SWITCH' AND enabled AND session_id='${sessionId}'
+    WHERE policy_type='KILL_SWITCH' AND enabled AND session_id = ${sessionId}
   `;
 }
 
@@ -75,71 +68,55 @@ export class StrategySessionHandler extends ResourceHandler {
     return 'sessionId';
   }
 
-  generateSelectQuery(params: APIGatewayProxyEventQueryStringParameters | null): string {
-    let query = 'SELECT * FROM strategy.session WHERE 1=1';
-    if (params?.sessionId) {
-      query += ` AND session_id='${params.sessionId}'`;
-    }
-    if (params?.strategyId) {
-      query += ` AND strategy_id=${params.strategyId}`;
-    }
+  generateSelectQuery(params: APIGatewayProxyEventQueryStringParameters | null): Sql {
     const statuses = parseStatuses(params?.status);
-    if (statuses.length > 0) {
-      query += ` AND status IN (${sqlList(statuses)})`;
-    }
-    if (params?.instanceId) {
-      query += ` AND instance_id='${params.instanceId}'`;
-    }
-    if (params?.mode === 'paper' || params?.mode === 'live') {
-      query += ` AND mode='${params.mode}'`;
-    }
-    // A session's listing rows outlive its lease, so these find sessions that traded a listing as well as those
-    // trading it now.
-    if (params?.listingId !== undefined) {
-      const ids = parseIdList(params.listingId);
-      query += ids.length > 0
-        ? ` AND session_id IN (SELECT session_id FROM strategy.session_listing WHERE listing_id IN (${ids.join(',')}))`
-        : ' AND FALSE';
-    }
-    if (params?.eventId !== undefined) {
-      const ids = parseIdList(params.eventId);
-      query += ids.length > 0
-        ? ` AND session_id IN (
+    const listingIds = parseIdList(params?.listingId);
+    const eventIds = parseIdList(params?.eventId);
+    return sql`SELECT * FROM strategy.session${where([
+      params?.sessionId && sql`session_id = ${params.sessionId}`,
+      params?.strategyId && sql`strategy_id = ${params.strategyId}`,
+      statuses.length > 0 && sql`status = ANY(${statuses}::text[])`,
+      params?.instanceId && sql`instance_id = ${params.instanceId}`,
+      (params?.mode === 'paper' || params?.mode === 'live') && sql`mode = ${params.mode}`,
+      // A session's listing rows outlive its lease, so these find sessions that traded a listing as well as those
+      // trading it now.
+      params?.listingId !== undefined && (listingIds.length > 0
+        ? sql`session_id IN (SELECT session_id FROM strategy.session_listing WHERE ${anyId('listing_id', listingIds)})`
+        : raw('FALSE')),
+      params?.eventId !== undefined && (eventIds.length > 0
+        ? sql`session_id IN (
             SELECT sl.session_id FROM strategy.session_listing sl
             JOIN sm.listing l ON l.listing_id = sl.listing_id
             JOIN sm.event_contract ec ON ec.security_id = l.security_id
-            WHERE ec.event_id IN (${ids.join(',')}))`
-        : ' AND FALSE';
-    }
-    return query;
+            WHERE ${anyId('ec.event_id', eventIds)})`
+        : raw('FALSE')),
+    ])}`;
   }
 
-  generateInsertQuery(_body: string): string {
+  generateInsertQuery(_body: string): Sql {
     throw new Error('Use createOne override');
   }
 
-  generateModifyQuery(row: any, body: string): string {
+  generateModifyQuery(row: any, body: string): Sql {
     const s = JSON.parse(body) as IUpdateSession;
-    const updates: string[] = [];
-    if (s.status != null) updates.push(`status='${s.status}'`);
-    if (s.failureReason != null) updates.push(`failure_reason='${s.failureReason.replace(/'/g, "''")}'`);
-    if (s.stoppedAt != null) updates.push(`stopped_at='${s.stoppedAt}'`);
-    // The first stop wins: a strategy exiting on its own and then a launcher or operator stopping it again should
-    // still read as the strategy's exit.
-    if (s.stopReason != null) updates.push(`stop_reason=COALESCE(stop_reason, ${quoted(s.stopReason)})`);
-    if (s.stoppedBy != null) updates.push(`stopped_by=COALESCE(stopped_by, ${quoted(s.stoppedBy)})`);
-    if (s.instanceId != null) updates.push(`instance_id='${s.instanceId}'`);
-    if (s.instanceType != null) updates.push(`instance_type='${s.instanceType}'`);
-    if (s.launchRegion != null) updates.push(`launch_region='${s.launchRegion}'`);
-    if (s.availabilityZone != null) updates.push(`availability_zone='${s.availabilityZone}'`);
-    updates.push(`date_modified=NOW()`);
     const expected = parseStatuses(s.expectedStatus);
-    const guard = expected.length > 0 ? ` AND status IN (${sqlList(expected)})` : '';
-    return `
-      UPDATE strategy.session SET ${updates.join(', ')}
-      WHERE session_id='${row['session_id']}'${guard}
-      RETURNING *;
-    `;
+    return sql`UPDATE strategy.session SET ${set({
+      status: s.status ?? undefined,
+      failure_reason: s.failureReason ?? undefined,
+      stopped_at: s.stoppedAt ?? undefined,
+      // The first stop wins: a strategy exiting on its own and then a launcher or operator stopping it again should
+      // still read as the strategy's exit.
+      stop_reason: s.stopReason != null ? sql`COALESCE(stop_reason, ${s.stopReason})` : undefined,
+      stopped_by: s.stoppedBy != null ? sql`COALESCE(stopped_by, ${s.stoppedBy})` : undefined,
+      instance_id: s.instanceId ?? undefined,
+      instance_type: s.instanceType ?? undefined,
+      launch_region: s.launchRegion ?? undefined,
+      availability_zone: s.availabilityZone ?? undefined,
+      date_modified: NOW,
+    })}${where([
+      sql`session_id = ${row['session_id']}`,
+      expected.length > 0 && sql`status = ANY(${expected}::text[])`,
+    ])} RETURNING *`;
   }
 
   allowedSortColumns(): string[] {
@@ -194,8 +171,6 @@ export class StrategySessionHandler extends ResourceHandler {
       return this.createResponse(400, { message: 'config.listings must be a non-empty list of listing ids' });
     }
 
-    const nullable = (v?: string) => (v != null ? `'${v}'` : 'null');
-
     try {
       const row = await withTransaction(this.client, async (client) => {
         // Locked so the classifier can't record a settlement between this check and the lease below: the
@@ -208,18 +183,17 @@ export class StrategySessionHandler extends ResourceHandler {
         if (settled.rowCount && settled.rowCount > 0) {
           throw new SettledListingError(settled.rows[0].listing_id);
         }
-        const result = await client.query(`
+        const result = await client.query(sql`
           INSERT INTO strategy.session (
             session_id, strategy_id, status, mode, config, research_commit,
             instance_id, instance_type, launch_region, availability_zone, orchestrator_version, gnomepy_version
           )
           VALUES (
-            '${s.sessionId}', ${s.strategyId}, '${s.status}', '${s.mode}', '${JSON.stringify(s.config)}', ${nullable(s.researchCommit)},
-            ${nullable(s.instanceId)}, ${nullable(s.instanceType)}, ${nullable(s.launchRegion)}, ${nullable(s.availabilityZone)},
-            ${nullable(s.orchestratorVersion)}, ${nullable(s.gnomepyVersion)}
+            ${s.sessionId}, ${s.strategyId}, ${s.status}, ${s.mode}, ${JSON.stringify(s.config)}, ${s.researchCommit ?? null},
+            ${s.instanceId ?? null}, ${s.instanceType ?? null}, ${s.launchRegion ?? null}, ${s.availabilityZone ?? null},
+            ${s.orchestratorVersion ?? null}, ${s.gnomepyVersion ?? null}
           )
-          RETURNING *;
-        `);
+          RETURNING *`);
         await client.query(
           `INSERT INTO strategy.session_listing (session_id, strategy_id, mode, listing_id)
            SELECT $1, $2, $3, unnest($4::int[])`,

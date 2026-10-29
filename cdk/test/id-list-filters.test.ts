@@ -15,15 +15,17 @@ describe('listing id-list filter', () => {
   const handler = new ListingHandler();
 
   it('filters to the given ids', () => {
-    expect(handler.generateSelectQuery({ listingIds: '3,17' })).toContain('AND listing_id IN (3,17)');
+    const query = handler.generateSelectQuery({ listingIds: '3,17' });
+    expect(query.text).toContain('listing_id = ANY($1::int[])');
+    expect(query.values).toEqual([[3, 17]]);
   });
 
   it('qualifies the column when denormalized', () => {
-    expect(handler.generateSelectQuery({ listingIds: '3,17', denormalize: 'true' })).toContain('AND l.listing_id IN (3,17)');
+    expect(handler.generateSelectQuery({ listingIds: '3,17', denormalize: 'true' }).text).toContain('l.listing_id = ANY($1::int[])');
   });
 
   it('matches nothing rather than everything when no id is valid', () => {
-    expect(handler.generateSelectQuery({ listingIds: 'abc' })).toContain('AND FALSE');
+    expect(handler.generateSelectQuery({ listingIds: 'abc' }).text).toContain('WHERE FALSE');
   });
 });
 
@@ -31,10 +33,12 @@ describe('security id-list filter', () => {
   const handler = new SecurityHandler();
 
   it('filters to the given ids', () => {
-    expect(handler.generateSelectQuery({ securityIds: '5,9' })).toContain('AND s.security_id IN (5,9)');
+    const query = handler.generateSelectQuery({ securityIds: '5,9' });
+    expect(query.text).toContain('s.security_id = ANY($1::int[])');
+    expect(query.values).toEqual([[5, 9]]);
   });
 
   it('matches nothing rather than everything when no id is valid', () => {
-    expect(handler.generateSelectQuery({ securityIds: '' })).toContain('AND FALSE');
+    expect(handler.generateSelectQuery({ securityIds: '' }).text).toContain('WHERE FALSE');
   });
 });

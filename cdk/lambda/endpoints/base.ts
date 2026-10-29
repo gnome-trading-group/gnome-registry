@@ -1,6 +1,7 @@
 import { APIGatewayProxyEvent, APIGatewayProxyEventQueryStringParameters } from "aws-lambda/trigger/api-gateway-proxy";
 import { connectDatabase } from "../connections";
 import { Pool, PoolClient } from 'pg';
+import { raw, Sql, sql } from './sql';
 
 const DEFAULT_PAGE_SIZE = 5000;
 
@@ -12,6 +13,9 @@ const CORS_HEADERS = {
 }
 
 export const UNKNOWN_ACTOR = 'unknown';
+
+// A value Postgres can't read as its column's type (?exchangeId=abc, a malformed timestamp, an id past int range).
+const BAD_INPUT_CODES = new Set(['22P02', '22007', '22008', '22003']);
 
 /** A request the handler can't act on; reported to the caller as a 400 rather than a server error. */
 export class ValidationError extends Error {}
@@ -119,8 +123,8 @@ export class ResourceHandler {
           return this.createResponse(400, { message: 'Invalid HTTP method' });
       }
     } catch (error) {
-      if (error instanceof ValidationError) {
-        return this.createResponse(400, { message: error.message });
+      if (error instanceof ValidationError || BAD_INPUT_CODES.has((error as { code?: string })?.code ?? '')) {
+        return this.createResponse(400, { message: (error as Error).message });
       }
       const message = error instanceof Error ? error.message : String(error);
       const stack = error instanceof Error ? error.stack : undefined;
@@ -133,7 +137,7 @@ export class ResourceHandler {
     }
   }
 
-  generateModifyQuery(row: any, body: string): string {
+  generateModifyQuery(row: any, body: string): Sql {
     throw new Error("Must override");
   }
 
@@ -174,17 +178,13 @@ export class ResourceHandler {
     }
 
     return this.runWrite(async () => {
-      var query = this.generateSelectQuery(params);
-
-      var result = await this.client.query(query);
+      var result = await this.client.query(this.generateSelectQuery(params));
       if (result.rowCount != 1) {
         return this.createResponse(404, { message: 'Query params did not return one row only' });
       }
 
       var item = result.rows[0];
-      query = this.generateModifyQuery(item, body);
-
-      result = await this.client.query(query);
+      result = await this.client.query(this.generateModifyQuery(item, body));
 
       if (result.rowCount != 1) {
         return this.createResponse(404, { message: `Unable to modify resource from body: ${body}` });
@@ -195,7 +195,7 @@ export class ResourceHandler {
     });
   }
 
-  generateInsertQuery(body: string): string {
+  generateInsertQuery(body: string): Sql {
     throw new Error("Must override");
   }
 
@@ -209,7 +209,7 @@ export class ResourceHandler {
       const result = await this.client.query(query);
 
       if (result.rowCount != 1) {
-        return this.createResponse(500, { message: `Insert returned ${result.rowCount} rows`, body, query });
+        return this.createResponse(500, { message: `Insert returned ${result.rowCount} rows`, body, query: query.text, values: query.values });
       }
 
       const item = result.rows[0];
@@ -231,7 +231,7 @@ export class ResourceHandler {
         const query = this.generateInsertQuery(JSON.stringify(item));
         const result = await this.client.query(query);
         if (result.rowCount !== 1) {
-          throw new Error(`Insert returned ${result.rowCount} rows for item: ${JSON.stringify(item)}. Query: ${query}`);
+          throw new Error(`Insert returned ${result.rowCount} rows for item: ${JSON.stringify(item)}. Query: ${query.text}`);
         }
         results.push(result.rows[0]);
       }
@@ -239,7 +239,7 @@ export class ResourceHandler {
     return this.createResponse(200, results);
   }
 
-  generateDeleteQuery(body: string): string {
+  generateDeleteQuery(body: string): Sql {
     throw new Error("Must override");
   }
 
@@ -267,9 +267,7 @@ export class ResourceHandler {
 
   async get(params: APIGatewayProxyEventQueryStringParameters | null) {
     if (params?.count === 'true') {
-      const selectQuery = this.generateSelectQuery(params);
-      const countQuery = `SELECT COUNT(*) FROM (${selectQuery}) t`;
-      const result = await this.client.query(countQuery);
+      const result = await this.client.query(sql`SELECT COUNT(*) FROM (${this.generateSelectQuery(params)}) t`);
       return this.createResponse(200, { count: parseInt(result.rows[0].count, 10) });
     }
 
@@ -278,19 +276,19 @@ export class ResourceHandler {
 
     let query = this.generateSelectQuery(params);
 
-    if (!query.toUpperCase().includes('ORDER BY')) {
+    if (!query.text.toUpperCase().includes('ORDER BY')) {
       const allowed = this.allowedSortColumns();
       const sortBy = params?.sortBy && allowed.includes(params.sortBy) ? params.sortBy : null;
       const sortOrder = params?.sortOrder === 'desc' ? 'DESC' : 'ASC';
-      query += sortBy ? ` ORDER BY ${sortBy} ${sortOrder}` : ' ORDER BY 1';
+      query = sql`${query}${raw(sortBy ? ` ORDER BY ${sortBy} ${sortOrder}` : ' ORDER BY 1')}`;
     }
-    query += ` LIMIT ${limit} OFFSET ${offset}`;
+    query = sql`${query} LIMIT ${limit} OFFSET ${offset}`;
 
     const result = await this.client.query(query);
     return this.createResponse(200, result.rows);
   }
 
-  generateSelectQuery(params: APIGatewayProxyEventQueryStringParameters | null): string {
+  generateSelectQuery(params: APIGatewayProxyEventQueryStringParameters | null): Sql {
     throw new Error("Must override");
   }
 }

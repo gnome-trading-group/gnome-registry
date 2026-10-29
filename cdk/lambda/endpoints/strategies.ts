@@ -1,5 +1,6 @@
 import { APIGatewayProxyEvent, APIGatewayProxyEventQueryStringParameters } from 'aws-lambda';
 import { ResourceHandler } from './base';
+import { NOW, set, Sql, sql, where } from './sql';
 
 interface ICreateStrategy {
   name: string;
@@ -16,56 +17,39 @@ interface IUpdateStrategy {
 }
 
 export class StrategyHandler extends ResourceHandler {
-  generateSelectQuery(params: APIGatewayProxyEventQueryStringParameters | null): string {
-    let query = 'SELECT * FROM strategy.strategy WHERE 1=1';
-    if (params?.strategyId) {
-      query += ` AND strategy_id=${params.strategyId}`;
-    }
-    if (params?.name) {
-      query += ` AND name='${params.name}'`;
-    }
+  generateSelectQuery(params: APIGatewayProxyEventQueryStringParameters | null): Sql {
     // Lower-cased because Python clients send booleans as "True"/"False".
     const archived = params?.archived?.toLowerCase();
-    if (archived === 'true' || archived === 'false') {
-      query += ` AND archived=${archived}`;
-    }
-    return query;
+    return sql`SELECT * FROM strategy.strategy${where([
+      params?.strategyId && sql`strategy_id = ${params.strategyId}`,
+      params?.name && sql`name = ${params.name}`,
+      (archived === 'true' || archived === 'false') && sql`archived = ${archived === 'true'}`,
+    ])}`;
   }
 
-  generateInsertQuery(body: string): string {
+  generateInsertQuery(body: string): Sql {
     const s = JSON.parse(body) as ICreateStrategy;
-    const description = s.description != null ? `'${s.description}'` : 'null';
-    const parameters = s.parameters != null ? `'${JSON.stringify(s.parameters)}'` : 'null';
-    const archived = s.archived === true;
-    return `
+    const parameters = s.parameters != null ? JSON.stringify(s.parameters) : null;
+    return sql`
       INSERT INTO strategy.strategy (name, description, archived, parameters)
-      VALUES ('${s.name}', ${description}, ${archived}, ${parameters})
-      RETURNING *;
-    `;
+      VALUES (${s.name}, ${s.description ?? null}, ${s.archived === true}, ${parameters})
+      RETURNING *`;
   }
 
-  generateDeleteQuery(body: string): string {
+  generateDeleteQuery(body: string): Sql {
     const s = JSON.parse(body) as { strategyId: number };
-    return `
-      DELETE FROM strategy.strategy
-      WHERE strategy_id = ${s.strategyId}
-      RETURNING *;
-    `;
+    return sql`DELETE FROM strategy.strategy WHERE strategy_id = ${s.strategyId} RETURNING *`;
   }
 
-  generateModifyQuery(row: any, body: string): string {
+  generateModifyQuery(row: any, body: string): Sql {
     const s = JSON.parse(body) as IUpdateStrategy;
-    const updates: string[] = [];
-    if (s.name != null) updates.push(`name='${s.name}'`);
-    if (s.description != null) updates.push(`description='${s.description}'`);
-    if (typeof s.archived === 'boolean') updates.push(`archived=${s.archived}`);
-    if (s.parameters != null) updates.push(`parameters='${JSON.stringify(s.parameters)}'`);
-    updates.push(`date_modified=NOW()`);
-    return `
-      UPDATE strategy.strategy SET ${updates.join(', ')}
-      WHERE strategy_id=${row['strategy_id']}
-      RETURNING *;
-    `;
+    return sql`UPDATE strategy.strategy SET ${set({
+      name: s.name ?? undefined,
+      description: s.description ?? undefined,
+      archived: typeof s.archived === 'boolean' ? s.archived : undefined,
+      parameters: s.parameters != null ? JSON.stringify(s.parameters) : undefined,
+      date_modified: NOW,
+    })} WHERE strategy_id = ${row['strategy_id']} RETURNING *`;
   }
 }
 

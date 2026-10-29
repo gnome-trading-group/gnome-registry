@@ -18,9 +18,13 @@ function postEvent(body: unknown): APIGatewayProxyEvent {
   } as unknown as APIGatewayProxyEvent;
 }
 
+function textOf(query: string | { text: string }): string {
+  return typeof query === 'string' ? query : query.text;
+}
+
 function upsertReturns(policyId: number) {
-  mockQuery.mockImplementation(async (sql: string) => {
-    if (sql.includes('INSERT INTO risk.policy')) return { rowCount: 1, rows: [{ policy_id: policyId }] };
+  mockQuery.mockImplementation(async (query: string | { text: string }) => {
+    if (textOf(query).includes('INSERT INTO risk.policy')) return { rowCount: 1, rows: [{ policy_id: policyId }] };
     return { rowCount: null, rows: [] };
   });
 }
@@ -68,7 +72,7 @@ describe('POST /risk/halts upsert', () => {
     expect(calls[1][0]).toContain("set_config('gnome.actor', $1, true)");
     expect(calls[1][0]).toContain("set_config('gnome.reason', $2, true)");
     expect(calls[1][1]).toEqual(['oms', 'max loss breached']);
-    expect(calls[2][0]).toBe(generateHaltUpsertQuery({ strategyId: 7 }));
+    expect(calls[2][0]).toEqual(generateHaltUpsertQuery({ strategyId: 7 }));
     expect(calls[3][0]).toBe('COMMIT');
     expect(mockRelease).toHaveBeenCalledTimes(1);
   });
@@ -83,7 +87,7 @@ describe('POST /risk/halts upsert', () => {
     upsertReturns(9);
     const response = await handler(postEvent({ sessionId: 'abc-123', reason: 'session stop' }));
     expect(response.statusCode).toBe(200);
-    expect(mockQuery.mock.calls[2][0]).toBe(generateHaltUpsertQuery({ sessionId: 'abc-123' }));
+    expect(mockQuery.mock.calls[2][0]).toEqual(generateHaltUpsertQuery({ sessionId: 'abc-123' }));
   });
 
   it('returns 400 for a session that does not exist', async () => {
@@ -106,8 +110,8 @@ describe('POST /risk/halts upsert', () => {
 
   it('rolls back and returns 500 when the upsert fails', async () => {
     jest.spyOn(console, 'error').mockImplementation(() => undefined);
-    mockQuery.mockImplementation(async (sql: string) => {
-      if (sql.includes('INSERT INTO risk.policy')) throw new Error('boom');
+    mockQuery.mockImplementation(async (query: string | { text: string }) => {
+      if (textOf(query).includes('INSERT INTO risk.policy')) throw new Error('boom');
       return { rowCount: null, rows: [] };
     });
     const response = await handler(postEvent({ strategyId: 7, reason: 'x' }));
@@ -117,13 +121,15 @@ describe('POST /risk/halts upsert', () => {
   });
 
   it('generates an enable-only upsert keyed on the unique index expressions', () => {
-    const sql = generateHaltUpsertQuery({ strategyId: 7 }).replace(/\s+/g, ' ');
-    expect(sql).toContain("SELECT 'KILL_SWITCH', NULL, 7, NULL::integer, NULL::integer, '{}'::jsonb, true");
+    const query = generateHaltUpsertQuery({ strategyId: 7 });
+    const sql = query.text.replace(/\s+/g, ' ');
+    expect(sql).toContain("SELECT 'KILL_SWITCH', NULL, $1::integer, $2::integer, $3::integer, '{}'::jsonb, true");
+    expect(query.values).toEqual([7, null, null, 7]);
     expect(sql).toContain(
       "ON CONFLICT (policy_type, COALESCE(session_id, ''), COALESCE(strategy_id, 0), COALESCE(exchange_id, 0),"
         + ' COALESCE(listing_id, 0))',
     );
-    expect(sql).toContain('session_id IS NULL AND strategy_id=7 AND exchange_id IS NULL AND listing_id IS NULL');
+    expect(sql).toContain('session_id IS NULL AND strategy_id = $4 AND exchange_id IS NULL AND listing_id IS NULL');
     expect(sql).toContain('DO UPDATE SET enabled=true, date_modified=NOW() WHERE risk.policy.enabled = false');
     expect(sql).not.toMatch(/enabled\s*=\s*false\s*(,|$)/);
     expect(sql).not.toMatch(/SET[^W]*enabled=false/);
@@ -133,24 +139,27 @@ describe('POST /risk/halts upsert', () => {
     upsertReturns(11);
     const response = await handler(postEvent({ strategyId: 7, listingId: 500, reason: 'unattributable order' }));
     expect(response.statusCode).toBe(200);
-    const sql = String(mockQuery.mock.calls[2][0]).replace(/\s+/g, ' ');
-    expect(sql).toContain("SELECT 'KILL_SWITCH', NULL, 7, NULL::integer, 500, '{}'::jsonb, true");
-    expect(sql).toContain('session_id IS NULL AND strategy_id=7 AND exchange_id IS NULL AND listing_id=500');
+    const query = mockQuery.mock.calls[2][0];
+    expect(query.text.replace(/\s+/g, ' '))
+      .toContain('session_id IS NULL AND strategy_id = $4 AND exchange_id IS NULL AND listing_id = $5');
+    expect(query.values).toEqual([7, null, 500, 7, 500]);
   });
 
   it('halts a strategy on one exchange, or a whole exchange', async () => {
     upsertReturns(12);
     expect((await handler(postEvent({ strategyId: 7, exchangeId: 3, reason: 'venue rejects' }))).statusCode).toBe(200);
-    let sql = String(mockQuery.mock.calls[2][0]).replace(/\s+/g, ' ');
-    expect(sql).toContain("SELECT 'KILL_SWITCH', NULL, 7, 3, NULL::integer, '{}'::jsonb, true");
-    expect(sql).toContain('session_id IS NULL AND strategy_id=7 AND exchange_id=3 AND listing_id IS NULL');
+    let query = mockQuery.mock.calls[2][0];
+    expect(query.text.replace(/\s+/g, ' '))
+      .toContain('session_id IS NULL AND strategy_id = $4 AND exchange_id = $5 AND listing_id IS NULL');
+    expect(query.values).toEqual([7, 3, null, 7, 3]);
 
     mockQuery.mockClear();
     upsertReturns(13);
     expect((await handler(postEvent({ exchangeId: 3, reason: 'venue down' }))).statusCode).toBe(200);
-    sql = String(mockQuery.mock.calls[2][0]).replace(/\s+/g, ' ');
-    expect(sql).toContain("SELECT 'KILL_SWITCH', NULL, NULL::integer, 3, NULL::integer, '{}'::jsonb, true");
-    expect(sql).toContain('session_id IS NULL AND strategy_id IS NULL AND exchange_id=3 AND listing_id IS NULL');
+    query = mockQuery.mock.calls[2][0];
+    expect(query.text.replace(/\s+/g, ' '))
+      .toContain('session_id IS NULL AND strategy_id IS NULL AND exchange_id = $4 AND listing_id IS NULL');
+    expect(query.values).toEqual([null, 3, null, 3]);
   });
 
   it('refuses an exchange with a listing or a session', async () => {

@@ -5,33 +5,38 @@ const handler = new StrategySessionHandler();
 describe('strategy session queries', () => {
   it('filters by several statuses at once', () => {
     const query = handler.generateSelectQuery({ strategyId: '7', status: 'SUBMITTED,STARTING,RUNNING' });
-    expect(query).toContain("AND status IN ('SUBMITTED', 'STARTING', 'RUNNING')");
-    expect(query).toContain('AND strategy_id=7');
+    expect(query.text).toContain('strategy_id = $1 AND status = ANY($2::text[])');
+    expect(query.values).toEqual(['7', ['SUBMITTED', 'STARTING', 'RUNNING']]);
   });
 
   it('still filters by a single status', () => {
-    expect(handler.generateSelectQuery({ status: 'RUNNING' })).toContain("AND status IN ('RUNNING')");
+    expect(handler.generateSelectQuery({ status: 'RUNNING' }).values).toEqual([['RUNNING']]);
   });
 
   it('filters by mode, ignoring anything but paper or live', () => {
-    expect(handler.generateSelectQuery({ mode: 'live' })).toContain("AND mode='live'");
-    expect(handler.generateSelectQuery({ mode: "x' OR 1=1" })).not.toContain('mode=');
+    const query = handler.generateSelectQuery({ mode: 'live' });
+    expect(query.text).toContain('mode = $1');
+    expect(query.values).toEqual(['live']);
+    expect(handler.generateSelectQuery({ mode: "x' OR 1=1" }).text).not.toContain('mode');
   });
 
   it('filters to sessions that traded a listing', () => {
-    expect(handler.generateSelectQuery({ listingId: '42' }))
-      .toContain('AND session_id IN (SELECT session_id FROM strategy.session_listing WHERE listing_id IN (42))');
+    const query = handler.generateSelectQuery({ listingId: '42' });
+    expect(query.text).toContain(
+      'session_id IN (SELECT session_id FROM strategy.session_listing WHERE listing_id = ANY($1::int[]))');
+    expect(query.values).toEqual([[42]]);
   });
 
   it('filters to sessions that traded any listing of an event', () => {
     const query = handler.generateSelectQuery({ eventId: '9', status: 'RUNNING' });
-    expect(query).toContain('WHERE ec.event_id IN (9)');
-    expect(query).toContain("AND status IN ('RUNNING')");
+    expect(query.text).toContain('status = ANY($1::text[])');
+    expect(query.text).toContain('WHERE ec.event_id = ANY($2::int[])');
+    expect(query.values).toEqual([['RUNNING'], [9]]);
   });
 
   it('matches nothing rather than everything for an invalid listing or event id', () => {
-    expect(handler.generateSelectQuery({ listingId: "1' OR 1=1" })).toContain('AND FALSE');
-    expect(handler.generateSelectQuery({ eventId: 'abc' })).toContain('AND FALSE');
+    expect(handler.generateSelectQuery({ listingId: "1' OR 1=1" }).text).toContain('WHERE FALSE');
+    expect(handler.generateSelectQuery({ eventId: 'abc' }).text).toContain('WHERE FALSE');
   });
 
   it('guards an update on the expected statuses', () => {
@@ -39,28 +44,25 @@ describe('strategy session queries', () => {
       { session_id: 's1' },
       JSON.stringify({ status: 'RUNNING', expectedStatus: ['SUBMITTED', 'STARTING'] }),
     );
-    expect(query).toContain("SET status='RUNNING'");
-    expect(query).toContain("WHERE session_id='s1' AND status IN ('SUBMITTED', 'STARTING')");
+    expect(query.text).toContain('SET status = $1');
+    expect(query.text).toContain('WHERE session_id = $2 AND status = ANY($3::text[])');
+    expect(query.values).toEqual(['RUNNING', 's1', ['SUBMITTED', 'STARTING']]);
   });
 
   it('updates unconditionally without an expected status', () => {
     const query = handler.generateModifyQuery({ session_id: 's1' }, JSON.stringify({ instanceId: 'i-1' }));
-    expect(query).toContain("instance_id='i-1'");
-    expect(query).not.toContain('status IN');
+    expect(query.text).toContain('instance_id = $1');
+    expect(query.text).not.toContain('status');
   });
 
-  it('escapes quotes in failure reasons, which come from AWS error messages', () => {
-    const query = handler.generateModifyQuery({ session_id: 's1' }, JSON.stringify({ failureReason: "can't launch" }));
-    expect(query).toContain("failure_reason='can''t launch'");
-  });
-
-  it('keeps the first stop reason and stopper, escaping quotes', () => {
+  it('keeps the first stop reason and stopper', () => {
     const query = handler.generateModifyQuery(
       { session_id: 's1' },
       JSON.stringify({ status: 'STOPPING', stopReason: "match's live", stoppedBy: 'strategy' }),
     );
-    expect(query).toContain("stop_reason=COALESCE(stop_reason, 'match''s live')");
-    expect(query).toContain("stopped_by=COALESCE(stopped_by, 'strategy')");
+    expect(query.text).toContain('stop_reason = COALESCE(stop_reason, $2)');
+    expect(query.text).toContain('stopped_by = COALESCE(stopped_by, $3)');
+    expect(query.values).toEqual(['STOPPING', "match's live", 'strategy', 's1']);
   });
 
   it('parses statuses from a list or a comma-separated string', () => {

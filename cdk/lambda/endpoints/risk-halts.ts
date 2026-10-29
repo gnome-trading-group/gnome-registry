@@ -1,6 +1,7 @@
 import { APIGatewayProxyEvent } from 'aws-lambda';
 import { connectDatabase } from '../connections';
 import { withTransaction } from './base';
+import { raw, Sql, sql } from './sql';
 
 const CORS_HEADERS = {
   'Access-Control-Allow-Origin': '*',
@@ -54,24 +55,25 @@ export type HaltTarget =
 // fallback SELECT still returns the policy_id in that case. The fallback matches the target exactly, so a session's
 // kill and its strategy's kill are never both returned. A session that doesn't exist inserts nothing and returns no
 // rows. The ON CONFLICT names idx_risk_policy_unique's exact expressions (migration 037), so the two change together.
-export function generateHaltUpsertQuery(target: HaltTarget): string {
-  const idOrNull = (id: number | undefined) => (id == null ? 'NULL::integer' : String(id));
-  const isOrEquals = (column: string, id: number | undefined) => (id == null ? `${column} IS NULL` : `${column}=${id}`);
-  let source: string;
-  let match: string;
+export function generateHaltUpsertQuery(target: HaltTarget): Sql {
+  const isOrEquals = (column: string, id: number | undefined) =>
+    (id == null ? sql`${raw(column)} IS NULL` : sql`${raw(column)} = ${id}`);
+  let source: Sql;
+  let match: Sql;
   if ('sessionId' in target) {
-    source = `SELECT 'KILL_SWITCH', session_id, strategy_id, NULL::integer, NULL::integer, '{}'::jsonb, true
-       FROM strategy.session WHERE session_id='${target.sessionId}'`;
-    match = `session_id='${target.sessionId}' AND exchange_id IS NULL AND listing_id IS NULL`;
+    source = sql`SELECT 'KILL_SWITCH', session_id, strategy_id, NULL::integer, NULL::integer, '{}'::jsonb, true
+       FROM strategy.session WHERE session_id = ${target.sessionId}`;
+    match = sql`session_id = ${target.sessionId} AND exchange_id IS NULL AND listing_id IS NULL`;
   } else {
     const strategyId = 'strategyId' in target ? target.strategyId : undefined;
     const listingId = 'listingId' in target ? target.listingId : undefined;
-    source = `SELECT 'KILL_SWITCH', NULL, ${idOrNull(strategyId)}, ${idOrNull(target.exchangeId)},
-       ${idOrNull(listingId)}, '{}'::jsonb, true`;
-    match = `session_id IS NULL AND ${isOrEquals('strategy_id', strategyId)}`
-      + ` AND ${isOrEquals('exchange_id', target.exchangeId)} AND ${isOrEquals('listing_id', listingId)}`;
+    // Cast because an untyped value in a SELECT list is text, which the integer columns won't take.
+    source = sql`SELECT 'KILL_SWITCH', NULL, ${strategyId ?? null}::integer, ${target.exchangeId ?? null}::integer,
+       ${listingId ?? null}::integer, '{}'::jsonb, true`;
+    match = sql`session_id IS NULL AND ${isOrEquals('strategy_id', strategyId)}
+      AND ${isOrEquals('exchange_id', target.exchangeId)} AND ${isOrEquals('listing_id', listingId)}`;
   }
-  return `
+  return sql`
     WITH upserted AS (
       INSERT INTO risk.policy (policy_type, session_id, strategy_id, exchange_id, listing_id, parameters, enabled)
       ${source}
@@ -85,7 +87,7 @@ export function generateHaltUpsertQuery(target: HaltTarget): string {
     UNION ALL
     SELECT policy_id FROM risk.policy
     WHERE policy_type='KILL_SWITCH' AND ${match}
-      AND NOT EXISTS (SELECT 1 FROM upserted);
+      AND NOT EXISTS (SELECT 1 FROM upserted)
   `;
 }
 

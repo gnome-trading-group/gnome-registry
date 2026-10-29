@@ -63,20 +63,20 @@ describe('SimulationParametersHandler', () => {
   const handler = new SimulationParametersHandler();
 
   it('reads the parameters in force per exchange at a pinned time', () => {
-    const sql = handler.generateSelectQuery({ knownAsOf: '2026-10-01T00:00:00Z', exchangeId: '3' });
-    expect(sql).toContain("recorded_at <= '2026-10-01T00:00:00.000Z'");
-    expect(sql).toContain('DISTINCT ON (exchange_id)');
-    expect(sql).toContain('exchange_id=3');
+    const query = handler.generateSelectQuery({ knownAsOf: '2026-10-01T00:00:00Z', exchangeId: '3' });
+    expect(query.text).toContain('DISTINCT ON (exchange_id)');
+    expect(query.text).toContain('WHERE recorded_at <= $1::timestamptz AND exchange_id = $2');
+    expect(query.values).toEqual(['2026-10-01T00:00:00.000Z', 3]);
   });
 
   it('lists the history newest first', () => {
-    expect(handler.generateSelectQuery({ history: 'true' })).toContain('ORDER BY recorded_at DESC');
+    expect(handler.generateSelectQuery({ history: 'true' }).text).toContain('ORDER BY recorded_at DESC');
   });
 
   it('validates what it stores, and never changes or deletes a row', () => {
     expect(() => handler.generateInsertQuery(JSON.stringify({ exchangeId: 1, definition: { queue_model: {} } }))).toThrow(ValidationError);
-    expect(handler.generateInsertQuery(JSON.stringify({ exchangeId: 1, definition: valid(), note: "it's measured" })))
-      .toContain("'it''s measured'");
+    expect(handler.generateInsertQuery(JSON.stringify({ exchangeId: 1, definition: valid(), note: " it's measured " })).values)
+      .toContain("it's measured");
     expect(() => handler.generateDeleteQuery('{}')).toThrow('append-only');
     expect(() => handler.generateModifyQuery({}, '{}')).toThrow('append-only');
   });

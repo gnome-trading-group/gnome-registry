@@ -1,5 +1,6 @@
 import { APIGatewayProxyEvent, APIGatewayProxyEventQueryStringParameters } from 'aws-lambda';
-import { ResourceHandler } from './base';
+import { ResourceHandler, ValidationError } from './base';
+import { join, raw, set, Sql, sql, where } from './sql';
 import { ICreateContractRelationship, IDeleteContractRelationship } from '../types';
 
 class ContractRelationshipHandler extends ResourceHandler {
@@ -7,98 +8,79 @@ class ContractRelationshipHandler extends ResourceHandler {
     return ['relationship_id', 'security_id_a', 'security_id_b', 'relationship_type', 'confidence', 'method', 'date_created'];
   }
 
-  generateDeleteQuery(body: string): string {
+  generateDeleteQuery(body: string): Sql {
     const rel = JSON.parse(body) as IDeleteContractRelationship;
-    return `
-      DELETE FROM sm.contract_relationship
-      WHERE relationship_id = ${rel.relationshipId}
-      RETURNING *;
-    `;
+    return sql`DELETE FROM sm.contract_relationship WHERE relationship_id = ${rel.relationshipId} RETURNING *`;
   }
 
-  generateInsertQuery(body: string): string {
+  generateInsertQuery(body: string): Sql {
     const rel = JSON.parse(body) as ICreateContractRelationship;
-    return `
+    return sql`
       INSERT INTO sm.contract_relationship
         (security_id_a, security_id_b, relationship_type, confidence, method)
       VALUES
-        (${rel.securityIdA}, ${rel.securityIdB}, '${rel.relationshipType}', ${rel.confidence}, '${rel.method}')
+        (${rel.securityIdA}, ${rel.securityIdB}, ${rel.relationshipType}, ${rel.confidence}, ${rel.method})
       ON CONFLICT (security_id_a, security_id_b) DO UPDATE SET
         relationship_type = EXCLUDED.relationship_type,
         confidence = EXCLUDED.confidence,
         method = EXCLUDED.method
-      RETURNING *;
-    `;
+      RETURNING *`;
   }
 
-  generateSelectQuery(params: APIGatewayProxyEventQueryStringParameters | null): string {
+  generateSelectQuery(params: APIGatewayProxyEventQueryStringParameters | null): Sql {
     const denormalize = params?.denormalize === 'true';
     const filterUnresolved = params?.eventResolved === 'false';
-    const p = denormalize ? 'cr.' : '';
+    const column = (name: string) => raw(denormalize ? `cr.${name}` : name);
 
-    let filters = '';
-    if (params?.relationshipId) {
-      filters += ` AND ${p}relationship_id = ${params.relationshipId}`;
-    }
-    if (params?.securityId) {
-      filters += ` AND (${p}security_id_a = ${params.securityId} OR ${p}security_id_b = ${params.securityId})`;
-    }
-    if (params?.method) {
-      filters += ` AND ${p}method = '${params.method}'`;
-    }
-    if (params?.relationshipType) {
-      filters += ` AND ${p}relationship_type = '${params.relationshipType}'`;
-    }
-    if (filterUnresolved) {
-      filters += ` AND (${p}security_id_a IN (SELECT security_id FROM unresolved_securities) OR ${p}security_id_b IN (SELECT security_id FROM unresolved_securities))`;
-    }
+    const filters = where([
+      params?.relationshipId && sql`${column('relationship_id')} = ${params.relationshipId}`,
+      params?.securityId
+        && sql`(${column('security_id_a')} = ${params.securityId} OR ${column('security_id_b')} = ${params.securityId})`,
+      params?.method && sql`${column('method')} = ${params.method}`,
+      params?.relationshipType && sql`${column('relationship_type')} = ${params.relationshipType}`,
+      filterUnresolved && sql`(${column('security_id_a')} IN (SELECT security_id FROM unresolved_securities) OR ${column('security_id_b')} IN (SELECT security_id FROM unresolved_securities))`,
+    ]);
 
-    const ctes: string[] = [];
+    const ctes: Sql[] = [];
     if (filterUnresolved) {
-      ctes.push(`unresolved_securities AS (SELECT DISTINCT ec.security_id FROM sm.event_contract ec JOIN sm.event e ON ec.event_id = e.event_id WHERE e.resolved = false)`);
+      ctes.push(sql`unresolved_securities AS (SELECT DISTINCT ec.security_id FROM sm.event_contract ec JOIN sm.event e ON ec.event_id = e.event_id WHERE e.resolved = false)`);
     }
 
     if (params?.eventId) {
-      ctes.push(`event_securities AS (SELECT security_id FROM sm.event_contract WHERE event_id = ${params.eventId})`);
-      const cteClause = `WITH ${ctes.join(', ')} `;
-      if (denormalize) {
-        const branch = (joinCol: string) =>
-          `SELECT cr.*, sa.symbol AS symbol_a, sb.symbol AS symbol_b
+      ctes.push(sql`event_securities AS (SELECT security_id FROM sm.event_contract WHERE event_id = ${params.eventId})`);
+      const cteClause = sql`WITH ${join(ctes, ', ')} `;
+      const branch = (joinCol: string) => denormalize
+        ? sql`SELECT cr.*, sa.symbol AS symbol_a, sb.symbol AS symbol_b
            FROM sm.contract_relationship cr
            JOIN sm.security sa ON cr.security_id_a = sa.security_id
            JOIN sm.security sb ON cr.security_id_b = sb.security_id
-           JOIN event_securities es ON ${joinCol} = es.security_id
-           WHERE 1=1${filters}`;
-        return `${cteClause}${branch('cr.security_id_a')} UNION ${branch('cr.security_id_b')}`;
-      } else {
-        const branch = (joinCol: string) =>
-          `SELECT cr.*
+           JOIN event_securities es ON ${raw(joinCol)} = es.security_id${filters}`
+        : sql`SELECT cr.*
            FROM sm.contract_relationship cr
-           JOIN event_securities es ON ${joinCol} = es.security_id
-           WHERE 1=1${filters}`;
-        return `${cteClause}${branch('cr.security_id_a')} UNION ${branch('cr.security_id_b')}`;
-      }
+           JOIN event_securities es ON ${raw(joinCol)} = es.security_id${filters}`;
+      return sql`${cteClause}${branch('cr.security_id_a')} UNION ${branch('cr.security_id_b')}`;
     }
 
-    const cteClause = ctes.length > 0 ? `WITH ${ctes.join(', ')} ` : '';
-    let query = denormalize
-      ? `SELECT cr.*, sa.symbol AS symbol_a, sb.symbol AS symbol_b
+    const cteClause = ctes.length > 0 ? sql`WITH ${join(ctes, ', ')} ` : raw('');
+    const from = denormalize
+      ? sql`SELECT cr.*, sa.symbol AS symbol_a, sb.symbol AS symbol_b
          FROM sm.contract_relationship cr
          JOIN sm.security sa ON cr.security_id_a = sa.security_id
-         JOIN sm.security sb ON cr.security_id_b = sb.security_id
-         WHERE 1=1`
-      : 'SELECT * FROM sm.contract_relationship WHERE 1=1';
-    query += filters;
-    return `${cteClause}${query}`;
+         JOIN sm.security sb ON cr.security_id_b = sb.security_id`
+      : sql`SELECT * FROM sm.contract_relationship`;
+    return sql`${cteClause}${from}${filters}`;
   }
 
-  generateModifyQuery(row: any, body: string): string {
+  generateModifyQuery(row: any, body: string): Sql {
     const rel = JSON.parse(body) as Partial<ICreateContractRelationship>;
-    const updates: string[] = [];
-    if (rel.relationshipType !== undefined) updates.push(`relationship_type = '${rel.relationshipType}'`);
-    if (rel.confidence !== undefined) updates.push(`confidence = ${rel.confidence}`);
-    if (rel.method !== undefined) updates.push(`method = '${rel.method}'`);
-    return `UPDATE sm.contract_relationship SET ${updates.join(', ')} WHERE relationship_id = ${row['relationship_id']} RETURNING *`;
+    if (rel.relationshipType === undefined && rel.confidence === undefined && rel.method === undefined) {
+      throw new ValidationError('Nothing to modify: give relationshipType, confidence or method');
+    }
+    return sql`UPDATE sm.contract_relationship SET ${set({
+      relationship_type: rel.relationshipType,
+      confidence: rel.confidence,
+      method: rel.method,
+    })} WHERE relationship_id = ${row['relationship_id']} RETURNING *`;
   }
 }
 

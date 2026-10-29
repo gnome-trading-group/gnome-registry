@@ -1,5 +1,6 @@
 import { APIGatewayProxyEvent, APIGatewayProxyEventQueryStringParameters } from 'aws-lambda';
 import { ResourceHandler } from './base';
+import { NOW, set, Sql, sql, where } from './sql';
 import { ICreateHedgeKeyword, IDeleteHedgeKeyword } from '../types';
 
 class HedgeKeywordHandler extends ResourceHandler {
@@ -10,50 +11,32 @@ class HedgeKeywordHandler extends ResourceHandler {
     return ['hedge_keyword_id', 'security_id', 'keyword', 'date_created', 'date_modified'];
   }
 
-  generateDeleteQuery(body: string): string {
+  generateDeleteQuery(body: string): Sql {
     const hk = JSON.parse(body) as IDeleteHedgeKeyword;
-    return `
-      DELETE FROM sm.hedge_keyword
-      WHERE hedge_keyword_id = ${hk.hedgeKeywordId}
-      RETURNING *;
-    `;
+    return sql`DELETE FROM sm.hedge_keyword WHERE hedge_keyword_id = ${hk.hedgeKeywordId} RETURNING *`;
   }
 
-  generateInsertQuery(body: string): string {
+  generateInsertQuery(body: string): Sql {
     const hk = JSON.parse(body) as ICreateHedgeKeyword;
-    return `
-      INSERT INTO sm.hedge_keyword (security_id, keyword)
-      VALUES (${hk.securityId}, '${hk.keyword.replace(/'/g, "''")}')
-      RETURNING *;
-    `;
+    return sql`INSERT INTO sm.hedge_keyword (security_id, keyword) VALUES (${hk.securityId}, ${hk.keyword}) RETURNING *`;
   }
 
-  generateSelectQuery(params: APIGatewayProxyEventQueryStringParameters | null): string {
-    let query = `
+  generateSelectQuery(params: APIGatewayProxyEventQueryStringParameters | null): Sql {
+    return sql`
       SELECT hk.*, s.symbol AS security_symbol
       FROM sm.hedge_keyword hk
-      JOIN sm.security s ON s.security_id = hk.security_id
-      WHERE 1=1
-    `;
-    if (params?.hedgeKeywordId) {
-      query += ` AND hk.hedge_keyword_id = ${params.hedgeKeywordId}`;
-    }
-    if (params?.securityId) {
-      query += ` AND hk.security_id = ${params.securityId}`;
-    }
-    if (params?.keyword) {
-      query += ` AND hk.keyword = '${params.keyword.replace(/'/g, "''")}'`;
-    }
-    query += ' ORDER BY hk.date_created DESC';
-    return query;
+      JOIN sm.security s ON s.security_id = hk.security_id${where([
+        params?.hedgeKeywordId && sql`hk.hedge_keyword_id = ${params.hedgeKeywordId}`,
+        params?.securityId && sql`hk.security_id = ${params.securityId}`,
+        params?.keyword && sql`hk.keyword = ${params.keyword}`,
+      ])}
+      ORDER BY hk.date_created DESC`;
   }
 
-  generateModifyQuery(row: any, body: string): string {
+  generateModifyQuery(row: any, body: string): Sql {
     const hk = JSON.parse(body) as Partial<ICreateHedgeKeyword>;
-    const updates: string[] = [];
-    if (hk.keyword !== undefined) updates.push(`keyword = '${hk.keyword.replace(/'/g, "''")}'`);
-    updates.push('date_modified = NOW()');
-    return `UPDATE sm.hedge_keyword SET ${updates.join(', ')} WHERE hedge_keyword_id = ${row['hedge_keyword_id']} RETURNING *`;
+    return sql`UPDATE sm.hedge_keyword SET ${set({ keyword: hk.keyword, date_modified: NOW })}
+      WHERE hedge_keyword_id = ${row['hedge_keyword_id']} RETURNING *`;
   }
 }
 

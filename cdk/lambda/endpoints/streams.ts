@@ -1,7 +1,6 @@
 import { APIGatewayProxyEvent, APIGatewayProxyEventQueryStringParameters } from 'aws-lambda';
 import { parseIdList, ResourceHandler } from './base';
-
-const sqlText = (value: string) => `'${value.replace(/'/g, "''")}'`;
+import { anyId, raw, Sql, sql, where } from './sql';
 
 // A listing's stream stores only its listing_id, so its subject id and active flag are read from the listing here, and
 // its event from the listing's contract (both sides of a binary contract are listings of one security, so both resolve
@@ -16,15 +15,13 @@ const STREAM_SELECT = `
   JOIN md.source src ON src.source_id = st.source_id
   LEFT JOIN sm.exchange e ON e.exchange_id = src.exchange_id
   LEFT JOIN sm.listing l ON l.listing_id = st.listing_id
-  LEFT JOIN LATERAL (SELECT MIN(event_id) AS event_id FROM sm.event_contract WHERE security_id = l.security_id) ec ON true
-  WHERE 1=1`;
+  LEFT JOIN LATERAL (SELECT MIN(event_id) AS event_id FROM sm.event_contract WHERE security_id = l.security_id) ec ON true`;
 
 /** Streams of these events: vendor streams by their own event, listing streams through their contract. */
-function eventFilter(ids: number[]): string {
-  if (ids.length === 0) return ' AND FALSE';
-  const list = ids.join(',');
-  return ` AND (st.event_id IN (${list})
-    OR l.security_id IN (SELECT security_id FROM sm.event_contract WHERE event_id IN (${list})))`;
+function eventFilter(ids: number[]): Sql {
+  if (ids.length === 0) return raw('FALSE');
+  return sql`(st.event_id = ANY(${ids}::int[])
+    OR l.security_id IN (SELECT security_id FROM sm.event_contract WHERE event_id = ANY(${ids}::int[])))`;
 }
 
 export class StreamHandler extends ResourceHandler {
@@ -32,38 +29,18 @@ export class StreamHandler extends ResourceHandler {
     return ['stream_id', 'source_id', 'listing_id', 'family', 'date_created'];
   }
 
-  generateSelectQuery(params: APIGatewayProxyEventQueryStringParameters | null): string {
-    let query = STREAM_SELECT;
-    if (params?.streamId) {
-      query += ` AND st.stream_id=${Number(params.streamId)}`;
-    }
-    if (params?.streamIds !== undefined) {
-      const ids = parseIdList(params.streamIds);
-      query += ids.length > 0 ? ` AND st.stream_id IN (${ids.join(',')})` : ' AND FALSE';
-    }
-    if (params?.listingId) {
-      query += ` AND st.listing_id=${Number(params.listingId)}`;
-    }
-    if (params?.listingIds !== undefined) {
-      const ids = parseIdList(params.listingIds);
-      query += ids.length > 0 ? ` AND st.listing_id IN (${ids.join(',')})` : ' AND FALSE';
-    }
-    if (params?.sourceId) {
-      query += ` AND st.source_id=${Number(params.sourceId)}`;
-    }
-    if (params?.family) {
-      query += ` AND st.family=${sqlText(params.family)}`;
-    }
-    if (params?.eventId) {
-      query += eventFilter(parseIdList(params.eventId));
-    }
-    if (params?.eventIds !== undefined) {
-      query += eventFilter(parseIdList(params.eventIds));
-    }
-    if (params?.active !== undefined) {
-      query += ` AND COALESCE(st.active, l.active)=${params.active === 'true'}`;
-    }
-    return query;
+  generateSelectQuery(params: APIGatewayProxyEventQueryStringParameters | null): Sql {
+    return sql`${raw(STREAM_SELECT)}${where([
+      params?.streamId && sql`st.stream_id = ${Number(params.streamId)}`,
+      params?.streamIds !== undefined && anyId('st.stream_id', parseIdList(params.streamIds)),
+      params?.listingId && sql`st.listing_id = ${Number(params.listingId)}`,
+      params?.listingIds !== undefined && anyId('st.listing_id', parseIdList(params.listingIds)),
+      params?.sourceId && sql`st.source_id = ${Number(params.sourceId)}`,
+      params?.family && sql`st.family = ${params.family}`,
+      params?.eventId && eventFilter(parseIdList(params.eventId)),
+      params?.eventIds !== undefined && eventFilter(parseIdList(params.eventIds)),
+      params?.active !== undefined && sql`COALESCE(st.active, l.active) = ${params.active === 'true'}`,
+    ])}`;
   }
 }
 
