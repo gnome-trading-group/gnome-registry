@@ -73,11 +73,12 @@
       "url": "https://github.com/gnome-trading-group/gnome-registry/blob/main/docs/runbooks/alerts/CLOUDWATCH_ALARM.md"
     },
     "COLLECTION_BUDGET": {
-      "summary": "Streams can't be placed because the source's market-data accounts have no connections left.",
+      "summary": "Streams can't be placed because the source's market-data accounts have no connections left, or their partition runs its max_shards.",
       "firstSteps": [
-        "The alert key is `COLLECTION_BUDGET:<source>`; the `unplaced` label counts the streams.",
-        "Open Market Data → Credentials and check the source's market-data accounts (ACTIVE, connection budget).",
-        "Decide whether to add an account or collect fewer streams."
+        "The alert key is `COLLECTION_BUDGET:<source>` (accounts) or `COLLECTION_BUDGET:max_shards:<region>:<kind>:<priority>:<tier>` (shard cap); the `unplaced` label counts the streams.",
+        "Accounts: open Market Data → Credentials and check the source's market-data accounts (ACTIVE, connection budget).",
+        "Shard cap: check `max_shards` in the `market-data` Service Config against the partition's shards (Market Data → Collection → Shards).",
+        "Decide whether to add an account, raise the cap, or collect fewer streams."
       ],
       "url": "https://github.com/gnome-trading-group/gnome-registry/blob/main/docs/runbooks/alerts/COLLECTION_BUDGET.md"
     },
@@ -252,6 +253,24 @@
         "Nothing to do; this is a record."
       ],
       "url": "https://github.com/gnome-trading-group/gnome-registry/blob/main/docs/runbooks/alerts/LAUNCH_SUCCEEDED.md"
+    },
+    "LEASED_STREAM_UNPLACED": {
+      "summary": "A stream a session leased has had no shard for 5 minutes, so that session is about to fail to start or has lost its data.",
+      "firstSteps": [
+        "The alert names the source and region; the `streams` label lists the stream ids.",
+        "Open Market Data → Collection → Shards for that region and check for a shard starting, failing or out of capacity.",
+        "Check the session waiting on it (its config's listings and `streams`): it fails to start 10 minutes after launch."
+      ],
+      "url": "https://github.com/gnome-trading-group/gnome-registry/blob/main/docs/runbooks/alerts/LEASED_STREAM_UNPLACED.md"
+    },
+    "LEASE_HOLDERS_UNREADABLE": {
+      "summary": "The market-data reconciler hasn't been able to read the registry's strategy sessions for 15 minutes while sessions hold stream leases.",
+      "firstSteps": [
+        "Check the registry API (`GET /api/strategy-sessions?status=RUNNING`) and its `strategysessions` Lambda's logs for errors.",
+        "Read the reconciler's log (`/aws/lambda/<Stage>-MarketDataReconcilerStack-Reconciler-v1`) for \"Couldn't read the registry's sessions\" and the error after it.",
+        "Check whether the registry's API key the reconciler uses (`REGISTRY_API_KEY_ID`) was rotated or removed."
+      ],
+      "url": "https://github.com/gnome-trading-group/gnome-registry/blob/main/docs/runbooks/alerts/LEASE_HOLDERS_UNREADABLE.md"
     },
     "LEDGER_FAILING": {
       "summary": "The session's ledger writes are failing; the OMS halts every strategy in it.",

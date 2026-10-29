@@ -97,6 +97,9 @@ export const ALERT_TYPES: Record<string, AlertType> = {
   STREAM_NOT_LIVE: { severity: 'WARNING', debounce: 1 },
   STREAM_STALE: { severity: 'WARNING', debounce: 1 },
   COLLECTION_BUDGET: { severity: 'ERROR', debounce: 1 },
+  LEASED_STREAM_UNPLACED: { severity: 'WARNING', debounce: 1 },
+  // Raised after 15 minutes without the registry's sessions; until then leases simply aren't extended or released.
+  LEASE_HOLDERS_UNREADABLE: { severity: 'WARNING', debounce: 1 },
   PIPELINE_FAILED: { severity: e => e.labels?.trigger === 'scheduled' ? 'ERROR' : 'INFO', debounce: 1 },
   CUSTOM: { severity: e => e.severity ?? 'WARNING', debounce: 1 },
 

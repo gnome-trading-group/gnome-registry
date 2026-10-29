@@ -1,6 +1,7 @@
 package group.gnometrading.sm;
 
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
+import java.util.List;
 
 @JsonIgnoreProperties(ignoreUnknown = true)
 public record ContractRelationship(
@@ -8,5 +9,5 @@ public record ContractRelationship(
         int securityIdA,
         int securityIdB,
         String relationshipType,
-        float confidence,
-        String method) {}
+        String method,
+        List<String> flags) {}

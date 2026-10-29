@@ -56,6 +56,16 @@ jest.mock('@aws-sdk/client-eventbridge', () => ({
   })),
   PutEventsCommand: jest.fn().mockImplementation((input) => ({ input })),
 }));
+let marketDataSecret: string | undefined = 'md-key';
+jest.mock('@aws-sdk/client-secrets-manager', () => ({
+  SecretsManagerClient: jest.fn().mockImplementation(() => ({
+    send: async (cmd: any) => {
+      events.push(`Secret ${cmd.input.SecretId}`);
+      return { SecretString: marketDataSecret };
+    },
+  })),
+  GetSecretValueCommand: jest.fn().mockImplementation((input) => ({ input })),
+}));
 // Not installed locally (only provided by the Lambda runtime), so it must be virtual.
 const logQueries: any[] = [];
 jest.mock('@aws-sdk/client-cloudwatch-logs', () => ({
@@ -71,6 +81,7 @@ jest.mock('@aws-sdk/client-cloudwatch-logs', () => ({
 process.env.REGISTRY_API_URL = 'https://registry.test/api/';
 process.env.REGISTRY_API_KEY_ID = 'key-id';
 process.env.STAGE = 'dev';
+process.env.MARKET_DATA_API_KEY_SECRET = 'gnome/api-keys/market-data';
 
 const launcher = require('../lambda/endpoints/strategy-session-launcher');
 
@@ -84,6 +95,14 @@ let sessionRow: any;
 let patchStatus = 200;
 let postStatus = 200;
 let sleeps: number[] = [];
+// Market-data API calls: each request, and the statuses successive lease POSTs answer with (then 200).
+let marketDataCalls: { method: string; path: string; body: any; headers: any }[] = [];
+let leaseStatusQueue: (number | Error)[] = [];
+let leaseDeleteStatus = 200;
+// The streams the registry knows, and the book stream of each listing.
+let knownStreams: number[] = [];
+let inactiveStreams: number[] = [];
+let listingStreams: { stream_id: number; listing_id: number; family: string; active?: boolean }[] = [];
 
 function jsonResponse(body: unknown, status = 200) {
   return { ok: status >= 200 && status < 300, status, json: async () => body, text: async () => JSON.stringify(body) };
@@ -146,12 +165,20 @@ beforeEach(() => {
   patchStatusQueue = [];
   postStatus = 200;
   runInstancesError = null;
+  marketDataCalls = [];
+  leaseStatusQueue = [];
+  leaseDeleteStatus = 200;
+  marketDataSecret = 'md-key';
+  knownStreams = [101, 900, 901];
+  inactiveStreams = [];
+  listingStreams = [{ stream_id: 101, listing_id: 1, family: 'book', active: true }];
   sessionRow = { session_id: 's1', strategy_id: 7, instance_id: 'i-123', launch_region: 'eu-west-1' };
   Object.assign(ssmParams, {
     '/gnome/orchestrator/latest-version': '1.12.2',
     '/gnome/orchestrator/ami/16core': 'ami-16',
     '/gnome/orchestrator/ami/32core': 'ami-32',
     '/gnome/orchestrator/ami/standard': 'ami-std',
+    '/gnome/market-data/api-url': 'https://md.test/api/',
   });
   (global as any).fetch = jest.fn(async (url: string, init: any = {}) => {
     if (url.startsWith('https://pypi.org/')) {
@@ -159,6 +186,17 @@ beforeEach(() => {
       return jsonResponse({ info: { version: '2.20.2' } });
     }
     const method = init.method ?? 'GET';
+    if (url.startsWith('https://md.test/api/')) {
+      const mdPath = url.replace('https://md.test/api', '');
+      events.push(`MD ${method} ${mdPath}`);
+      marketDataCalls.push({ method, path: mdPath, body: init.body ? JSON.parse(init.body) : undefined, headers: init.headers });
+      // As API Gateway answers a key it doesn't know, e.g. one rotated since the launcher cached it.
+      if (init.headers?.['x-api-key'] !== marketDataSecret) return jsonResponse({ message: 'Forbidden' }, 403);
+      if (method === 'DELETE') return jsonResponse({}, leaseDeleteStatus);
+      const next = leaseStatusQueue.shift() ?? 200;
+      if (next instanceof Error) throw next;
+      return jsonResponse(next === 200 ? { sessionId: 'session-0001' } : { message: 'leases down' }, next);
+    }
     const path = url.replace('https://registry.test/api', '').split('?')[0];
     events.push(`${method} ${path}`);
     if (path === '/risk/halts') {
@@ -168,6 +206,16 @@ beforeEach(() => {
     if (method === 'GET' && path === '/simulation-parameters') {
       simulationQueries.push(url);
       return jsonResponse(simulationRows);
+    }
+    if (method === 'GET' && path === '/streams') {
+      const params = new URL(url).searchParams;
+      if (params.has('listingIds')) {
+        const ids = params.get('listingIds')!.split(',').map(Number);
+        return jsonResponse(listingStreams.filter((r) => ids.includes(r.listing_id)));
+      }
+      const ids = params.get('streamIds')!.split(',').map(Number);
+      return jsonResponse(ids.filter((id) => knownStreams.includes(id))
+        .map((stream_id) => ({ stream_id, active: !inactiveStreams.includes(stream_id) })));
     }
     if (method === 'GET' && path === '/listings') return jsonResponse([{ listing_id: 1, exchange_id: 5 }]);
     if (method === 'GET' && path === '/exchanges') {
@@ -206,11 +254,16 @@ describe('POST /strategy-sessions/launch', () => {
       'GET /listings',
       'GET /exchanges',
       'GET /simulation-parameters',
+      'GET /streams',
+      // Read once per container.
+      'SSM /gnome/market-data/api-url',
+      'Secret gnome/api-keys/market-data',
       'PyPI',
       'SSM /gnome/orchestrator/ami/16core',
       // Read once per container.
       'SSM /gnome/alerting/api-url',
       'POST /strategy-sessions',
+      'MD POST /collection/leases',
       'RunInstances',
       'PATCH /strategy-sessions',
     ]);
@@ -733,5 +786,311 @@ describe('GET /strategy-sessions/logs', () => {
     await launcher.handler(logsEvent());
 
     expect(logQueries[0].endTime).toBe(Date.parse('2026-09-01T12:05:00Z'));
+  });
+});
+
+describe('market-data streams and leases', () => {
+  const launch = (overrides: Record<string, unknown> = {}, config: Record<string, unknown> = {}) =>
+    launcher.handler(apiEvent('/strategy-sessions/launch', launchBody(overrides, config)));
+  const leasePosts = () => marketDataCalls.filter((c) => c.method === 'POST');
+
+  it("leases a paper session's book streams and data-only streams with the market-data API key", async () => {
+    const res = await launch({}, { streams: [900, 901] });
+
+    expect(res.statusCode).toBe(200);
+    expect(leasePosts()).toHaveLength(1);
+    expect(leasePosts()[0]).toMatchObject({
+      path: '/collection/leases',
+      body: { sessionId: 'session-0001', streams: [101, 900, 901], mode: 'paper', region: 'us-east-1' },
+      headers: { 'x-api-key': 'md-key' },
+    });
+  });
+
+  it('tells the session its data-only streams and how to reach its lease', async () => {
+    await launch({}, { streams: [900, 901] });
+
+    expect(sessionEnv()).toMatchObject({
+      STREAMS: '[900,901]',
+      MARKET_DATA_API_URL: 'https://md.test/api',
+      MARKET_DATA_API_KEY_SECRET: 'gnome/api-keys/market-data',
+    });
+  });
+
+  it('keeps the market-data API out of reach of overrides', () => {
+    const env = launcher.buildSessionEnvironment(
+      launchBody({}, { 'overrides.market.data.api.url': 'https://elsewhere' }) as any,
+      { orchestratorVersion: '1', gnomepyVersion: '2' }, undefined, 'https://md.test/api',
+    );
+    expect(env.MARKET_DATA_API_URL).toBe('https://md.test/api');
+  });
+
+  it("de-duplicates streams and drops a traded listing's own book stream, in the stored config too", async () => {
+    await launch({}, { streams: [900, 101, 900] });
+
+    expect(postBodies[0].config.streams).toEqual([900]);
+    expect(sessionEnv().STREAMS).toBe('[900]');
+    expect(leasePosts()[0].body.streams).toEqual([101, 900]);
+  });
+
+  it('leases only the book streams of a session without data-only streams', async () => {
+    await launch();
+    expect(leasePosts()[0].body.streams).toEqual([101]);
+    expect(sessionEnv().STREAMS).toBeUndefined();
+  });
+
+  it.each([
+    ['not an array', '900'],
+    ['non-integer ids', [900, 1.5]],
+    ['string ids', ['900']],
+    ['non-positive ids', [0]],
+    ['ids past int32', [2 ** 31]],
+  ])('refuses streams with %s before anything is recorded', async (_name, streams) => {
+    const res = await launch({}, { streams });
+
+    expect(res.statusCode).toBe(400);
+    expect(JSON.parse(res.body).message).toContain('config.streams');
+    expect(postBodies).toHaveLength(0);
+    expect(marketDataCalls).toHaveLength(0);
+  });
+
+  it('refuses streams the registry does not know', async () => {
+    const res = await launch({}, { streams: [900, 77] });
+
+    expect(res.statusCode).toBe(400);
+    expect(JSON.parse(res.body).message).toBe('config.streams 77 are not streams');
+    expect(postBodies).toHaveLength(0);
+  });
+
+  it('refuses inactive streams, naming them, since no shard would collect them', async () => {
+    inactiveStreams = [901];
+    listingStreams = [{ stream_id: 101, listing_id: 1, family: 'book', active: false }];
+
+    const res = await launch({}, { streams: [900, 901] });
+
+    expect(res.statusCode).toBe(400);
+    expect(JSON.parse(res.body).message).toBe('Streams 101, 901 are not active, so no shard would collect them');
+    expect(postBodies).toHaveLength(0);
+    expect(marketDataCalls).toHaveLength(0);
+  });
+
+  it('refuses more streams than one lease takes', async () => {
+    knownStreams = Array.from({ length: 501 }, (_, i) => 1000 + i);
+
+    const res = await launch({}, { streams: knownStreams });
+
+    expect(res.statusCode).toBe(400);
+    expect(JSON.parse(res.body).message).toContain('at most 500 streams');
+    expect(postBodies).toHaveLength(0);
+  });
+
+  it('keeps STREAMS to the leased streams whatever the overrides say', () => {
+    const env = launcher.buildSessionEnvironment(
+      launchBody({}, { streams: [900], 'overrides.streams': '[1,2,3]' }) as any,
+      { orchestratorVersion: '1', gnomepyVersion: '2' }, undefined, 'https://md.test/api',
+    );
+    expect(env.STREAMS).toBe('[900]');
+
+    const without = launcher.buildSessionEnvironment(
+      launchBody({}, { 'overrides.streams': '[1,2,3]' }) as any,
+      { orchestratorVersion: '1', gnomepyVersion: '2' }, undefined, 'https://md.test/api',
+    );
+    expect(without.STREAMS).toBeUndefined();
+  });
+
+  it('refuses a listing without a book stream', async () => {
+    listingStreams = [];
+    const res = await launch();
+
+    expect(res.statusCode).toBe(400);
+    expect(JSON.parse(res.body).message).toContain('No market-data book stream for listing(s) 1');
+    expect(postBodies).toHaveLength(0);
+  });
+
+  it('refuses data-only streams on a live session, which still reads its own feeds', async () => {
+    const res = await launch({ mode: 'live' }, { streams: [900] });
+
+    expect(res.statusCode).toBe(400);
+    expect(JSON.parse(res.body).message).toContain('paper');
+    expect(postBodies).toHaveLength(0);
+  });
+
+  it('leases nothing for a live session and gives it no market-data API', async () => {
+    const res = await launch({ mode: 'live' });
+
+    expect(res.statusCode).toBe(200);
+    expect(marketDataCalls).toHaveLength(0);
+    expect(events).not.toContain('GET /streams');
+    expect(sessionEnv().MARKET_DATA_API_URL).toBeUndefined();
+    expect(sessionEnv().MARKET_DATA_API_KEY_SECRET).toBeUndefined();
+  });
+
+  it.each([
+    ['a server error', 503],
+    ['a timeout', new Error('The operation was aborted due to timeout')],
+  ])('retries a lease after %s, since the POST is idempotent', async (_name, first) => {
+    leaseStatusQueue = [first];
+
+    const res = await launch();
+
+    expect(res.statusCode).toBe(200);
+    expect(leasePosts()).toHaveLength(2);
+    expect(sleeps).toEqual([250]);
+    expect(events).toContain('RunInstances');
+  });
+
+  it('waits long enough for a cold start on each try', async () => {
+    const timeout = jest.spyOn(AbortSignal, 'timeout');
+
+    await launch();
+
+    expect(timeout).toHaveBeenCalledWith(9000);
+  });
+
+  it('re-reads a rotated market-data key once and leases with it', async () => {
+    // A module of its own, so the key it caches doesn't outlive the test.
+    let fresh: any;
+    jest.isolateModules(() => {
+      fresh = require('../lambda/endpoints/strategy-session-launcher');
+    });
+    await fresh.handler(apiEvent('/strategy-sessions/launch', launchBody()));
+    marketDataCalls = [];
+    marketDataSecret = 'md-key-rotated';
+
+    const res = await fresh.handler(apiEvent('/strategy-sessions/launch', launchBody()));
+
+    expect(res.statusCode).toBe(200);
+    expect(leasePosts().map((c) => [c.headers['x-api-key'], c.headers['x-api-key'] === marketDataSecret]))
+      .toEqual([['md-key', false], ['md-key-rotated', true]]);
+  });
+
+  it('fails the session, launching nothing, when the lease is refused', async () => {
+    leaseStatusQueue = [400];
+
+    const res = await launch();
+
+    expect(res.statusCode).toBe(502);
+    expect(JSON.parse(res.body).message).toContain('Market-data lease failed');
+    expect(leasePosts()).toHaveLength(1);
+    expect(events).not.toContain('RunInstances');
+    expect(patchBodies).toHaveLength(1);
+    expect(patchBodies[0]).toMatchObject({ status: 'FAILED', expectedStatus: ['SUBMITTED'] });
+    expect(patchBodies[0].failureReason).toContain('Market-data lease failed: POST /collection/leases failed (400');
+  });
+
+  it('fails the session after the last retry', async () => {
+    leaseStatusQueue = [500, 500];
+
+    const res = await launch();
+
+    expect(res.statusCode).toBe(502);
+    expect(leasePosts()).toHaveLength(2);
+    expect(events).not.toContain('RunInstances');
+    expect(patchBodies[0].status).toBe('FAILED');
+  });
+
+  it('releases the lease of a session whose instance could not launch', async () => {
+    runInstancesError = Object.assign(new Error('no capacity'), { name: 'InsufficientInstanceCapacity' });
+
+    const res = await launch();
+
+    expect(res.statusCode).toBe(503);
+    expect(patchBodies[0]).toMatchObject({ status: 'FAILED' });
+    expect(marketDataCalls.map((c) => `${c.method} ${c.path}`)).toEqual([
+      'POST /collection/leases', 'DELETE /collection/leases/session-0001',
+    ]);
+  });
+
+  it('refuses a paper launch, recording nothing, when the market-data API is not configured', async () => {
+    delete ssmParams['/gnome/market-data/api-url'];
+    jest.spyOn(console, 'error').mockImplementation(() => undefined);
+    let fresh: any;
+    jest.isolateModules(() => {
+      fresh = require('../lambda/endpoints/strategy-session-launcher');
+    });
+
+    const res = await fresh.handler(apiEvent('/strategy-sessions/launch', launchBody()));
+
+    expect(res.statusCode).toBe(500);
+    expect(JSON.parse(res.body).message).toContain('Market-data API unavailable');
+    expect(postBodies).toHaveLength(0);
+    expect(ec2Calls.filter((c) => c.kind === 'RunInstances')).toHaveLength(0);
+  });
+
+  it('refuses a paper launch while the key mirror is empty', async () => {
+    marketDataSecret = undefined;
+    jest.spyOn(console, 'error').mockImplementation(() => undefined);
+    let fresh: any;
+    jest.isolateModules(() => {
+      fresh = require('../lambda/endpoints/strategy-session-launcher');
+    });
+
+    const res = await fresh.handler(apiEvent('/strategy-sessions/launch', launchBody()));
+
+    expect(res.statusCode).toBe(500);
+    expect(postBodies).toHaveLength(0);
+  });
+});
+
+describe('POST /strategy-sessions/stop releases a paper lease', () => {
+  const stop = () => launcher.handler(apiEvent('/strategy-sessions/stop', { sessionId: 's1' }));
+  const deletes = () => marketDataCalls.filter((c) => c.method === 'DELETE').map((c) => c.path);
+
+  it('alongside the kill and termination', async () => {
+    sessionRow = { ...sessionRow, mode: 'paper' };
+
+    const res = await stop();
+
+    expect(res.statusCode).toBe(200);
+    expect(deletes()).toEqual(['/collection/leases/s1']);
+    expect(events).toContain('TerminateInstances');
+  });
+
+  it('of a session that never got an instance', async () => {
+    sessionRow = { ...sessionRow, mode: 'paper', instance_id: null };
+    await stop();
+    expect(deletes()).toEqual(['/collection/leases/s1']);
+  });
+
+  it('of a session that had already ended', async () => {
+    sessionRow = { ...sessionRow, mode: 'paper' };
+    patchStatus = 409;
+
+    const res = await stop();
+
+    expect(res.statusCode).toBe(409);
+    expect(deletes()).toEqual(['/collection/leases/s1']);
+  });
+
+  it('and still stops when the release fails, since the reconciler releases ended sessions too', async () => {
+    sessionRow = { ...sessionRow, mode: 'paper' };
+    leaseDeleteStatus = 500;
+    const warn = jest.spyOn(console, 'warn').mockImplementation(() => undefined);
+
+    const res = await stop();
+
+    expect(res.statusCode).toBe(200);
+    expect(events).toContain('TerminateInstances');
+    expect(warn).toHaveBeenCalled();
+  });
+
+  it('with a re-read key when the cached one was rotated', async () => {
+    sessionRow = { ...sessionRow, mode: 'paper' };
+    let fresh: any;
+    jest.isolateModules(() => {
+      fresh = require('../lambda/endpoints/strategy-session-launcher');
+    });
+    await fresh.handler(apiEvent('/strategy-sessions/stop', { sessionId: 's1' }));
+    marketDataCalls = [];
+    marketDataSecret = 'md-key-rotated';
+
+    await fresh.handler(apiEvent('/strategy-sessions/stop', { sessionId: 's1' }));
+
+    expect(marketDataCalls.map((c) => c.headers['x-api-key'])).toEqual(['md-key', 'md-key-rotated']);
+  });
+
+  it('but not for a live session, which holds no lease yet', async () => {
+    sessionRow = { ...sessionRow, mode: 'live' };
+    await stop();
+    expect(marketDataCalls).toHaveLength(0);
   });
 });

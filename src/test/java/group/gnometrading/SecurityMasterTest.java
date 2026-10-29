@@ -17,6 +17,7 @@ import group.gnometrading.sm.SimulationParameters;
 import group.gnometrading.sm.fee.FeeTimeline;
 import group.gnometrading.strings.ViewString;
 import java.nio.ByteBuffer;
+import java.util.List;
 import java.util.stream.Stream;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -844,7 +845,7 @@ class SecurityMasterTest {
         String json =
                 """
                 [{"relationship_id": 1, "security_id_a": 100, "security_id_b": 200,
-                  "relationship_type": "EQUIVALENT", "confidence": 0.95, "method": "semantic"}]""";
+                  "relationship_type": "EQUIVALENT", "method": "derived", "flags": ["RESOLUTION_SOURCE_DIFFERS"]}]""";
         when(registryConnection.get(new ViewString("/api/contract-relationships?")))
                 .thenReturn(ByteBuffer.wrap(json.getBytes()));
 
@@ -854,8 +855,8 @@ class SecurityMasterTest {
         assertEquals(100, result[0].securityIdA());
         assertEquals(200, result[0].securityIdB());
         assertEquals("EQUIVALENT", result[0].relationshipType());
-        assertEquals(0.95f, result[0].confidence(), 0.001f);
-        assertEquals("semantic", result[0].method());
+        assertEquals(List.of("RESOLUTION_SOURCE_DIFFERS"), result[0].flags());
+        assertEquals("derived", result[0].method());
     }
 
     @Test
@@ -871,7 +872,7 @@ class SecurityMasterTest {
         String json =
                 """
                 [{"relationship_id": 1, "security_id_a": 100, "security_id_b": 200,
-                  "relationship_type": "EQUIVALENT", "confidence": 0.95, "method": "semantic"}]""";
+                  "relationship_type": "EQUIVALENT", "method": "derived", "flags": ["RESOLUTION_SOURCE_DIFFERS"]}]""";
         when(registryConnection.get(new ViewString("/api/contract-relationships?")))
                 .thenReturn(ByteBuffer.wrap(json.getBytes()));
 

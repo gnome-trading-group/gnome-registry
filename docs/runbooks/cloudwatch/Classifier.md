@@ -20,18 +20,25 @@ Alarms named `Classifier-…`:
 | FetchCycleFailures | fetch cycles failing |
 | IdentityRegressions | an event or contract identity changed in a way it shouldn't |
 | VenueFeedGaps | a venue feed missing for hours |
+| VenueReaderFallbacks | a market family the code readers handle (Kalshi ladders, sports totals, Hyperliquid daily binaries) stopped parsing and went to the LLM |
+| PropositionDrift | the daily re-read by Claude disagreed with a code reader on a proposition field |
 
 ## Impact
 
 New events and contracts reach the security master late; settlements may be recorded late (SETTLEMENT_PENDING).
+VenueReaderFallbacks costs LLM spend and makes that family's propositions less deterministic; PropositionDrift means
+derived relationships for that family may be wrong until the reader or its rules text is understood.
 
 ## Diagnose
 
-The worker's ECS logs; the queue's messages.
+The worker's ECS logs; the queue's messages. For the proposition alarms, the Relationships worker's logs name the
+family and security (`venue reader fell back: family=...`, `proposition drift: family=... field=...`); replay the
+stored sources with `poetry run eval-propositions --stored` in gnome-classifier to see which wording changed.
 
 ## Resolve
 
-Fix the worker, then redrive the DLQ.
+Fix the worker, then redrive the DLQ. For the proposition alarms, update the reader for the venue's new wording (or
+fix the reader the drift exposed), bump `EXTRACTOR_VERSION`, and let the classifier re-derive.
 
 ## Escalate
 

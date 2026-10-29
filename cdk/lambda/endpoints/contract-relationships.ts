@@ -5,7 +5,7 @@ import { ICreateContractRelationship, IDeleteContractRelationship } from '../typ
 
 export class ContractRelationshipHandler extends ResourceHandler {
   allowedSortColumns(): string[] {
-    return ['relationship_id', 'security_id_a', 'security_id_b', 'relationship_type', 'confidence', 'method', 'date_created'];
+    return ['relationship_id', 'security_id_a', 'security_id_b', 'relationship_type', 'method', 'date_created'];
   }
 
   generateDeleteQuery(body: string): Sql {
@@ -15,18 +15,26 @@ export class ContractRelationshipHandler extends ResourceHandler {
 
   generateInsertQuery(body: string): Sql {
     const rel = JSON.parse(body) as ICreateContractRelationship;
+    const flags = rel.flags ?? [];
+    const evidence = rel.evidence === undefined ? null : JSON.stringify(rel.evidence);
+    const version = rel.derivationVersion ?? null;
     // A manual row is a person's call and only another manual write replaces it. The conflict still updates (to the
     // same values) rather than skipping, so the insert returns a row and one kept pair doesn't fail a bulk create.
     const keep = raw("contract_relationship.method = 'manual' AND EXCLUDED.method <> 'manual'");
+    const keepOr = (column: string) =>
+      sql`CASE WHEN ${keep} THEN contract_relationship.${raw(column)} ELSE EXCLUDED.${raw(column)} END`;
     return sql`
       INSERT INTO sm.contract_relationship
-        (security_id_a, security_id_b, relationship_type, confidence, method)
+        (security_id_a, security_id_b, relationship_type, method, flags, evidence, derivation_version)
       VALUES
-        (${rel.securityIdA}, ${rel.securityIdB}, ${rel.relationshipType}, ${rel.confidence}, ${rel.method})
+        (${rel.securityIdA}, ${rel.securityIdB}, ${rel.relationshipType}, ${rel.method}, ${flags}::text[],
+         ${evidence}::jsonb, ${version})
       ON CONFLICT (security_id_a, security_id_b) DO UPDATE SET
-        relationship_type = CASE WHEN ${keep} THEN contract_relationship.relationship_type ELSE EXCLUDED.relationship_type END,
-        confidence = CASE WHEN ${keep} THEN contract_relationship.confidence ELSE EXCLUDED.confidence END,
-        method = CASE WHEN ${keep} THEN contract_relationship.method ELSE EXCLUDED.method END
+        relationship_type = ${keepOr('relationship_type')},
+        method = ${keepOr('method')},
+        flags = ${keepOr('flags')},
+        evidence = ${keepOr('evidence')},
+        derivation_version = ${keepOr('derivation_version')}
       RETURNING *`;
   }
 
@@ -76,13 +84,13 @@ export class ContractRelationshipHandler extends ResourceHandler {
 
   generateModifyQuery(row: any, body: string): Sql {
     const rel = JSON.parse(body) as Partial<ICreateContractRelationship>;
-    if (rel.relationshipType === undefined && rel.confidence === undefined && rel.method === undefined) {
-      throw new ValidationError('Nothing to modify: give relationshipType, confidence or method');
+    if (rel.relationshipType === undefined && rel.method === undefined && rel.flags === undefined) {
+      throw new ValidationError('Nothing to modify: give relationshipType, method or flags');
     }
     return sql`UPDATE sm.contract_relationship SET ${set({
       relationship_type: rel.relationshipType,
-      confidence: rel.confidence,
       method: rel.method,
+      flags: rel.flags === undefined ? undefined : sql`${rel.flags}::text[]`,
     })} WHERE relationship_id = ${row['relationship_id']} RETURNING *`;
   }
 }

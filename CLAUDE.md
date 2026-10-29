@@ -107,6 +107,18 @@ synth step, so run `npm test` yourself before handing off.
     outside the VPC) call back through the API. The creator also sets market-data keys: the sessions' per-exchange
     key (`/market-data-keys`, `gnome/market-data/<exchange>`) and collection's accounts (`/market-data-accounts`,
     `gnome/market-data/<source>/<label>`, recorded in `md.source_account` through `/sources/accounts`).
+  - Paper sessions read market data from collector shards: after writing the session row the launcher
+    leases the session's streams from gnome-market-data (`POST /collection/leases {sessionId, streams, mode, region}`;
+    streams = each traded listing's book stream from `md.stream` + config `streams`, the data-only stream ids, which
+    it validates against `/streams`: unknown or inactive streams, or more than 500 in all, are refused with a 400 before
+    anything is recorded; live sessions may not set `streams`; they still open their own feeds). A refused or failed
+    lease (2 tries of 9 s, idempotent per session; 5xx, 429 and timeouts retried; a 401/403 re-reads the key once)
+    marks the session FAILED; a stop sends `DELETE /collection/leases/{sessionId}` best effort (the market-data
+    reconciler releases leases of ended sessions anyway, and keeps a released lease's streams published for 5 minutes
+    while the session winds down). The launcher reaches that API by SSM `/gnome/market-data/api-url` (us-east-1,
+    published by gnome-market-data) and the key mirror `gnome/api-keys/market-data`, cached per container until a
+    401/403; a paper session gets `STREAMS` (always the leased data-only streams; an `overrides.streams` can't change
+    it), `MARKET_DATA_API_URL` and `MARKET_DATA_API_KEY_SECRET` to poll its lease.
   - DatabaseStack: RDS Postgres 16 (`gnome` db) in isolated subnets, plus the migration Lambda and a query Lambda
     (`{"query": "..."}`, returns rows) for read-only inspection.
   - ExchangeSyncStack: hourly security-master sync (Hyperliquid, Lighter adapters); in prod it reports to `#gnome-security-master`.

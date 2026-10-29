@@ -117,19 +117,13 @@ interface IContractRelationshipBase {
   securityIdA: number;
   securityIdB: number;
   relationshipType: string;
-  confidence: number;
   method: string;
+  flags?: string[];
+  evidence?: unknown;
+  derivationVersion?: string | null;
 }
 export interface ICreateContractRelationship extends IContractRelationshipBase {}
 export interface IDeleteContractRelationship {
   relationshipId: number;
 }
 
-interface IHedgeKeywordBase {
-  securityId: number;
-  keyword: string;
-}
-export interface ICreateHedgeKeyword extends IHedgeKeywordBase {}
-export interface IDeleteHedgeKeyword {
-  hedgeKeywordId: number;
-}

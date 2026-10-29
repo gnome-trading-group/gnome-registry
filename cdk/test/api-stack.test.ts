@@ -97,6 +97,10 @@ describe('ApiStack auth', () => {
     ['venue-accounts/secrets', 'GET', ['service']],
     ['venue-accounts/secrets', 'PUT', ['service']],
     ['treasury/poll-targets', 'GET', ['service']],
+    ['proposition-subjects', 'POST', ['service']],
+    ['contract-propositions', 'POST', ['service']],
+    ['contract-sources', 'POST', ['service']],
+    ['contract-relationships/reconcile', 'POST', ['service']],
     // People alone, so the audit log attributes each change to a person.
     ['risk/policies', 'POST', ['person']],
     ['risk/policies', 'PATCH', ['person']],
@@ -113,8 +117,9 @@ describe('ApiStack auth', () => {
     ['sources', 'POST', ['person']],
     ['sources', 'PATCH', ['person']],
     ['alerts', 'PATCH', ['person']],
+    ['proposition-subjects/merges', 'POST', ['person']],
+    ['proposition-subjects/merges', 'DELETE', ['person']],
     ['listings', 'PATCH', ['person', 'service']],
-    ['hedge-keywords', 'DELETE', ['person', 'service']],
     // Services and people.
     ['strategy-sessions/launch', 'POST', ['person', 'service']],
     ['strategy-sessions/stop', 'POST', ['person', 'service']],
@@ -171,6 +176,17 @@ describe('ApiStack auth', () => {
     template.hasResourceProperties('AWS::CloudFormation::CustomResource', {
       ApiKeyId: { Ref: Match.stringLikeRegexp('^ApiKey') },
     });
+  });
+
+  it('lets the launcher read only the market-data API key mirror, to lease and release streams', () => {
+    const launcher = Object.values(template.findResources('AWS::Lambda::Function'))
+      .find((f: any) => f.Properties.Environment?.Variables?.MARKET_DATA_API_KEY_SECRET);
+    expect(launcher!.Properties.Environment.Variables.MARKET_DATA_API_KEY_SECRET).toBe('gnome/api-keys/market-data');
+    const statements = Object.values(template.findResources('AWS::IAM::Policy'))
+      .flatMap((p: any) => p.Properties.PolicyDocument.Statement)
+      .filter((s: any) => [s.Action].flat().includes('secretsmanager:GetSecretValue'));
+    expect(statements).toHaveLength(1);
+    expect(JSON.stringify(statements[0].Resource)).toContain('secret:gnome/api-keys/market-data-*');
   });
 
   it('stays well under the CloudFormation limit of 500 resources per stack', () => {

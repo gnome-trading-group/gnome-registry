@@ -111,7 +111,6 @@ export class ApiStack extends cdk.Stack {
       ['events', ['GET']],
       ['event-contracts', ['GET']],
       ['contract-relationships', ['GET', 'POST', 'DELETE']],
-      ['hedge-keywords', ['GET', 'POST', 'DELETE']],
     ];
     for (const [resourceName, personMethods] of crudResources) {
       const methods: RouteMethods = {};
@@ -120,6 +119,15 @@ export class ApiStack extends cdk.Stack {
       }
       this.routeFile(resourceName, `${resourceName}.ts`, methods);
     }
+
+    // Contract propositions, their subjects and the venue sources they are read from, written by the classifier. Merging duplicate subjects is a person's
+    // call from the controller, attributed to them; the classifier replaces a subject's derived relationships at once.
+    this.routeFile('proposition-subjects', 'proposition-subjects.ts', { GET: [SERVICE, PERSON, BOT], POST: [SERVICE] });
+    this.routeFile('proposition-subjects/merges', 'proposition-subject-merges.ts',
+      { GET: [SERVICE, PERSON, BOT], POST: [PERSON], DELETE: [PERSON] });
+    this.routeFile('contract-propositions', 'contract-propositions.ts', { GET: [SERVICE, PERSON, BOT], POST: [SERVICE] });
+    this.routeFile('contract-sources', 'contract-sources.ts', { GET: [SERVICE, PERSON, BOT], POST: [SERVICE] });
+    this.routeFile('contract-relationships/reconcile', 'contract-relationship-reconcile.ts', { POST: [SERVICE] });
 
     // Market-data sources and streams. Services read them; vendor sources are added and edited by a person (venue
     // sources and listing streams are created by the database with their exchange and listing).
@@ -240,6 +248,7 @@ export class ApiStack extends cdk.Stack {
       environment: {
         REGISTRY_API_URL: `https://${this.api.restApiId}.execute-api.${this.region}.${this.urlSuffix}/${ApiStack.STAGE_NAME}/`,
         REGISTRY_API_KEY_ID: this.apiKey.keyId,
+        MARKET_DATA_API_KEY_SECRET: API_KEY_SECRET_NAMES.MARKET_DATA,
         STAGE: this.props.stage,
       },
     });
@@ -265,7 +274,13 @@ export class ApiStack extends cdk.Stack {
         'arn:aws:ssm:*:*:parameter/gnome/orchestrator/latest-version',
         'arn:aws:ssm:*:*:parameter/gnome/orchestrator/properties/*',
         'arn:aws:ssm:*:*:parameter/gnome/alerting/api-url',
+        'arn:aws:ssm:*:*:parameter/gnome/market-data/api-url',
       ],
+    }));
+    // A paper launch leases its streams from gnome-market-data's collection control plane, and a stop releases them.
+    strategySessionsLauncherLambda.addToRolePolicy(new iam.PolicyStatement({
+      actions: ['secretsmanager:GetSecretValue'],
+      resources: [`arn:aws:secretsmanager:us-east-1:${this.account}:secret:${API_KEY_SECRET_NAMES.MARKET_DATA}-*`],
     }));
     strategySessionsLauncherLambda.addToRolePolicy(new iam.PolicyStatement({
       actions: ['ec2:DescribeSubnets', 'ec2:DescribeSecurityGroups'],
