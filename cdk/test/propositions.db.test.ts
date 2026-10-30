@@ -147,6 +147,49 @@ describeDb('propositions, subjects and derived relationships, against Postgres',
       expect(await upsertSources(client, [{ securityId: s1, exchangeId, source, sourceHash: 'a' }])).toEqual([{ security_id: s1, changed: false }]);
       expect((await listSources(client, { securityIds: String(s1) }))[0]).toMatchObject({ exchange_id: exchangeId, source });
     });
+
+    async function kalshi(): Promise<number> {
+      return (await client.query(
+        "INSERT INTO sm.exchange (exchange_name, exchange_code, region) VALUES ('Kalshi', 'KALSHI', 'us-east-1') RETURNING exchange_id",
+      )).rows[0].exchange_id;
+    }
+
+    async function relationshipPairs() {
+      return (await client.query('SELECT security_id_a, security_id_b, method FROM sm.contract_relationship ORDER BY 1, 2')).rows;
+    }
+
+    it('drops the derived relationships of a security whose source changed, keeping manual ones', async () => {
+      const [s1, s2, s3] = await securities(3);
+      const exchangeId = await kalshi();
+      await upsertSources(client, [s1, s2, s3].map((securityId) => ({ securityId, exchangeId, source: { v: 1 }, sourceHash: 'a' })));
+      await client.query(`INSERT INTO sm.contract_relationship (security_id_a, security_id_b, relationship_type, method)
+        VALUES ($1, $2, 'IMPLIES', 'derived'), ($2, $3, 'IMPLIES', 'derived'), ($1, $3, 'IMPLIES', 'manual')`, [s1, s2, s3]);
+      await upsertSources(client, [{ securityId: s1, exchangeId, source: { v: 2 }, sourceHash: 'b' }]);
+      expect(await relationshipPairs()).toEqual([
+        { security_id_a: s1, security_id_b: s3, method: 'manual' },
+        { security_id_a: s2, security_id_b: s3, method: 'derived' },
+      ]);
+    });
+
+    it('removes the source, proposition and derived relationships of a security with a null source', async () => {
+      const [s1, s2] = await securities(2);
+      const exchangeId = await kalshi();
+      const a = await subject('a');
+      await upsertSources(client, [s1, s2].map((securityId) => ({ securityId, exchangeId, source: { v: 1 }, sourceHash: 'h1' })));
+      await upsertPropositions(client, [proposition(s1, a), proposition(s2, a)]);
+      await client.query(`INSERT INTO sm.contract_relationship (security_id_a, security_id_b, relationship_type, method)
+        VALUES ($1, $2, 'IMPLIES', 'derived')`, [s1, s2]);
+      await markDerived(a);
+
+      expect(await upsertSources(client, [{ securityId: s1, exchangeId, source: null, sourceHash: null }]))
+        .toEqual([{ security_id: s1, changed: true }]);
+      expect((await listSources(client, {})).map((r) => r.security_id)).toEqual([s2]);
+      expect((await listPropositions(client, {})).map((r) => r.security_id)).toEqual([s2]);
+      expect(await relationshipPairs()).toEqual([]);
+      expect(await isDirty(a)).toBe(true);
+      expect(await upsertSources(client, [{ securityId: s1, exchangeId, source: null, sourceHash: null }]))
+        .toEqual([{ security_id: s1, changed: false }]);
+    });
   });
 
   describe('merges', () => {
@@ -293,10 +336,15 @@ describe('parseReconcile', () => {
     ['an old type', [{ securityIdA: 1, securityIdB: 2, relationshipType: 'MUTUALLY_EXCLUSIVE' }]],
     ['a pair related twice', [{ securityIdA: 1, securityIdB: 2, relationshipType: 'IMPLIES' },
       { securityIdA: 2, securityIdB: 1, relationshipType: 'IMPLIES' }]],
-    ['a security outside the set', [{ securityIdA: 1, securityIdB: 3, relationshipType: 'IMPLIES' }]],
+    ['a row touching no security in the set', [{ securityIdA: 3, securityIdB: 4, relationshipType: 'IMPLIES' }]],
     ['a self relationship', [{ securityIdA: 1, securityIdB: 1, relationshipType: 'IMPLIES' }]],
   ])('refuses %s', (_, relationships) => {
     expect(() => parseReconcile({ ...base, relationships })).toThrow(PropositionError);
+  });
+
+  it('takes a row with only one side in the set, for a chunk of a larger group', () => {
+    expect(parseReconcile({ ...base, relationships: [{ securityIdA: 1, securityIdB: 3, relationshipType: 'IMPLIES' }] })
+      .relationships).toHaveLength(1);
   });
 
   it('refuses the manual method', () => {

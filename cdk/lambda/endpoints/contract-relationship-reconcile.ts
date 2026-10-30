@@ -10,10 +10,12 @@ import {
 } from './propositions-common';
 import { sql } from './sql';
 
-// Replaces the derived relationships of one subject's securities with the set the classifier just derived, in one
-// transaction: rows it no longer derives are deleted, changed rows updated, new rows inserted. Manual rows are never
-// touched, and a derived row on a pair a person already related is skipped. Setting the subject's derived_at ends its
-// "due a derivation" state, unless it changed after the classifier read it (derivedAt is when it read it).
+// Replaces the derived relationships touching a set of securities with the set the classifier just derived, in one
+// transaction: rows it no longer derives are deleted, changed rows updated, new rows inserted. A row needs only one
+// side in the set, so the classifier can send a large group of a subject's securities in chunks, each with every row
+// touching its chunk. Manual rows are never touched, and a derived row on a pair a person already related is skipped.
+// Setting the subject's derived_at ends its "due a derivation" state, unless it changed after the classifier read it
+// (derivedAt is when it read it); the classifier sends subjectId only with its last chunk.
 
 const TYPES = ['EQUIVALENT', 'IMPLIES'];
 
@@ -57,8 +59,8 @@ export function parseReconcile(body: unknown): IReconcile {
       throw new PropositionError(400, `relationshipType must be one of ${TYPES.join(', ')}`);
     }
     if (a === b) throw new PropositionError(400, `A security cannot relate to itself (${a})`);
-    if (!securities.has(a) || !securities.has(b)) {
-      throw new PropositionError(400, `Relationship ${a} -> ${b} names a security outside securityIds`);
+    if (!securities.has(a) && !securities.has(b)) {
+      throw new PropositionError(400, `Relationship ${a} -> ${b} touches no security in securityIds`);
     }
     if (rel.relationshipType === 'EQUIVALENT' && a > b) [a, b] = [b, a];
     if (pairs.has(pairKey(a, b))) throw new PropositionError(400, `Securities ${a} and ${b} are related more than once`);
