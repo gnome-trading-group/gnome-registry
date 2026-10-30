@@ -242,6 +242,36 @@ describeDb('propositions, subjects and derived relationships, against Postgres',
     });
   });
 
+  describe('connected relationships', () => {
+    it('returns every row a route can run through, across events and complements, with each side\'s complement', async () => {
+      const [y1, n1, y2, n2, y3, n3, other1, other2] = await securities(8);
+      await client.query('UPDATE sm.security SET contract_type = 7');
+      const exchangeId = (await client.query(
+        "INSERT INTO sm.exchange (exchange_name, exchange_code, region) VALUES ('Kalshi', 'KALSHI', 'us-east-1') RETURNING exchange_id",
+      )).rows[0].exchange_id;
+      for (const [i, pair] of [[y1, n1], [y2, n2], [y3, n3]].entries()) {
+        const eventId = (await client.query(
+          'INSERT INTO sm.event (title, exchange_id, native_event_id) VALUES ($1, $2, $1) RETURNING event_id',
+          [`e${i}`, exchangeId])).rows[0].event_id;
+        for (const sid of pair) {
+          await client.query("INSERT INTO sm.event_contract (event_id, security_id, outcome_label) VALUES ($1, $2, 'x')", [eventId, sid]);
+        }
+      }
+      // y1 => y2 and no2 => no3: the second row is reached from y1 only through y2's complement. other1 => other2 is
+      // in no route from y1.
+      await client.query(`INSERT INTO sm.contract_relationship (security_id_a, security_id_b, relationship_type, method)
+        VALUES ($1, $2, 'IMPLIES', 'derived'), ($3, $4, 'IMPLIES', 'derived'), ($5, $6, 'IMPLIES', 'derived')`,
+      [y1, y2, n2, n3, other1, other2]);
+      const query = new ContractRelationshipHandler().generateSelectQuery({ securityIds: String(y1), connected: 'true' });
+      const rows = (await client.query(query)).rows;
+      expect(rows.map((r) => [r.security_id_a, r.security_id_b, r.complement_a, r.complement_b])).toEqual([
+        [y1, y2, n1, n2],
+        [n2, n3, y2, y3],
+      ]);
+      expect(() => new ContractRelationshipHandler().generateSelectQuery({ connected: 'true' })).toThrow('connected needs securityIds');
+    });
+  });
+
   describe('relationships by subject', () => {
     it('lists the relationships touching a subject\'s contracts', async () => {
       const [s1, s2, s3, s4] = await securities(4);

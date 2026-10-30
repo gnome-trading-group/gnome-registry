@@ -1,7 +1,44 @@
 import { APIGatewayProxyEvent, APIGatewayProxyEventQueryStringParameters } from 'aws-lambda';
-import { ResourceHandler, ValidationError } from './base';
+import { parseIdList, ResourceHandler, ValidationError } from './base';
 import { join, raw, set, Sql, sql, where } from './sql';
 import { ICreateContractRelationship, IDeleteContractRelationship } from '../types';
+
+const BINARY = 7;
+
+// The other security of a BINARY event with exactly two securities: the complement consumers reverse rows through.
+function complementOf(column: string): Sql {
+  return sql`(
+    SELECT o.security_id FROM sm.event_contract ec
+    JOIN sm.event_contract o ON o.event_id = ec.event_id AND o.security_id <> ec.security_id
+    JOIN sm.security s ON s.security_id = ec.security_id AND s.contract_type = ${BINARY}
+    JOIN sm.security so ON so.security_id = o.security_id AND so.contract_type = ${BINARY}
+    WHERE ec.security_id = ${raw(column)}
+      AND (SELECT count(*) FROM sm.event_contract n WHERE n.event_id = ec.event_id) = 2
+    LIMIT 1)`;
+}
+
+// Every row in the connected sets of some securities, reached through rows and complements in either direction, with
+// each side's complement. Only the fewest rows that rebuild the relation are stored, so a consumer needs the rows a
+// route can run through, not just the ones touching its own securities. Derivation units keep the sets small.
+function connectedQuery(securityIds: number[]): Sql {
+  return sql`
+    WITH RECURSIVE reach(security_id) AS (
+      SELECT unnest(${securityIds}::int[])
+      UNION
+      SELECT n.security_id FROM reach CROSS JOIN LATERAL (
+        SELECT r.security_id_b AS security_id FROM sm.contract_relationship r WHERE r.security_id_a = reach.security_id
+        UNION ALL
+        SELECT r.security_id_a FROM sm.contract_relationship r WHERE r.security_id_b = reach.security_id
+        UNION ALL
+        SELECT ${complementOf('reach.security_id')} AS security_id
+      ) n
+      WHERE n.security_id IS NOT NULL
+    )
+    SELECT cr.*, ${complementOf('cr.security_id_a')} AS complement_a, ${complementOf('cr.security_id_b')} AS complement_b
+    FROM sm.contract_relationship cr
+    WHERE cr.security_id_a IN (SELECT security_id FROM reach)
+    ORDER BY cr.relationship_id`;
+}
 
 export class ContractRelationshipHandler extends ResourceHandler {
   allowedSortColumns(): string[] {
@@ -39,6 +76,11 @@ export class ContractRelationshipHandler extends ResourceHandler {
   }
 
   generateSelectQuery(params: APIGatewayProxyEventQueryStringParameters | null): Sql {
+    if (params?.connected === 'true') {
+      const ids = parseIdList(params.securityIds ?? '');
+      if (ids.length === 0) throw new ValidationError('connected needs securityIds');
+      return connectedQuery(ids);
+    }
     const denormalize = params?.denormalize === 'true';
     const filterUnresolved = params?.eventResolved === 'false';
     const column = (name: string) => raw(denormalize ? `cr.${name}` : name);
