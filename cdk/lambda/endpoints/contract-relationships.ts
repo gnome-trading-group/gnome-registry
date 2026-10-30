@@ -47,12 +47,17 @@ export class ContractRelationshipHandler extends ResourceHandler {
       params?.relationshipId && sql`${column('relationship_id')} = ${params.relationshipId}`,
       params?.securityId
         && sql`(${column('security_id_a')} = ${params.securityId} OR ${column('security_id_b')} = ${params.securityId})`,
+      params?.subjectId && sql`(${column('security_id_a')} IN (SELECT security_id FROM subject_securities)
+        OR ${column('security_id_b')} IN (SELECT security_id FROM subject_securities))`,
       params?.method && sql`${column('method')} = ${params.method}`,
       params?.relationshipType && sql`${column('relationship_type')} = ${params.relationshipType}`,
       filterUnresolved && sql`(${column('security_id_a')} IN (SELECT security_id FROM unresolved_securities) OR ${column('security_id_b')} IN (SELECT security_id FROM unresolved_securities))`,
     ]);
 
     const ctes: Sql[] = [];
+    if (params?.subjectId) {
+      ctes.push(sql`subject_securities AS (SELECT security_id FROM sm.contract_proposition WHERE subject_id = ${params.subjectId})`);
+    }
     if (filterUnresolved) {
       ctes.push(sql`unresolved_securities AS (SELECT DISTINCT ec.security_id FROM sm.event_contract ec JOIN sm.event e ON ec.event_id = e.event_id WHERE e.resolved = false)`);
     }

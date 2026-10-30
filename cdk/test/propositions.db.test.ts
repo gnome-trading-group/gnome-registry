@@ -6,6 +6,7 @@ import { IUpsertProposition, listPropositions, upsertPropositions } from '../lam
 import { parseReconcile, reconcileRelationships } from '../lambda/endpoints/contract-relationship-reconcile';
 import { PropositionError } from '../lambda/endpoints/propositions-common';
 import { listSources, upsertSources } from '../lambda/endpoints/contract-sources';
+import { ContractRelationshipHandler } from '../lambda/endpoints/contract-relationships';
 
 const url = process.env.LEDGER_TEST_DB;
 const describeDb = url ? describe : describe.skip;
@@ -77,6 +78,21 @@ describeDb('propositions, subjects and derived relationships, against Postgres',
       expect((await listSubjects(client, { similarTo: String(a) })).map((s) => s.key)).toEqual(['bitcoin', 'eth-usd']);
       await mergeSubjects(client, b, a, 'me@example.com');
       expect((await listSubjects(client, { similarTo: String(a) })).map((s) => s.key)).toEqual(['eth-usd']);
+    });
+
+    it('lists likely duplicate pairs once each, closest first, leaving out merged subjects', async () => {
+      const [a, b, c, d] = [await subject('btc-usd'), await subject('bitcoin'), await subject('eth-usd'),
+        await subject('ether')];
+      const vec = (x: number) => `[${[x, 1 - x, ...Array(1022).fill(0)].join(',')}]`;
+      for (const [id, x] of [[a, 1], [b, 0.99], [c, 0.3], [d, 0.25]] as const) {
+        await client.query('UPDATE sm.proposition_subject SET embedding = $1 WHERE subject_id = $2', [vec(x), id]);
+      }
+      const pairs = async () => (await listSubjects(client, { duplicates: 'true', minSimilarity: '0.99' }))
+        .map((p) => [p.key, p.candidate_key].sort().join('|'));
+      expect(await pairs()).toEqual(['bitcoin|btc-usd', 'eth-usd|ether']);
+      await mergeSubjects(client, b, a, 'me@example.com');
+      expect(await pairs()).toEqual(['eth-usd|ether']);
+      await expect(listSubjects(client, { duplicates: 'true', minSimilarity: '2' })).rejects.toMatchObject({ statusCode: 400 });
     });
   });
 
@@ -165,6 +181,33 @@ describeDb('propositions, subjects and derived relationships, against Postgres',
       const [a, b] = [await subject('a'), await subject('b')];
       expect(await mergeSubjects(client, b, a, 'me@example.com'))
         .toMatchObject({ alias_subject_id: b, canonical_subject_id: a, actor: 'me@example.com' });
+    });
+
+    it('keeps every merge and unmerge in the history, newest first', async () => {
+      const [s1] = await securities(1);
+      const [a, b] = [await subject('a'), await subject('b')];
+      await upsertPropositions(client, [proposition(s1, b)]);
+      await mergeSubjects(client, b, a, 'me@example.com');
+      await unmergeSubject(client, b, 'you@example.com');
+      expect(await listMerges(client, { subjectId: String(a) })).toEqual([]);
+      expect((await listMerges(client, { subjectId: String(a), history: 'true' })).map((m) => ({
+        action: m.action, alias: m.alias_key, canonical: m.canonical_key, actor: m.actor, moved: m.propositions_moved,
+      }))).toEqual([
+        { action: 'UNMERGE', alias: 'b', canonical: 'a', actor: 'you@example.com', moved: 1 },
+        { action: 'MERGE', alias: 'b', canonical: 'a', actor: 'me@example.com', moved: 1 },
+      ]);
+    });
+  });
+
+  describe('relationships by subject', () => {
+    it('lists the relationships touching a subject\'s contracts', async () => {
+      const [s1, s2, s3, s4] = await securities(4);
+      const [a, b] = [await subject('a'), await subject('b')];
+      await upsertPropositions(client, [proposition(s1, a), proposition(s2, a), proposition(s3, b), proposition(s4, b)]);
+      await client.query(`INSERT INTO sm.contract_relationship (security_id_a, security_id_b, relationship_type, method)
+        VALUES ($1, $2, 'EQUIVALENT', 'derived'), ($3, $4, 'IMPLIES', 'derived')`, [s1, s2, s3, s4]);
+      const query = new ContractRelationshipHandler().generateSelectQuery({ subjectId: String(a) });
+      expect((await client.query(query)).rows.map((r) => [r.security_id_a, r.security_id_b])).toEqual([[s1, s2]]);
     });
   });
 

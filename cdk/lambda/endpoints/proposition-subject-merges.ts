@@ -15,13 +15,23 @@ import { sql, where } from './sql';
 // Merging duplicate subjects, a person's call from the controller. A merge records an alias and moves every
 // proposition that resolves through the merged subject; an unmerge deletes the alias and moves them back (each
 // proposition remembers the subject extraction chose). Both mark the subjects involved for a fresh derivation, which
-// the classifier picks up on its own.
+// the classifier picks up on its own, and both are appended to the merge log, the only record of an undone merge.
 
 // Merges and unmerges change chains other merges read, so they run one at a time.
 const MERGE_LOCK = 1797_0001;
 
 export async function listMerges(client: PoolClient, params: Record<string, string | undefined>) {
   const subjectId = params.subjectId !== undefined ? Number(params.subjectId) : null;
+  if (params.history === 'true') {
+    return (await client.query(sql`
+      SELECT m.merge_log_id, m.action, m.alias_subject_id, sa.key AS alias_key, m.canonical_subject_id,
+             sc.key AS canonical_key, m.actor, m.propositions_moved, m.date_created
+      FROM sm.proposition_subject_merge_log m
+      JOIN sm.proposition_subject sa ON sa.subject_id = m.alias_subject_id
+      JOIN sm.proposition_subject sc ON sc.subject_id = m.canonical_subject_id
+      ${where([subjectId !== null && sql`(m.alias_subject_id = ${subjectId} OR m.canonical_subject_id = ${subjectId})`])}
+      ORDER BY m.date_created DESC, m.merge_log_id DESC`)).rows;
+  }
   return (await client.query(sql`
     SELECT a.alias_subject_id, sa.key AS alias_key, a.canonical_subject_id, sc.key AS canonical_key, a.actor, a.date_created
     FROM sm.proposition_subject_alias a
@@ -29,6 +39,16 @@ export async function listMerges(client: PoolClient, params: Record<string, stri
     JOIN sm.proposition_subject sc ON sc.subject_id = a.canonical_subject_id
     ${where([subjectId !== null && sql`(a.alias_subject_id = ${subjectId} OR a.canonical_subject_id = ${subjectId})`])}
     ORDER BY a.date_created DESC`)).rows;
+}
+
+async function logMerge(
+  client: PoolClient, action: 'MERGE' | 'UNMERGE', aliasSubjectId: number, canonicalSubjectId: number, actor: string,
+  propositionsMoved: number,
+) {
+  await client.query(sql`
+    INSERT INTO sm.proposition_subject_merge_log
+      (alias_subject_id, canonical_subject_id, action, actor, propositions_moved)
+    VALUES (${aliasSubjectId}, ${canonicalSubjectId}, ${action}, ${actor}, ${propositionsMoved})`);
 }
 
 export async function mergeSubjects(client: PoolClient, fromSubjectId: number, intoSubjectId: number, actor: string) {
@@ -54,6 +74,7 @@ export async function mergeSubjects(client: PoolClient, fromSubjectId: number, i
       UPDATE sm.contract_proposition SET subject_id = ${target}, date_modified = now()
       WHERE extracted_subject_id = ANY(${tree}::int[])`)).rowCount;
     await touchSubjects(client, [fromSubjectId, target]);
+    await logMerge(client, 'MERGE', fromSubjectId, target, actor, moved ?? 0);
     return { ...alias, propositions_moved: moved };
   }, { actor, reason: 'proposition subject merged' });
 }
@@ -71,6 +92,7 @@ export async function unmergeSubject(client: PoolClient, subjectId: number, acto
       UPDATE sm.contract_proposition SET subject_id = ${subjectId}, date_modified = now()
       WHERE extracted_subject_id = ANY(${tree}::int[])`)).rowCount;
     await touchSubjects(client, [subjectId, formerTarget]);
+    await logMerge(client, 'UNMERGE', subjectId, alias.canonical_subject_id, actor, moved ?? 0);
     return { ...alias, unmerged_by: actor, propositions_moved: moved };
   }, { actor, reason: 'proposition subject unmerged' });
 }
