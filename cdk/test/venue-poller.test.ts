@@ -87,10 +87,14 @@ describe('venue readers on captured answers', () => {
     jest.spyOn(global, 'fetch').mockImplementation(async (url) => respond(String(url).includes('rpc.example')
       ? { result: '0x0000000000000000000000000000000000000000000000000000000000f38054' }
       : fixture('polymarket-intl-positions.json')));
+    const spy = jest.spyOn(global, 'fetch');
     const reading = await readPolymarketIntl({
       account_id: 2, exchange_id: 2, exchange_code: 'POLYMARKET_INTL', label: 'x', read_secret_name: null,
       venue_ref: { funderAddress: '0xe65019f319d3b20a9883b43283c91ca9d8c81cfb' },
     });
+    // v1 of the Data API is retired (410); positions must come from /v2.
+    expect(spy.mock.calls.map(([u]) => String(u)).filter(u => u.includes('data-api')))
+      .toEqual([expect.stringMatching(/^https:\/\/data-api\.polymarket\.com\/v2\/positions\?/)]);
     expect(reading.cashTotal).toBe(15_958_100_000n);
     expect(reading.positions?.[0]).toEqual({
       venueKey: '65859975054715735368129844287010108827814341883420891032920701239041923945418',

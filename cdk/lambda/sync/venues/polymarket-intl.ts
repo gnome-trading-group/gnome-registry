@@ -5,7 +5,7 @@ import { PollTarget, PRICE_SCALE, scaleDecimal, SIZE_SCALE, VenueReading } from 
 // funder wallet's pUSD balance on Polygon, its positions come from the public data API by that wallet's address.
 // Resolved positions stay as tokens until redeemed, worth their payout.
 
-const DATA_API = 'https://data-api.polymarket.com';
+const DATA_API = 'https://data-api.polymarket.com/v2';
 const PAGE_LIMIT = 500;
 // pUSD has 6 decimals; prices are in 1e9 per dollar.
 const PUSD_TO_PRICE = PRICE_SCALE / 1_000_000n;
