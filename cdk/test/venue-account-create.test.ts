@@ -1,6 +1,6 @@
 import { generateKeyPairSync } from 'crypto';
 import {
-  CreateError, credentialsFor, MARKET_DATA_EXCHANGES, marketDataKeyStatus, needsKey, readSecretFor,
+  CreateError, credentialsFor, MARKET_DATA_EXCHANGES, needsKey, readSecretFor, secretStatus,
 } from '../lambda/endpoints/venue-account-create';
 
 const pem = generateKeyPairSync('rsa', { modulusLength: 2048 }).privateKey
@@ -68,7 +68,7 @@ describe('venue account credentials', () => {
     expect(() => readSecretFor('POLYMARKET_INTL', { apiKey: 'k' })).toThrow(/without credentials/);
   });
 
-  it('keeps a market data key for every venue whose market data is signed', () => {
+  it('keeps a market-data secret path for every venue whose market data is signed', () => {
     expect(MARKET_DATA_EXCHANGES).toEqual({
       KALSHI: 'gnome/market-data/kalshi',
       POLYMARKET_US: 'gnome/market-data/polymarket-us',
@@ -77,24 +77,25 @@ describe('venue account credentials', () => {
     expect(needsKey('KALSHI', 'read')).toBe(true);
   });
 
-  it('shows a market data key as in sync only when every trading region holds its current value', () => {
+  it('shows a market-data secret as in sync only when every trading region holds its current value', () => {
     const described = (statuses: Record<string, string>) => ({
       $metadata: {},
       LastChangedDate: new Date('2026-10-14T12:00:00Z'),
       Tags: [{ Key: 'updated-by', Value: 'ops@example.com' }, { Key: 'api-key-id', Value: 'f054773a-1' }],
       ReplicationStatus: Object.entries(statuses).map(([Region, Status]) => ({ Region, Status: Status as 'InSync' })),
     });
-    const synced = marketDataKeyStatus('KALSHI', described({ 'ap-northeast-1': 'InSync', 'eu-west-1': 'InSync' }));
+    const name = 'gnome/market-data/kalshi/md-1';
+    const synced = secretStatus(name, described({ 'ap-northeast-1': 'InSync', 'eu-west-1': 'InSync' }));
     expect(synced).toMatchObject({
-      secretName: 'gnome/market-data/kalshi', exists: true, apiKeyId: 'f054773a-1', updatedBy: 'ops@example.com',
+      secretName: name, exists: true, apiKeyId: 'f054773a-1', updatedBy: 'ops@example.com',
       lastChangedAt: '2026-10-14T12:00:00.000Z', inSync: true,
     });
-    expect(marketDataKeyStatus('KALSHI', described({ 'ap-northeast-1': 'InSync', 'eu-west-1': 'Failed' })).inSync).toBe(false);
-    const missingReplica = marketDataKeyStatus('KALSHI', described({ 'ap-northeast-1': 'InSync' }));
+    expect(secretStatus(name, described({ 'ap-northeast-1': 'InSync', 'eu-west-1': 'Failed' })).inSync).toBe(false);
+    const missingReplica = secretStatus(name, described({ 'ap-northeast-1': 'InSync' }));
     expect(missingReplica.inSync).toBe(false);
     expect(missingReplica.replicas).toContainEqual({ region: 'eu-west-1', status: 'Missing', message: null });
-    expect(marketDataKeyStatus('POLYMARKET_US', null)).toMatchObject({
-      secretName: 'gnome/market-data/polymarket-us', exists: false, inSync: false,
+    expect(secretStatus('gnome/market-data/polymarket-us/md-1', null)).toMatchObject({
+      secretName: 'gnome/market-data/polymarket-us/md-1', exists: false, inSync: false,
     });
   });
 });

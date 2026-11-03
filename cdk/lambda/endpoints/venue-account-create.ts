@@ -299,9 +299,9 @@ export async function deleteAccountSecrets(accountId: unknown) {
   return { label: account.label, deleted: names, recoveryWindowDays: RECOVERY_WINDOW_DAYS };
 }
 
-// Market data signs in with one key per exchange, shared by every session and collector, so it belongs to no venue
-// account. Secrets Manager is its only store: tags say who set it and which key it is, and the secret's versions and
-// CloudTrail keep its history.
+// Where each signed source's market-data account secrets live: shards collect with dedicated accounts, each a secret
+// under this path plus its label. Secrets Manager is their only store: tags say who set a key and which it is, and the
+// secret's versions and CloudTrail keep its history.
 export const MARKET_DATA_EXCHANGES: Record<string, string> = Object.fromEntries(
   VENUES.filter(code => needsKey(code, 'marketData'))
     .map(code => [code, `gnome/market-data/${code.toLowerCase().replace(/_/g, '-')}`]),
@@ -321,10 +321,6 @@ export interface SecretStatus {
   inSync: boolean;
 }
 
-export interface MarketDataKeyStatus extends SecretStatus {
-  exchangeCode: string;
-}
-
 export function secretStatus(secretName: string, described: DescribeSecretCommandOutput | null): SecretStatus {
   if (!described) {
     return { secretName, exists: false, apiKeyId: null, updatedBy: null, lastChangedAt: null, replicas: [], inSync: false };
@@ -341,12 +337,6 @@ export function secretStatus(secretName: string, described: DescribeSecretComman
   };
 }
 
-export function marketDataKeyStatus(
-  exchangeCode: string, described: DescribeSecretCommandOutput | null,
-): MarketDataKeyStatus {
-  return { exchangeCode, ...secretStatus(MARKET_DATA_EXCHANGES[exchangeCode], described) };
-}
-
 async function describeSecret(secretName: string): Promise<DescribeSecretCommandOutput | null> {
   try {
     const described = await secrets.send(new DescribeSecretCommand({ SecretId: secretName }));
@@ -358,33 +348,8 @@ async function describeSecret(secretName: string): Promise<DescribeSecretCommand
   }
 }
 
-async function describeMarketDataKey(exchangeCode: string): Promise<MarketDataKeyStatus> {
-  return marketDataKeyStatus(exchangeCode, await describeSecret(MARKET_DATA_EXCHANGES[exchangeCode]));
-}
-
-export async function listMarketDataKeys(): Promise<MarketDataKeyStatus[]> {
-  return Promise.all(Object.keys(MARKET_DATA_EXCHANGES).map(describeMarketDataKey));
-}
-
-export async function setMarketDataKey(body: { exchangeCode?: string; credentials?: Fields }, actor: string) {
-  const exchangeCode = body.exchangeCode ?? '';
-  if (!(exchangeCode in MARKET_DATA_EXCHANGES)) {
-    throw new CreateError(400, `exchangeCode must be one of ${Object.keys(MARKET_DATA_EXCHANGES).join(', ')}`);
-  }
-  if (body.credentials === null || typeof body.credentials !== 'object') throw new CreateError(400, 'credentials are required');
-  const { secret } = credentialsFor(exchangeCode, body.credentials, 'credentials');
-  const name = MARKET_DATA_EXCHANGES[exchangeCode];
-  await writeSecret(name, secret, `Market data credentials for ${exchangeCode}, set from the controller`);
-  await secrets.send(new TagResourceCommand({
-    SecretId: name,
-    Tags: [{ Key: UPDATED_BY_TAG, Value: actor }, { Key: API_KEY_ID_TAG, Value: secret.apiKey }],
-  }));
-  console.log(`Set the ${exchangeCode} market data key for ${actor}`);
-  return describeMarketDataKey(exchangeCode);
-}
-
 // A source's market-data accounts: keys of dedicated, unfunded accounts that shards collect with, one secret per
-// account under the session key's name plus its label. The registry records each account; the key lives only here.
+// account under the source's path plus its label. The registry records each account; the key lives only here.
 export function accountSecretName(sourceCode: string, label: string): string {
   return `${MARKET_DATA_EXCHANGES[sourceCode]}/${label}`;
 }
@@ -459,12 +424,6 @@ export const handler = async (event: APIGatewayProxyEvent) => {
     }
     if (resource === '/venue-accounts/credentials' && event.httpMethod === 'POST') {
       return createResponse(200, await updateCredentials(body, getActor(event)));
-    }
-    if (resource === '/market-data-keys' && event.httpMethod === 'GET') {
-      return createResponse(200, await listMarketDataKeys());
-    }
-    if (resource === '/market-data-keys' && event.httpMethod === 'POST') {
-      return createResponse(200, await setMarketDataKey(body, getActor(event)));
     }
     if (resource === '/market-data-accounts' && event.httpMethod === 'GET') {
       return createResponse(200, await listMarketDataAccounts());

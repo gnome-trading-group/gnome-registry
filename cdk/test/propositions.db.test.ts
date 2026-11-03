@@ -225,6 +225,10 @@ describeDb('propositions, subjects and derived relationships, against Postgres',
         { action: 'UNMERGE', alias: 'b', canonical: 'a', actor: 'you@example.com', moved: 1 },
         { action: 'MERGE', alias: 'b', canonical: 'a', actor: 'me@example.com', moved: 1 },
       ]);
+      expect((await listMerges(client, { history: 'true', action: 'UNMERGE' })).map((m) => m.actor))
+        .toEqual(['you@example.com']);
+      expect(await listMerges(client, { history: 'true', offset: '2' })).toEqual([]);
+      await expect(listMerges(client, { history: 'true', action: 'SPLIT' })).rejects.toMatchObject({ statusCode: 400 });
     });
   });
 

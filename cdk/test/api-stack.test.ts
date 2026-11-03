@@ -111,8 +111,6 @@ describe('ApiStack auth', () => {
     ['venue-accounts/create', 'POST', ['person']],
     ['venue-accounts/credentials', 'POST', ['person']],
     ['venue-accounts/delete-secrets', 'POST', ['person']],
-    ['market-data-keys', 'GET', ['person']],
-    ['market-data-keys', 'POST', ['person']],
     ['treasury/transfers', 'POST', ['person']],
     ['treasury/account-config', 'PUT', ['person']],
     ['sources', 'POST', ['person']],

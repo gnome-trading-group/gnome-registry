@@ -105,9 +105,9 @@ synth step, so run `npm test` yourself before handing off.
 - What runs:
   - ApiStack: the Registry API (stage `api`), one Lambda per resource in the VPC; the strategy-session launcher
     (launch/stop/logs, outside the VPC, starts EC2 orchestrators) and the venue-account creator (Secrets Manager,
-    outside the VPC) call back through the API. The creator also sets market-data keys: the sessions' per-exchange
-    key (`/market-data-keys`, `gnome/market-data/<exchange>`) and collection's accounts (`/market-data-accounts`,
-    `gnome/market-data/<source>/<label>`, recorded in `md.source_account` through `/sources/accounts`).
+    outside the VPC) call back through the API. The creator also sets collection's market-data accounts
+    (`/market-data-accounts`, `gnome/market-data/<source>/<label>`, recorded in `md.source_account` through
+    `/sources/accounts`); sessions hold no market-data key, they read from shards.
   - Every session reads market data from collector shards: after writing the session row the launcher
     leases the session's streams from gnome-market-data (`POST /collection/leases {sessionId, streams, mode, region}`;
     streams = each traded listing's book stream from `md.stream` + config `streams`, the data-only stream ids, which

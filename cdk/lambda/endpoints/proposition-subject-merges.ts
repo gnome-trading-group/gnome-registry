@@ -22,18 +22,30 @@ import { sql, where } from './sql';
 
 // Merges and unmerges change chains other merges read, so they run one at a time.
 const MERGE_LOCK = 1797_0001;
+const DEFAULT_LIMIT = 500;
+const MAX_LIMIT = 5000;
+const ACTIONS = ['MERGE', 'UNMERGE'];
 
 export async function listMerges(client: PoolClient, params: Record<string, string | undefined>) {
   const subjectId = params.subjectId !== undefined ? Number(params.subjectId) : null;
+  const limit = Math.min(Number(params.limit ?? DEFAULT_LIMIT) || DEFAULT_LIMIT, MAX_LIMIT);
+  const offset = Number(params.offset ?? 0) || 0;
   if (params.history === 'true') {
+    if (params.action !== undefined && !ACTIONS.includes(params.action)) {
+      throw new PropositionError(400, `action must be one of ${ACTIONS.join(', ')}`);
+    }
     return (await client.query(sql`
       SELECT m.merge_log_id, m.action, m.alias_subject_id, sa.key AS alias_key, m.canonical_subject_id,
              sc.key AS canonical_key, m.actor, m.propositions_moved, m.date_created
       FROM sm.proposition_subject_merge_log m
       JOIN sm.proposition_subject sa ON sa.subject_id = m.alias_subject_id
       JOIN sm.proposition_subject sc ON sc.subject_id = m.canonical_subject_id
-      ${where([subjectId !== null && sql`(m.alias_subject_id = ${subjectId} OR m.canonical_subject_id = ${subjectId})`])}
-      ORDER BY m.date_created DESC, m.merge_log_id DESC`)).rows;
+      ${where([
+        subjectId !== null && sql`(m.alias_subject_id = ${subjectId} OR m.canonical_subject_id = ${subjectId})`,
+        params.action !== undefined && sql`m.action = ${params.action}`,
+      ])}
+      ORDER BY m.date_created DESC, m.merge_log_id DESC
+      LIMIT ${limit} OFFSET ${offset}`)).rows;
   }
   return (await client.query(sql`
     SELECT a.alias_subject_id, sa.key AS alias_key, a.canonical_subject_id, sc.key AS canonical_key, a.actor, a.date_created
@@ -41,7 +53,8 @@ export async function listMerges(client: PoolClient, params: Record<string, stri
     JOIN sm.proposition_subject sa ON sa.subject_id = a.alias_subject_id
     JOIN sm.proposition_subject sc ON sc.subject_id = a.canonical_subject_id
     ${where([subjectId !== null && sql`(a.alias_subject_id = ${subjectId} OR a.canonical_subject_id = ${subjectId})`])}
-    ORDER BY a.date_created DESC`)).rows;
+    ORDER BY a.date_created DESC, a.alias_subject_id
+    LIMIT ${limit} OFFSET ${offset}`)).rows;
 }
 
 async function logMerge(

@@ -217,7 +217,6 @@ export class ApiStack extends cdk.Stack {
     this.route('venue-accounts/credentials', accountCreation, { POST: [PERSON] });
     this.route('venue-accounts/delete-secrets', accountCreation, { POST: [PERSON] });
     // Not even bots read which market-data keys are set.
-    this.route('market-data-keys', accountCreation, { GET: [PERSON], POST: [PERSON] });
     this.route('market-data-accounts', accountCreation, { GET: [PERSON], POST: [PERSON] });
 
     // The treasury: the venue poller posts what each account holds and reads which accounts to poll (services); an
