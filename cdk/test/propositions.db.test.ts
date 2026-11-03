@@ -2,6 +2,7 @@ import { Pool, PoolClient } from 'pg';
 import { connectExclusive, LOCK_TIMEOUT_MS, release } from './ledger-db';
 import { listSubjects, upsertSubjects } from '../lambda/endpoints/proposition-subjects';
 import { listMerges, mergeSubjects, unmergeSubject } from '../lambda/endpoints/proposition-subject-merges';
+import { decideCandidate, listCandidates, upsertCandidates } from '../lambda/endpoints/proposition-subject-merge-candidates';
 import { IUpsertProposition, listPropositions, upsertPropositions } from '../lambda/endpoints/contract-propositions';
 import { parseReconcile, reconcileRelationships } from '../lambda/endpoints/contract-relationship-reconcile';
 import { PropositionError } from '../lambda/endpoints/propositions-common';
@@ -239,6 +240,51 @@ describeDb('propositions, subjects and derived relationships, against Postgres',
         { action: 'UNMERGE', alias: 'b', canonical: 'a', actor: 'you@example.com', moved: 1 },
         { action: 'MERGE', alias: 'b', canonical: 'a', actor: 'me@example.com', moved: 1 },
       ]);
+    });
+  });
+
+  describe('merge candidates', () => {
+    const held = (alias: number, canonical: number, gain = 3) => ({
+      aliasSubjectId: alias, canonicalSubjectId: canonical, hold: 'PRICE', reason: 'same award', gain,
+      details: { prices: [[0.02, 0.24]] },
+    });
+
+    it('queues pairs once each, whichever way round, and refreshes them while pending', async () => {
+      const [a, b] = [await subject('a'), await subject('b')];
+      await upsertCandidates(client, [held(b, a, 3)]);
+      await upsertCandidates(client, [held(a, b, 5)]);
+      const pending = await listCandidates(client, {});
+      expect(pending).toHaveLength(1);
+      expect(pending[0]).toMatchObject({ alias_key: 'a', canonical_key: 'b', gain: 5, status: 'PENDING' });
+      expect(await listCandidates(client, { offset: '1' })).toEqual([]);
+    });
+
+    it('merges as the person who decides, and never queues a decided pair again', async () => {
+      const [s1] = await securities(1);
+      const [a, b, c] = [await subject('a'), await subject('b'), await subject('c')];
+      await upsertPropositions(client, [proposition(s1, b)]);
+      const [merge, dismiss] = await upsertCandidates(client, [held(b, a), held(c, a)]);
+
+      await decideCandidate(client, merge.candidate_id, 'MERGED', 'me@example.com');
+      await decideCandidate(client, dismiss.candidate_id, 'DISMISSED', 'me@example.com');
+      expect((await listPropositions(client, { securityIds: String(s1) }))[0].subject_id).toBe(a);
+      expect((await listMerges(client, {}))[0]).toMatchObject({ alias_subject_id: b, actor: 'me@example.com' });
+
+      await upsertCandidates(client, [held(b, a, 9), held(c, a, 9)]);
+      expect(await listCandidates(client, {})).toEqual([]);
+      expect((await listCandidates(client, { status: 'ALL' })).map((r) => [r.status, r.gain, r.decided_by]))
+        .toEqual([['MERGED', 3, 'me@example.com'], ['DISMISSED', 3, 'me@example.com']]);
+      await expect(decideCandidate(client, merge.candidate_id, 'DISMISSED', 'me@example.com'))
+        .rejects.toMatchObject({ statusCode: 409 });
+    });
+
+    it('leaves the pair pending when the merge is refused', async () => {
+      const [a, b] = [await subject('a'), await subject('b')];
+      await mergeSubjects(client, a, b, 'me@example.com');
+      const [candidate] = await upsertCandidates(client, [held(b, a)]);
+      await expect(decideCandidate(client, candidate.candidate_id, 'MERGED', 'me@example.com'))
+        .rejects.toMatchObject({ statusCode: 409 });
+      expect((await listCandidates(client, {}))[0].status).toBe('PENDING');
     });
   });
 

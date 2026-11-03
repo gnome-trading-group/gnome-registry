@@ -1,5 +1,6 @@
+import { APIGatewayProxyEvent } from 'aws-lambda';
 import { PoolClient } from 'pg';
-import { getActor, withTransaction } from './base';
+import { getActor, isService, withTransaction } from './base';
 import {
   canonicalSubject,
   parseBody,
@@ -12,7 +13,9 @@ import {
 } from './propositions-common';
 import { sql, where } from './sql';
 
-// Merging duplicate subjects, a person's call from the controller. A merge records an alias and moves every
+// Merging duplicate subjects: a person's call from the controller, or the classifier's merge pass for pairs it judged
+// the same and checked (attributed to the actor it names, e.g. "classifier:subject-merger"; unmerging stays a
+// person's). A merge records an alias and moves every
 // proposition that resolves through the merged subject; an unmerge deletes the alias and moves them back (each
 // proposition remembers the subject extraction chose). Both mark the subjects involved for a fresh derivation, which
 // the classifier picks up on its own, and both are appended to the merge log, the only record of an undone merge.
@@ -97,12 +100,22 @@ export async function unmergeSubject(client: PoolClient, subjectId: number, acto
   }, { actor, reason: 'proposition subject unmerged' });
 }
 
+/** A person is who their token says, never the body, so nobody merges as someone else; a service has no token and
+ * must name itself in `actor`, since the merge log is the only record of who merged what. */
+export function mergeActor(event: APIGatewayProxyEvent, requested: unknown): string {
+  if (!isService(event)) return getActor(event);
+  if (typeof requested !== 'string' || !requested.trim()) {
+    throw new PropositionError(400, 'A service merging subjects must name itself in actor');
+  }
+  return requested.trim();
+}
+
 export const handler = propositionHandler('Proposition subject merge', {
   GET: (client, event) => listMerges(client, event.queryStringParameters ?? {}),
   POST: (client, event) => {
-    const body = parseBody(event) as { fromSubjectId?: unknown; intoSubjectId?: unknown };
+    const body = parseBody(event) as { fromSubjectId?: unknown; intoSubjectId?: unknown; actor?: unknown };
     return mergeSubjects(client, requirePositiveInt(body.fromSubjectId, 'fromSubjectId'),
-      requirePositiveInt(body.intoSubjectId, 'intoSubjectId'), getActor(event));
+      requirePositiveInt(body.intoSubjectId, 'intoSubjectId'), mergeActor(event, body.actor));
   },
   DELETE: (client, event) => {
     const body = parseBody(event) as { subjectId?: unknown };

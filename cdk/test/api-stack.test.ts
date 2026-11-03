@@ -101,6 +101,7 @@ describe('ApiStack auth', () => {
     ['contract-propositions', 'POST', ['service']],
     ['contract-sources', 'POST', ['service']],
     ['contract-relationships/reconcile', 'POST', ['service']],
+    ['proposition-subjects/merge-candidates', 'POST', ['service']],
     // People alone, so the audit log attributes each change to a person.
     ['risk/policies', 'POST', ['person']],
     ['risk/policies', 'PATCH', ['person']],
@@ -117,10 +118,11 @@ describe('ApiStack auth', () => {
     ['sources', 'POST', ['person']],
     ['sources', 'PATCH', ['person']],
     ['alerts', 'PATCH', ['person']],
-    ['proposition-subjects/merges', 'POST', ['person']],
     ['proposition-subjects/merges', 'DELETE', ['person']],
+    ['proposition-subjects/merge-candidates', 'PATCH', ['person']],
     ['listings', 'PATCH', ['person', 'service']],
     // Services and people.
+    ['proposition-subjects/merges', 'POST', ['person', 'service']],
     ['strategy-sessions/launch', 'POST', ['person', 'service']],
     ['strategy-sessions/stop', 'POST', ['person', 'service']],
     ['treasury/snapshots', 'POST', ['person', 'service']],
@@ -190,7 +192,7 @@ describe('ApiStack auth', () => {
   });
 
   it('stays well under the CloudFormation limit of 500 resources per stack', () => {
-    expect(Object.keys(template.toJSON().Resources).length).toBeLessThan(450);
+    expect(Object.keys(template.toJSON().Resources).length).toBeLessThan(475);
   });
 
   it.each([

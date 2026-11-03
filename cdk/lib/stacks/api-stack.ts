@@ -120,11 +120,15 @@ export class ApiStack extends cdk.Stack {
       this.routeFile(resourceName, `${resourceName}.ts`, methods);
     }
 
-    // Contract propositions, their subjects and the venue sources they are read from, written by the classifier. Merging duplicate subjects is a person's
-    // call from the controller, attributed to them; the classifier replaces a subject's derived relationships at once.
+    // Contract propositions, their subjects and the venue sources they are read from, written by the classifier. The
+    // classifier merges duplicate subjects it judged the same and checked, under its own actor; the pairs it holds back
+    // wait in merge-candidates for a person to merge or dismiss, and only a person unmerges. The classifier replaces a
+    // subject's derived relationships at once.
     this.routeFile('proposition-subjects', 'proposition-subjects.ts', { GET: [SERVICE, PERSON, BOT], POST: [SERVICE] });
     this.routeFile('proposition-subjects/merges', 'proposition-subject-merges.ts',
-      { GET: [SERVICE, PERSON, BOT], POST: [PERSON], DELETE: [PERSON] });
+      { GET: [SERVICE, PERSON, BOT], POST: [SERVICE, PERSON], DELETE: [PERSON] });
+    this.routeFile('proposition-subjects/merge-candidates', 'proposition-subject-merge-candidates.ts',
+      { GET: [SERVICE, PERSON, BOT], POST: [SERVICE], PATCH: [PERSON] });
     this.routeFile('contract-propositions', 'contract-propositions.ts', { GET: [SERVICE, PERSON, BOT], POST: [SERVICE] });
     this.routeFile('contract-sources', 'contract-sources.ts', { GET: [SERVICE, PERSON, BOT], POST: [SERVICE] });
     this.routeFile('contract-relationships/reconcile', 'contract-relationship-reconcile.ts', { POST: [SERVICE] });
