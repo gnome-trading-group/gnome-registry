@@ -37,16 +37,21 @@ const LISTINGS_IN_BATCH = `
     UNION ALL SELECT jsonb_array_elements(COALESCE($1::jsonb->'orderModifies', '[]'))
   ) events`;
 
-// The account session $2 trades each listing's exchange with.
+// The account session $2 trades each of the batch's listings with. Only the batch's: an exchange has millions of
+// listings, and joining them all to a live session's account made every write of its a full scan of sm.listing. The
+// exchange is a lookup per listing, not a join, because the planner guesses the batch at hundreds of rows and would
+// hash-join it against a scan of the whole table.
 const SESSION_ACCOUNTS = `
-  SELECT l.listing_id, sva.account_id FROM sm.listing l
-  JOIN account_master.session_venue_account sva ON sva.exchange_id = l.exchange_id AND sva.session_id = $2`;
+  SELECT batch.listing_id, sva.account_id FROM (${LISTINGS_IN_BATCH}) batch
+  JOIN account_master.session_venue_account sva ON sva.session_id = $2
+    AND sva.exchange_id = (SELECT l.exchange_id FROM sm.listing l WHERE l.listing_id = batch.listing_id)`;
 
 // Fills, then the position each listing's newest inserted fill leaves. A replayed fill inserts nothing and so moves
 // nothing; the version guard keeps a late batch from rolling a position back.
 const INSERT_FILLS = `
   WITH src AS (
-    SELECT * FROM jsonb_to_recordset(COALESCE($1::jsonb->'fills', '[]')) AS f(
+    SELECT f.*, e.ord FROM jsonb_array_elements(COALESCE($1::jsonb->'fills', '[]')) WITH ORDINALITY AS e(fill, ord),
+    jsonb_to_record(e.fill) AS f(
       source text, "originSessionId" text, "listingId" int, "clientOidCounter" bigint, "cumQtyAfter" bigint,
       side smallint, "fillQty" bigint, "fillPrice" bigint, fee bigint, "eventTimeNs" bigint,
       "netQuantityAfter" bigint, "totalCostAfter" bigint, "realizedPnlAfter" bigint, "feesAfter" bigint,
@@ -63,6 +68,8 @@ const INSERT_FILLS = `
       f."realizedPnlAfter", f."feesAfter", f."positionVersion", 'session ' || $2, f.reason, f.liquidity,
       a.account_id
     FROM src f LEFT JOIN accounts a ON a.listing_id = f."listingId"
+    -- In the batch's order, so fill ids (what fills page by) follow the order the session sent them in.
+    ORDER BY f.ord
     ON CONFLICT DO NOTHING
     RETURNING *
   ),

@@ -17,11 +17,19 @@ const STREAM_SELECT = `
   LEFT JOIN sm.listing l ON l.listing_id = st.listing_id
   LEFT JOIN LATERAL (SELECT MIN(event_id) AS event_id FROM sm.event_contract WHERE security_id = l.security_id) ec ON true`;
 
-/** Streams of these events: vendor streams by their own event, listing streams through their contract. */
+/**
+ * Streams of these events: vendor streams by their own event, listing streams through their contract. Each half finds
+ * its stream ids by its own index; one OR across the stream and its listing made every call scan both tables whole.
+ */
 function eventFilter(ids: number[]): Sql {
   if (ids.length === 0) return raw('FALSE');
-  return sql`(st.event_id = ANY(${ids}::int[])
-    OR l.security_id IN (SELECT security_id FROM sm.event_contract WHERE event_id = ANY(${ids}::int[])))`;
+  return sql`st.stream_id IN (
+    SELECT stream_id FROM md.stream WHERE event_id = ANY(${ids}::int[])
+    UNION ALL
+    SELECT s.stream_id FROM sm.event_contract c
+    JOIN sm.listing el ON el.security_id = c.security_id
+    JOIN md.stream s ON s.listing_id = el.listing_id
+    WHERE c.event_id = ANY(${ids}::int[]))`;
 }
 
 export class StreamHandler extends ResourceHandler {

@@ -261,6 +261,24 @@ describeDb('venue accounts, against Postgres', () => {
     expect(review).toEqual([{ account_id: falcon, needs_review: false }, { account_id: falcon + 1, needs_review: true }]);
   });
 
+  it("a live session's write reads only its batch's listings, however many its exchange has", async () => {
+    const heron = await register(1, 'steady-heron-01');
+    await create('a', [500]);
+    await client.query(`INSERT INTO sm.listing (listing_id, exchange_id, security_id)
+      SELECT 10000 + g, 1, 1 FROM generate_series(1, 20000) g`);
+    await client.query('ANALYZE sm.listing');
+
+    let listingRowsRead = 0;
+    await withTransaction(client, async (c) => {
+      await writeBatch(c, 'a', JSON.stringify({ sessionId: 'a', fills: [fill(500, 1, 5 * UNIT, 1)] }));
+      listingRowsRead = Number((await c.query(`SELECT COALESCE(seq_tup_read, 0) + COALESCE(idx_tup_fetch, 0) AS n
+        FROM pg_stat_xact_user_tables WHERE relid = 'sm.listing'::regclass`)).rows[0].n);
+    });
+
+    expect(listingRowsRead).toBeLessThan(100);
+    expect(await positions()).toEqual([{ listing_id: 500, account_id: heron, net_quantity: String(5 * UNIT) }]);
+  }, 30_000);
+
   it('a recovery fill may only come from an order on the session\'s own account', async () => {
     const falcon = await register(2, 'quiet-falcon-01');
     await create('a', [600]);

@@ -133,6 +133,29 @@ describeDb('market-data sources and streams, against Postgres', () => {
     expect(await getStreams({ eventIds: '' })).toEqual([]);
   });
 
+  it("finds an event's streams by index, without scanning every stream and listing", async () => {
+    await client.query(`INSERT INTO sm.event (event_id, title, exchange_id, native_event_id) VALUES (7, 'E', 1, 'E')`);
+    await client.query(`INSERT INTO sm.event_contract (event_id, security_id, outcome_label) VALUES (7, 1, 'X')`);
+    await client.query(`INSERT INTO sm.listing (listing_id, exchange_id, security_id)
+      SELECT 10000 + g, 1, 2 FROM generate_series(1, 20000) g`);
+    // A whole scan is the cheaper plan for a table this small, so it's ruled out: what's checked is that an index path
+    // exists at all, which the production tables' millions of rows need.
+    await client.query('BEGIN');
+    await client.query('SET LOCAL enable_seqscan = off');
+    let streams: any[];
+    let rowsRead: number;
+    try {
+      streams = await getStreams({ eventIds: '7' });
+      rowsRead = Number((await client.query(`SELECT SUM(COALESCE(seq_tup_read, 0) + COALESCE(idx_tup_fetch, 0)) AS n
+        FROM pg_stat_xact_user_tables WHERE relid IN ('sm.listing'::regclass, 'md.stream'::regclass)`)).rows[0].n);
+    } finally {
+      await client.query('COMMIT');
+    }
+
+    expect(streams.map((s: any) => s.listing_id).sort()).toEqual([500, 501]);
+    expect(rowsRead).toBeLessThan(100);
+  }, 30_000);
+
   it('lets a vendor source be edited but not a venue source\'s region', async () => {
     const sources = withClient(new SourceHandler());
     await expect(sources.modifyOne({ code: 'KALSHI' }, JSON.stringify({ homeRegion: 'eu-west-1' })))
