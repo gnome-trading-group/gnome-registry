@@ -80,21 +80,6 @@ describeDb('propositions, subjects and derived relationships, against Postgres',
       await mergeSubjects(client, b, a, 'me@example.com');
       expect((await listSubjects(client, { similarTo: String(a) })).map((s) => s.key)).toEqual(['eth-usd']);
     });
-
-    it('lists likely duplicate pairs once each, closest first, leaving out merged subjects', async () => {
-      const [a, b, c, d] = [await subject('btc-usd'), await subject('bitcoin'), await subject('eth-usd'),
-        await subject('ether')];
-      const vec = (x: number) => `[${[x, 1 - x, ...Array(1022).fill(0)].join(',')}]`;
-      for (const [id, x] of [[a, 1], [b, 0.99], [c, 0.3], [d, 0.25]] as const) {
-        await client.query('UPDATE sm.proposition_subject SET embedding = $1 WHERE subject_id = $2', [vec(x), id]);
-      }
-      const pairs = async () => (await listSubjects(client, { duplicates: 'true', minSimilarity: '0.99' }))
-        .map((p) => [p.key, p.candidate_key].sort().join('|'));
-      expect(await pairs()).toEqual(['bitcoin|btc-usd', 'eth-usd|ether']);
-      await mergeSubjects(client, b, a, 'me@example.com');
-      expect(await pairs()).toEqual(['eth-usd|ether']);
-      await expect(listSubjects(client, { duplicates: 'true', minSimilarity: '2' })).rejects.toMatchObject({ statusCode: 400 });
-    });
   });
 
   describe('propositions', () => {

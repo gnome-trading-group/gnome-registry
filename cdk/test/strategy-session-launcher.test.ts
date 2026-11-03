@@ -441,17 +441,21 @@ describe('POST /strategy-sessions/launch', () => {
 });
 
 describe('POST /strategy-sessions/stop', () => {
+  // The lease release runs alongside the kill and termination, so these check the stop's own order without it.
+  const withoutLease = (all: string[]) =>
+    all.filter((e) => !e.startsWith('MD ') && e !== 'SSM /gnome/market-data/api-url' && e !== 'Secret gnome/api-keys/market-data');
   it('marks it STOPPING, kills the session, waits, then terminates it, leaving STOPPED to the monitor', async () => {
     const response = await launcher.handler(apiEvent('/strategy-sessions/stop', { sessionId: 's1' }, 'alice@example.com'));
 
     expect(response.statusCode).toBe(200);
-    expect(events).toEqual([
+    expect(withoutLease(events)).toEqual([
       'GET /strategy-sessions',
       'PATCH /strategy-sessions',
       'POST /risk/halts',
       'sleep',
       'TerminateInstances',
     ]);
+    expect(events).toContain('MD DELETE /collection/leases/s1');
     expect(haltBodies).toEqual([{ sessionId: 's1', reason: 'session stop', actor: 'alice@example.com' }]);
     expect(patchBodies).toEqual([{
       status: 'STOPPING', stoppedBy: 'alice@example.com', expectedStatus: ['SUBMITTED', 'STARTING', 'RUNNING', 'STOPPING'],
@@ -507,7 +511,7 @@ describe('POST /strategy-sessions/stop', () => {
     const response = await launcher.handler(apiEvent('/strategy-sessions/stop', { sessionId: 's1' }));
 
     expect(response.statusCode).toBe(200);
-    expect(events).toEqual([
+    expect(withoutLease(events)).toEqual([
       'GET /strategy-sessions', 'PATCH /strategy-sessions', 'POST /risk/halts', 'PutEvents STOP_WITHOUT_KILL',
       'TerminateInstances',
     ]);
@@ -519,7 +523,8 @@ describe('POST /strategy-sessions/stop', () => {
     const response = await launcher.handler(apiEvent('/strategy-sessions/stop', { sessionId: 's1' }));
 
     expect(response.statusCode).toBe(409);
-    expect(events).toEqual(['GET /strategy-sessions', 'PATCH /strategy-sessions', 'TerminateInstances']);
+    expect(withoutLease(events)).toEqual(['GET /strategy-sessions', 'PATCH /strategy-sessions', 'TerminateInstances']);
+    expect(events).toContain('MD DELETE /collection/leases/s1');
     expect(haltBodies).toEqual([]);
   });
 
@@ -906,22 +911,20 @@ describe('market-data streams and leases', () => {
     expect(postBodies).toHaveLength(0);
   });
 
-  it('refuses data-only streams on a live session, which still reads its own feeds', async () => {
+  it("leases a live session's book and data-only streams as live and tells it how to reach its lease", async () => {
     const res = await launch({ mode: 'live' }, { streams: [900] });
 
-    expect(res.statusCode).toBe(400);
-    expect(JSON.parse(res.body).message).toContain('paper');
-    expect(postBodies).toHaveLength(0);
-  });
-
-  it('leases nothing for a live session and gives it no market-data API', async () => {
-    const res = await launch({ mode: 'live' });
-
     expect(res.statusCode).toBe(200);
-    expect(marketDataCalls).toHaveLength(0);
-    expect(events).not.toContain('GET /streams');
-    expect(sessionEnv().MARKET_DATA_API_URL).toBeUndefined();
-    expect(sessionEnv().MARKET_DATA_API_KEY_SECRET).toBeUndefined();
+    expect(leasePosts()).toHaveLength(1);
+    expect(leasePosts()[0]).toMatchObject({
+      path: '/collection/leases',
+      body: { sessionId: 'session-0001', streams: [101, 900], mode: 'live' },
+    });
+    expect(sessionEnv()).toMatchObject({
+      MARKET_DATA_API_URL: expect.any(String),
+      MARKET_DATA_API_KEY_SECRET: expect.any(String),
+      STREAMS: '[900]',
+    });
   });
 
   it.each([
@@ -1031,7 +1034,7 @@ describe('market-data streams and leases', () => {
   });
 });
 
-describe('POST /strategy-sessions/stop releases a paper lease', () => {
+describe('POST /strategy-sessions/stop releases the session lease', () => {
   const stop = () => launcher.handler(apiEvent('/strategy-sessions/stop', { sessionId: 's1' }));
   const deletes = () => marketDataCalls.filter((c) => c.method === 'DELETE').map((c) => c.path);
 
@@ -1088,9 +1091,9 @@ describe('POST /strategy-sessions/stop releases a paper lease', () => {
     expect(marketDataCalls.map((c) => c.headers['x-api-key'])).toEqual(['md-key', 'md-key-rotated']);
   });
 
-  it('but not for a live session, which holds no lease yet', async () => {
+  it('for a live session too', async () => {
     sessionRow = { ...sessionRow, mode: 'live' };
     await stop();
-    expect(marketDataCalls).toHaveLength(0);
+    expect(deletes()).toEqual(['/collection/leases/s1']);
   });
 });

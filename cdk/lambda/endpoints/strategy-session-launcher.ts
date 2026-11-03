@@ -19,7 +19,7 @@ const REGISTRY_API_URL = (process.env.REGISTRY_API_URL ?? '').replace(/\/$/, '')
 const REGISTRY_API_KEY_ID = process.env.REGISTRY_API_KEY_ID ?? '';
 const STAGE = process.env.STAGE ?? '';
 // The market-data API key's Secrets Manager mirror (gnome-shared-cdk API_KEY_SECRET_NAMES.MARKET_DATA, us-east-1).
-// The launcher reads it to lease a paper session's streams, and passes the name on so the session reads it too.
+// The launcher reads it to lease a session's streams, and passes the name on so the session reads it too.
 const MARKET_DATA_API_KEY_SECRET = process.env.MARKET_DATA_API_KEY_SECRET ?? '';
 
 // Sessions run in the platform network (gnome-shared-infra): its subnets and security group carry this tag, and the
@@ -487,7 +487,7 @@ export function buildSessionEnvironment(
   env.ORCHESTRATOR_VERSION = versions.orchestratorVersion;
   env.GNOMEPY_VERSION = versions.gnomepyVersion;
   if (alertsUrl) env.ALERTS_API_URL = alertsUrl;
-  // A paper session polls its lease (GET /collection/leases/{sessionId}) for where its streams are published.
+  // The session polls its lease (GET /collection/leases/{sessionId}) for where its streams are published.
   if (marketDataApiUrl) {
     env.MARKET_DATA_API_URL = marketDataApiUrl;
     env.MARKET_DATA_API_KEY_SECRET = MARKET_DATA_API_KEY_SECRET;
@@ -595,14 +595,8 @@ async function handleLaunch(body: string | null) {
   } catch (e) {
     return createResponse(400, { message: (e as Error).message });
   }
-  if (dataStreams.length > 0 && s.mode !== 'paper') {
-    return createResponse(400, { message: 'config.streams needs a paper session: live sessions read their own feeds' });
-  }
-
   const exchangeOf = await listingExchanges(listingIds);
   const exchanges = await exchangeRows(new Set(exchangeOf.values()));
-  let leaseStreams: number[] = [];
-  let marketData: MarketDataApi | undefined;
   if (s.mode === 'paper') {
     let simulation: ISessionSimulation;
     try {
@@ -620,41 +614,42 @@ async function handleLaunch(body: string | null) {
     s.config.simulation = simulation;
     const problem = await simulationProblem(simulation, exchangeOf, exchanges);
     if (problem) return createResponse(400, { message: problem });
-
-    const dataRows = await streamRows(dataStreams);
-    const known = new Set(dataRows.map((r) => r.stream_id));
-    const unknown = dataStreams.filter((id) => !known.has(id));
-    if (unknown.length) return createResponse(400, { message: `config.streams ${unknown.join(', ')} are not streams` });
-    let traded: StreamRow[];
-    try {
-      traded = await bookStreams(listingIds);
-    } catch (e) {
-      return createResponse(400, { message: (e as Error).message });
-    }
-    // A traded listing's book stream is already the session's; listed again it would be subscribed twice.
-    const tradedStreams = new Set(traded.map((r) => r.stream_id));
-    dataStreams = dataStreams.filter((id) => !tradedStreams.has(id));
-    if ('streams' in s.config) s.config.streams = dataStreams;
-    leaseStreams = [...tradedStreams, ...dataStreams];
-    const inactive = [...traded, ...dataRows].filter((r) => r.active === false).map((r) => r.stream_id);
-    if (inactive.length) {
-      return createResponse(400, {
-        message: `Streams ${[...new Set(inactive)].join(', ')} are not active, so no shard would collect them`,
-      });
-    }
-    if (leaseStreams.length > MAX_LEASE_STREAMS) {
-      return createResponse(400, {
-        message: `A paper session reads at most ${MAX_LEASE_STREAMS} streams; this one needs ${leaseStreams.length}`,
-      });
-    }
-    // Before the session is recorded, so a missing API URL or key refuses the launch instead of failing a session.
-    try {
-      marketData = await resolveMarketDataApi();
-    } catch (e) {
-      throw new Error(`Market-data API unavailable for leasing streams: ${(e as Error).message}`);
-    }
   } else {
     delete s.config.simulation;
+  }
+
+  const dataRows = await streamRows(dataStreams);
+  const known = new Set(dataRows.map((r) => r.stream_id));
+  const unknown = dataStreams.filter((id) => !known.has(id));
+  if (unknown.length) return createResponse(400, { message: `config.streams ${unknown.join(', ')} are not streams` });
+  let traded: StreamRow[];
+  try {
+    traded = await bookStreams(listingIds);
+  } catch (e) {
+    return createResponse(400, { message: (e as Error).message });
+  }
+  // A traded listing's book stream is already the session's; listed again it would be subscribed twice.
+  const tradedStreams = new Set(traded.map((r) => r.stream_id));
+  dataStreams = dataStreams.filter((id) => !tradedStreams.has(id));
+  if ('streams' in s.config) s.config.streams = dataStreams;
+  const leaseStreams = [...tradedStreams, ...dataStreams];
+  const inactive = [...traded, ...dataRows].filter((r) => r.active === false).map((r) => r.stream_id);
+  if (inactive.length) {
+    return createResponse(400, {
+      message: `Streams ${[...new Set(inactive)].join(', ')} are not active, so no shard would collect them`,
+    });
+  }
+  if (leaseStreams.length > MAX_LEASE_STREAMS) {
+    return createResponse(400, {
+      message: `A session reads at most ${MAX_LEASE_STREAMS} streams; this one needs ${leaseStreams.length}`,
+    });
+  }
+  // Before the session is recorded, so a missing API URL or key refuses the launch instead of failing a session.
+  let marketData: MarketDataApi;
+  try {
+    marketData = await resolveMarketDataApi();
+  } catch (e) {
+    throw new Error(`Market-data API unavailable for leasing streams: ${(e as Error).message}`);
   }
 
   const region = s.region ?? resolveRegion(exchanges);
@@ -675,7 +670,7 @@ async function handleLaunch(body: string | null) {
   const imageId = await getParameter(region, amiParameterName(profile, instanceType));
 
   const userData = buildUserData(
-    buildSessionEnvironment(s, { orchestratorVersion, gnomepyVersion }, await resolveAlertsApiUrl(), marketData?.url));
+    buildSessionEnvironment(s, { orchestratorVersion, gnomepyVersion }, await resolveAlertsApiUrl(), marketData.url));
   if (Buffer.byteLength(userData) > MAX_USER_DATA_BYTES) {
     return createResponse(400, { message: `Session config too large for EC2 user data (${Buffer.byteLength(userData)} bytes)` });
   }
@@ -704,14 +699,12 @@ async function handleLaunch(body: string | null) {
 
   // After the session row, so the reconciler can always find the session a lease belongs to (it releases those of
   // ended sessions), and before the instance, which waits on these streams.
-  if (marketData) {
-    try {
-      await createLease(marketData, { sessionId: s.sessionId, streams: leaseStreams, mode: s.mode, region });
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      await markLaunchFailed(s.sessionId, `Market-data lease failed: ${message}`);
-      return createResponse(502, { message: `Market-data lease failed: ${message}` });
-    }
+  try {
+    await createLease(marketData, { sessionId: s.sessionId, streams: leaseStreams, mode: s.mode, region });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    await markLaunchFailed(s.sessionId, `Market-data lease failed: ${message}`);
+    return createResponse(502, { message: `Market-data lease failed: ${message}` });
   }
 
   const tags = [
@@ -748,7 +741,7 @@ async function handleLaunch(body: string | null) {
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     await markLaunchFailed(s.sessionId, `Launch failed: ${message}`);
-    if (marketData) await releaseLease(s.sessionId);
+    await releaseLease(s.sessionId);
     return launchErrorResponse(error);
   }
 
@@ -824,7 +817,7 @@ async function handleStop(event: APIGatewayProxyEvent) {
   if (stopping.status === 409) {
     // Already STOPPED or FAILED. Its kill may have been released when the instance terminated, and a fresh one
     // would then never be released, so only make sure the instance (and its lease) are gone.
-    await Promise.all([terminateInstance(session), releaseSessionLease(session)]);
+    await Promise.all([terminateInstance(session), releaseLease(session.session_id)]);
     return createResponse(409, stopping.body);
   }
   if (stopping.status !== 200) {
@@ -833,7 +826,7 @@ async function handleStop(event: APIGatewayProxyEvent) {
   // Alongside the kill and the grace wait rather than after them, so it costs the stop no time. Releasing before the
   // instance is gone is safe: shards keep publishing a released lease's streams for five minutes (the reconciler's
   // lease retire grace), long enough for the session to wind down.
-  const leaseReleased = releaseSessionLease(session);
+  const leaseReleased = releaseLease(session.session_id);
 
   // Kill first so the OMS stops trading and cancels resting orders while the instance is still alive to do it;
   // terminating outright would leave whatever was resting on the venue. This lambda runs outside the VPC with
@@ -879,10 +872,6 @@ async function handleStop(event: APIGatewayProxyEvent) {
   return createResponse(stopped.status, stopped.body);
 }
 
-// Only paper sessions lease streams: live sessions still open their own feeds.
-function releaseSessionLease(session: { session_id: string; mode?: string }): Promise<void> {
-  return session.mode === 'paper' ? releaseLease(session.session_id) : Promise.resolve();
-}
 
 async function terminateInstance(session: { instance_id?: string | null; launch_region?: string | null }) {
   if (session.instance_id && session.launch_region) {
