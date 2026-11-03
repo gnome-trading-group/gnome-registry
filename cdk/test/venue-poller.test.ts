@@ -96,7 +96,39 @@ describe('venue readers on captured answers', () => {
       venueKey: '65859975054715735368129844287010108827814341883420891032920701239041923945418',
       quantity: 10_000_000n, redeemable: true, value: 0n,
     });
-    expect(reading.positions?.[1].quantity).toBe(7_352_000n);
+    expect(reading.positions).toHaveLength(1);
+  });
+
+  it('walks every page of Polymarket Intl positions by cursor, keeping the wallet anchor and filters on each', async () => {
+    process.env.POLYGON_RPC_URL = 'https://rpc.example';
+    process.env.PUSD_TOKEN_ADDRESS = '0xC011a7E12a19f7B1f670d46F03B03f3342E82DFB';
+    const row = (token: string, size: number, value: number | null) =>
+      ({ token_id: token, current_size: size, current_value: value, redeemable: false });
+    const fetch = jest.spyOn(global, 'fetch').mockImplementation(async (url) => {
+      const target = String(url);
+      if (target.includes('rpc.example')) return respond({ result: '0x0' });
+      return respond(target.includes('cursor=')
+        ? { data: [row('2', 0.05, null)], pagination: { next_cursor: null } }
+        : { data: [row('1', 7.352, 0.0845)], pagination: { next_cursor: 'abc+/=' } });
+    });
+    const reading = await readPolymarketIntl({
+      account_id: 2, exchange_id: 2, exchange_code: 'POLYMARKET_INTL', label: 'x', read_secret_name: null,
+      venue_ref: { funderAddress: '0xe65019f319d3b20a9883b43283c91ca9d8c81cfb' },
+    });
+    expect(reading.positions).toEqual([
+      { venueKey: '1', quantity: 7_352_000n, redeemable: false, value: 84_500_000n },
+      { venueKey: '2', quantity: 50_000n, redeemable: false, value: null },
+    ]);
+    expect(reading.portfolioValue).toBe(84_500_000n);
+    const pages = fetch.mock.calls.map(([u]) => new URL(String(u))).filter(u => u.pathname === '/v2/positions');
+    expect(pages).toHaveLength(2);
+    for (const page of pages) {
+      expect(page.searchParams.get('user')).toBe('0xe65019f319d3b20a9883b43283c91ca9d8c81cfb');
+      expect(page.searchParams.get('filter_amount')).toBe('0');
+      expect(page.searchParams.get('include_archived')).toBe('true');
+      expect(page.searchParams.has('offset')).toBe(false);
+    }
+    expect(pages[1].searchParams.get('cursor')).toBe('abc+/=');
   });
 });
 
@@ -183,7 +215,9 @@ describe('venue reads that fail transiently', () => {
     process.env.POLYGON_RPC_URL = 'https://rpc.example';
     process.env.PUSD_TOKEN_ADDRESS = '0xC011a7E12a19f7B1f670d46F03B03f3342E82DFB';
     const fetch = jest.spyOn(global, 'fetch').mockImplementation(async (target) => {
-      if (!String(target).includes('rpc.example')) return new Response('[]');
+      if (!String(target).includes('rpc.example')) {
+        return new Response(JSON.stringify({ data: [], pagination: { next_cursor: null } }));
+      }
       const faulted = fetch.mock.calls.filter(([u]) => String(u).includes('rpc.example')).length === 1;
       return new Response(JSON.stringify(faulted
         ? { jsonrpc: '2.0', id: 1, error: { message: 'header not found' } }

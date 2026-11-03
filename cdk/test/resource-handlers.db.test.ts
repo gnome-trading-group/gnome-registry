@@ -145,18 +145,18 @@ describeDb('resource handlers round-trip awkward values, against Postgres', () =
     const [a, b, c] = [await security('a'), await security('b'), await security('c')];
     const relationships = on(new ContractRelationshipHandler());
     const rel = (securityIdA: number, securityIdB: number, relationshipType: string, method: string) => ({
-      securityIdA, securityIdB, relationshipType, confidence: 0.9, method,
+      securityIdA, securityIdB, relationshipType, method,
     });
 
     await ok(relationships.createOne(JSON.stringify(rel(a, b, 'EQUIVALENT', 'manual'))));
-    await ok(relationships.createOne(JSON.stringify(rel(a, c, 'IMPLIES', 'embedding'))));
+    await ok(relationships.createOne(JSON.stringify(rel(a, c, 'IMPLIES', 'derived'))));
     const bulk = await ok(relationships.createMany(JSON.stringify([
-      rel(a, b, 'IMPLIES', 'embedding'),
-      rel(a, c, 'EQUIVALENT', 'embedding'),
+      rel(a, b, 'IMPLIES', 'derived'),
+      rel(a, c, 'EQUIVALENT', 'derived'),
     ])));
     expect(bulk).toMatchObject([
       { security_id_b: b, relationship_type: 'EQUIVALENT', method: 'manual' },
-      { security_id_b: c, relationship_type: 'EQUIVALENT', method: 'embedding' },
+      { security_id_b: c, relationship_type: 'EQUIVALENT', method: 'derived' },
     ]);
 
     expect(await ok(relationships.createOne(JSON.stringify(rel(a, b, 'IMPLIES', 'manual')))))
