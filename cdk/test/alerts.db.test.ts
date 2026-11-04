@@ -397,6 +397,14 @@ describeDb('alerts against Postgres', () => {
     expect((await client.query(`SELECT status FROM alert.alert WHERE type = 'LAUNCH_SUCCEEDED'`)).rows[0].status).toBe('RESOLVED');
   });
 
+  it('a silent report for the record goes nowhere and is closed from the start', async () => {
+    await session('s1');
+    const quiet = await record(client, ingest({ type: 'LAUNCH_SUCCEEDED', sessionId: 's1', labels: { route: 'silent' } }), t0);
+    expect(quiet.notify).toBe(false);
+    expect((await client.query(`SELECT status, notified_at FROM alert.alert WHERE type = 'LAUNCH_SUCCEEDED'`)).rows[0])
+      .toEqual({ status: 'RESOLVED', notified_at: null });
+  });
+
   it('facets count each severity and type, leaving out their own filter', async () => {
     await session('s1');
     await session('s2');

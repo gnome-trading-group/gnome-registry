@@ -52,6 +52,12 @@ describe('alert severity', () => {
     expect(sinksFor('ERROR', 'prod', {})).toEqual(['slack']);
     expect(sinksFor('CRITICAL', 'dev', {})).toEqual(['slack']);
   });
+
+  it('sends a silent INFO alert nowhere, but never silences anything worse', () => {
+    expect(sinksFor('INFO', 'prod', { route: 'silent' })).toEqual([]);
+    expect(sinksFor('WARNING', 'prod', { route: 'silent' })).toEqual(['slack']);
+    expect(sinksFor('CRITICAL', 'prod', { route: 'silent' })).toEqual(['incidentio', 'slack']);
+  });
 });
 
 describe('CloudWatch alarms', () => {

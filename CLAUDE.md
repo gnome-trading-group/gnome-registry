@@ -132,7 +132,8 @@ synth step, so run `npm test` yourself before handing off.
     `/gnome/alerting/api-url`); router (1-minute tick runs the monitoring rules via the store, also takes bus events,
     CloudWatch alarm changes and AWS Budgets/Cost Anomaly SNS); store (records alert state in Postgres); DLQ.
     The router posts every alert to Slack (`#gnome-alerts-prod` / `#gnome-alerts-dev`); in prod, CRITICAL alerts not
-    labelled `route: slack-only` also go to incident.io. Paper sessions and dev are capped at ERROR. After posting a
+    labelled `route: slack-only` also go to incident.io. INFO alerts labelled `route: silent` (launcher rules set to
+    quiet) are recorded but posted nowhere. Paper sessions and dev are capped at ERROR. After posting a
     firing alert to Slack it emits `AlertDelivered` (source `gnome.alerts.delivered`) on the bus for gnome-bot.
 - Logs: Lambda default log groups, `/aws/lambda/<function>`. Function names are CloudFormation-generated, e.g.
   `Prod-ApiStack-<logicalId>-<suffix>`; find them by stack prefix and handler name (e.g. `strategysessions`,

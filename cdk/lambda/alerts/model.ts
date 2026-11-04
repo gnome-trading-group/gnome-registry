@@ -40,7 +40,7 @@ export interface AlertEvent {
   // Taken from the session when there is one; otherwise as given, and an alert with neither is about infrastructure.
   mode?: Mode | null;
   // Display context (strategy name, symbol, account, the agent a finding is about…) and routing hints: `route:
-  // slack-only` keeps an alert off the pager.
+  // slack-only` keeps an alert off the pager; `route: silent` keeps an INFO alert out of Slack too.
   labels?: Record<string, string>;
   links?: { title: string; url: string }[];
   // When the state changed at the source; an event older than what the store already has is dropped.
