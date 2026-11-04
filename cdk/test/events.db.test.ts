@@ -98,6 +98,41 @@ describeDb('events by volume, against Postgres', () => {
       .rejects.toThrow(ValidationError);
   });
 
+  async function schedule(eventId: number) {
+    const { rows } = await client.query(`SELECT start_time::text AS start, source FROM sm.event_schedule_change
+      WHERE event_id = $1 ORDER BY schedule_change_id`, [eventId]);
+    return rows;
+  }
+
+  it('records a start time, logs it only when it moves, and leaves the modified time alone', async () => {
+    const write = (startTime: string | null) => handler().modifyMany(JSON.stringify([
+      { eventId: 1, startTime, startTimeSource: 'kalshi-milestone' }]));
+    expect((await write('2026-11-05T23:00:00Z')).statusCode).toBe(200);
+    await write('2026-11-05T23:00:00Z');
+    await write('2026-11-08T23:00:00Z');
+    await write(null);
+    expect(await schedule(1)).toEqual([
+      { start: '2026-11-05 23:00:00', source: 'kalshi-milestone' },
+      { start: '2026-11-08 23:00:00', source: 'kalshi-milestone' },
+      { start: null, source: 'kalshi-milestone' },
+    ]);
+    const { rows } = await client.query(`SELECT start_time, start_time_updated_at IS NOT NULL AS stamped,
+      date_modified::date::text AS modified FROM sm.event WHERE event_id = 1`);
+    expect(rows).toEqual([{ start_time: null, stamped: true, modified: '2026-10-01' }]);
+  });
+
+  it('creates an event with its start time logged, and filters by it', async () => {
+    await handler().createMany(JSON.stringify([
+      { title: 'Game', exchangeId: 2, nativeEventId: 'GAME', startTime: '2026-11-04T17:45:00Z',
+        startTimeSource: 'polymarket-game-start' },
+      { title: 'Future', exchangeId: 2, nativeEventId: 'FUTURE' },
+    ]));
+    const { rows } = await client.query(`SELECT event_id FROM sm.event WHERE native_event_id = 'GAME'`);
+    expect(await schedule(rows[0].event_id)).toEqual([{ start: '2026-11-04 17:45:00', source: 'polymarket-game-start' }]);
+    expect(await ids({ startFrom: '2026-11-04T00:00:00Z', startTo: '2026-11-05T00:00:00Z' })).toEqual([rows[0].event_id]);
+    await expect(handler().get({ startFrom: 'soon' })).rejects.toThrow(ValidationError);
+  });
+
   it('still stamps the modified time when an edit carries other fields', async () => {
     await handler().modifyMany(JSON.stringify([{ eventId: 4, title: 'D2', volume24h: 1 }]));
     const { rows } = await client.query(`SELECT title, volume_24h, date_modified > NOW() - INTERVAL '1 minute' AS touched

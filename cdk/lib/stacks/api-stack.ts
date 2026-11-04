@@ -171,13 +171,21 @@ export class ApiStack extends cdk.Stack {
     this.routeFile('risk/halts', 'risk-halts.ts', { POST: [SERVICE] });
 
     // Venue accounts: the account-creation Lambda registers one (the credentials go to Secrets Manager, not here), a
-    // starting orchestrator reads the accounts its session was bound to, and moving an account through its lifecycle
-    // is a person's. Secret names are for the account-creation Lambda alone.
+    // starting orchestrator reads the accounts its session was bound to, an order gateway reads the accounts it holds,
+    // and moving an account through its lifecycle is a person's. Secret names are for the account-creation Lambda and
+    // the order gateway, which trades with them.
     const venueAccounts = this.createIntegration('venue-accounts.ts');
     this.route('venue-accounts', venueAccounts, { POST: [SERVICE], GET: [PERSON, BOT] });
     this.route('venue-accounts/status', venueAccounts, { PATCH: [PERSON] });
     this.route('strategy-sessions/accounts', venueAccounts, { GET: [SERVICE, PERSON, BOT] });
     this.route('venue-accounts/secrets', venueAccounts, { GET: [SERVICE], PUT: [SERVICE] });
+    this.route('venue-accounts/gateway', venueAccounts, { GET: [SERVICE] });
+
+    // Order gateways: the gateway and the launcher's ensure record when a session wanted one; an operator sets its
+    // profile, pins its release and assigns an account no gateway holds yet.
+    const gateways = this.createIntegration('gateways.ts');
+    this.route('gateways', gateways, { GET: [SERVICE, PERSON, BOT], PATCH: [SERVICE, PERSON] });
+    this.route('gateways/accounts', gateways, { POST: [PERSON] });
 
     // Creating an account from the controller puts its credentials in Secrets Manager, which the registry's isolated
     // subnets can't reach, so this one runs outside the VPC and registers the account through the API. People only,

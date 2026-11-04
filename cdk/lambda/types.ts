@@ -94,6 +94,10 @@ interface IEventBase {
 export interface ICreateEvent extends IEventBase {
   /** About USD traded over the last 24 hours; written by the classifier, which also stamps volume_updated_at. */
   volume24h?: number | null;
+  /** The scheduled start as the venue lists it now (ISO-8601); written by the classifier, each change logged. */
+  startTime?: string | null;
+  /** Where the venue gives the start time (kalshi-milestone, ...), kept with each logged change. */
+  startTimeSource?: string | null;
 }
 export interface IDeleteEvent {
   eventId: number;

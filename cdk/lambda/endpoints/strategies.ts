@@ -1,5 +1,5 @@
 import { APIGatewayProxyEvent, APIGatewayProxyEventQueryStringParameters } from 'aws-lambda';
-import { ResourceHandler } from './base';
+import { ResourceHandler, ValidationError } from './base';
 import { NOW, set, Sql, sql, where } from './sql';
 
 interface ICreateStrategy {
@@ -7,6 +7,7 @@ interface ICreateStrategy {
   description?: string;
   archived?: boolean;
   parameters?: Record<string, unknown>;
+  rateWeight?: number;
 }
 
 interface IUpdateStrategy {
@@ -14,6 +15,13 @@ interface IUpdateStrategy {
   description?: string;
   archived?: boolean;
   parameters?: Record<string, unknown>;
+  rateWeight?: number;
+}
+
+function rateWeight(value: unknown): number | undefined {
+  if (value == null) return undefined;
+  if (!Number.isInteger(value) || (value as number) < 1) throw new ValidationError('rateWeight must be a positive integer');
+  return value as number;
 }
 
 export class StrategyHandler extends ResourceHandler {
@@ -31,8 +39,8 @@ export class StrategyHandler extends ResourceHandler {
     const s = JSON.parse(body) as ICreateStrategy;
     const parameters = s.parameters != null ? JSON.stringify(s.parameters) : null;
     return sql`
-      INSERT INTO strategy.strategy (name, description, archived, parameters)
-      VALUES (${s.name}, ${s.description ?? null}, ${s.archived === true}, ${parameters})
+      INSERT INTO strategy.strategy (name, description, archived, parameters, rate_weight)
+      VALUES (${s.name}, ${s.description ?? null}, ${s.archived === true}, ${parameters}, ${rateWeight(s.rateWeight) ?? 1})
       RETURNING *`;
   }
 
@@ -48,6 +56,7 @@ export class StrategyHandler extends ResourceHandler {
       description: s.description ?? undefined,
       archived: typeof s.archived === 'boolean' ? s.archived : undefined,
       parameters: s.parameters != null ? JSON.stringify(s.parameters) : undefined,
+      rate_weight: rateWeight(s.rateWeight),
       date_modified: NOW,
     })} WHERE strategy_id = ${row['strategy_id']} RETURNING *`;
   }

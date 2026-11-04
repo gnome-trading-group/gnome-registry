@@ -8,8 +8,8 @@ import { ACCOUNT_LOCK } from './venue-account-assignment';
 
 // Venue accounts and the sessions bound to them. Registering one is the API key's (the account-creation Lambda, which
 // puts the credentials in Secrets Manager: only the secret's name comes here); reading a session's bindings is the
-// API key's too (a starting orchestrator); everything else, listing accounts and moving them through their
-// lifecycle, is Cognito only, so each change is attributed to a person.
+// API key's too (a starting orchestrator), as is reading the accounts an order gateway holds; everything else,
+// listing accounts and moving them through their lifecycle, is Cognito only, so each change is attributed to a person.
 
 const SECRET_NAME_PATTERN = /^[A-Za-z0-9/_+=.@-]+$/;
 
@@ -63,6 +63,14 @@ export async function registerAccount(client: PoolClient, a: IRegisterAccount) {
       [a.exchangeId, a.label, a.venueRef ?? {}, a.tradingSecretName, a.readSecretName ?? null, a.actor, a.note ?? null],
     )).rows[0];
     await client.query('INSERT INTO treasury.account_config (account_id, actor) VALUES ($1, $2)', [account.account_id, a.actor]);
+    // Served by its venue's live gateway when the venue has exactly one; with several, a person assigns it
+    // (POST gateways/accounts), since which instance should hold it is a choice.
+    await client.query(
+      `INSERT INTO account_master.gateway_account (account_id, gateway_key, actor)
+       SELECT $1, g.gateway_key, $3 FROM account_master.gateway g
+       WHERE g.mode = 'live' AND g.exchange_id = $2
+         AND (SELECT COUNT(*) FROM account_master.gateway WHERE mode = 'live' AND exchange_id = $2) = 1`,
+      [account.account_id, a.exchangeId, a.actor]);
     return account;
   } catch (error) {
     const constraint = (error as { constraint?: string })?.constraint;
@@ -137,6 +145,19 @@ export async function sessionAccounts(client: PoolClient, sessionId: string) {
     [sessionId])).rows;
 }
 
+// The accounts an order gateway holds, read by the gateway when it starts. A draining account stays held: it still has
+// orders to cancel and positions to unwind.
+export async function gatewayAccounts(client: PoolClient, gatewayKey: string) {
+  return (await client.query(
+    `SELECT a.account_id, a.exchange_id, e.exchange_code, a.label, a.status, a.venue_ref, a.trading_secret_name
+     FROM account_master.gateway_account ga
+     JOIN account_master.venue_account a USING (account_id)
+     JOIN sm.exchange e USING (exchange_id)
+     WHERE ga.gateway_key = $1 AND a.status IN ('ACTIVE', 'DRAINING')
+     ORDER BY a.account_id`,
+    [gatewayKey])).rows;
+}
+
 export async function listAccounts(client: PoolClient, exchangeId?: number) {
   return (await client.query(
     `SELECT a.account_id, a.exchange_id, e.exchange_code, a.label, a.status, a.venue_ref, a.trading_secret_name,
@@ -208,6 +229,11 @@ export const handler = async (event: APIGatewayProxyEvent) => {
       const sessionId = event.queryStringParameters?.sessionId;
       if (!isSessionId(sessionId)) return createResponse(400, { message: 'sessionId must be a session id' });
       return createResponse(200, await sessionAccounts(client, sessionId));
+    }
+    if (resource === '/venue-accounts/gateway' && event.httpMethod === 'GET') {
+      const gatewayKey = event.queryStringParameters?.gatewayKey;
+      if (!gatewayKey) return createResponse(400, { message: 'gatewayKey is required' });
+      return createResponse(200, await gatewayAccounts(client, gatewayKey));
     }
     // The account-creation Lambda (outside the VPC) replacing or deleting an account's secrets: their names, never
     // their contents, which the registry doesn't have.

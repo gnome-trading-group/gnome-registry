@@ -24,6 +24,15 @@ function volume(value: number | null | undefined): number | null {
   return Number(value);
 }
 
+/** A start time: null when absent; anything unparseable is refused. */
+function instant(name: string, value: string | null | undefined): string | null {
+  if (value === undefined || value === null) return null;
+  return timestamp(name, value);
+}
+
+/** Appends the start time of the events a statement wrote to their schedule history, when it changed. */
+const LOG_SCHEDULE_CHANGE = raw('INSERT INTO sm.event_schedule_change (event_id, start_time, source)');
+
 const tagArray = (tags: string[] | null | undefined) => (tags && tags.length > 0 ? tags : null);
 
 export class EventHandler extends ResourceHandler {
@@ -31,7 +40,7 @@ export class EventHandler extends ResourceHandler {
   getCamelPrimaryKey(): string { return 'eventId'; }
 
   allowedSortColumns(): string[] {
-    return ['event_id', 'title', 'category', 'resolved', 'expiry', 'date_created', 'date_modified'];
+    return ['event_id', 'title', 'category', 'resolved', 'expiry', 'start_time', 'date_created', 'date_modified'];
   }
 
   generateDeleteQuery(body: string): Sql {
@@ -43,13 +52,21 @@ export class EventHandler extends ResourceHandler {
     const event = JSON.parse(body) as ICreateEvent;
     // The classifier reads an event's volume in the same fetch that finds it, so a new event has it from the start.
     const volume24h = volume(event.volume24h);
+    const startTime = instant('startTime', event.startTime);
     return sql`
-      INSERT INTO sm.event (title, description, category, expiry, tags, exchange_id, native_event_id, native_url,
-                            volume_24h, volume_updated_at)
-      VALUES (${event.title}, ${event.description || null}, ${event.category || null}, ${event.expiry || null},
-              ${tagArray(event.tags)}::text[], ${event.exchangeId}, ${event.nativeEventId}, ${event.nativeUrl || null},
-              ${volume24h}, ${raw(volume24h === null ? 'NULL' : 'NOW()')})
-      RETURNING *`;
+      WITH inserted AS (
+        INSERT INTO sm.event (title, description, category, expiry, tags, exchange_id, native_event_id, native_url,
+                              volume_24h, volume_updated_at, start_time, start_time_updated_at)
+        VALUES (${event.title}, ${event.description || null}, ${event.category || null}, ${event.expiry || null},
+                ${tagArray(event.tags)}::text[], ${event.exchangeId}, ${event.nativeEventId}, ${event.nativeUrl || null},
+                ${volume24h}, ${raw(volume24h === null ? 'NULL' : 'NOW()')},
+                ${startTime}::timestamp, ${raw(startTime === null ? 'NULL' : 'NOW()')})
+        RETURNING *
+      ), logged AS (
+        ${LOG_SCHEDULE_CHANGE} SELECT event_id, start_time, ${event.startTimeSource || null} FROM inserted
+        WHERE start_time IS NOT NULL
+      )
+      SELECT * FROM inserted`;
   }
 
   generateSelectQuery(params: APIGatewayProxyEventQueryStringParameters | null): Sql {
@@ -74,6 +91,8 @@ export class EventHandler extends ResourceHandler {
       params?.tags && sql`tags && ${textList(params.tags)}::text[]`,
       params?.expiryFrom && sql`expiry >= ${timestamp('expiryFrom', params.expiryFrom)}`,
       params?.expiryTo && sql`expiry < ${timestamp('expiryTo', params.expiryTo)}`,
+      params?.startFrom && sql`start_time >= ${timestamp('startFrom', params.startFrom)}`,
+      params?.startTo && sql`start_time < ${timestamp('startTo', params.startTo)}`,
       minVolume !== undefined && sql`volume_24h >= ${minVolume}`,
       params?.search && sql`(title ILIKE ${pattern} OR description ILIKE ${pattern})`,
     ])}`;
@@ -98,14 +117,32 @@ export class EventHandler extends ResourceHandler {
       resolved_at: orNull(event.resolvedAt),
     };
     const edited = Object.values(edits).some((value) => value !== undefined);
-    // A volume refresh is the classifier's reading, not an edit of the event, so it leaves date_modified alone.
-    const refreshed = event.volume24h !== undefined;
-    return sql`UPDATE sm.event SET ${set({
+    // Volume and start time are the classifier's readings, not edits of the event, so they leave date_modified alone.
+    const volumeRead = event.volume24h !== undefined;
+    const startRead = event.startTime !== undefined;
+    const startTime = startRead ? instant('startTime', event.startTime) : undefined;
+    const update = sql`UPDATE sm.event SET ${set({
       ...edits,
-      date_modified: edited || !refreshed ? NOW : undefined,
-      volume_24h: refreshed ? volume(event.volume24h) : undefined,
-      volume_updated_at: refreshed ? NOW : undefined,
+      date_modified: edited || !(volumeRead || startRead) ? NOW : undefined,
+      volume_24h: volumeRead ? volume(event.volume24h) : undefined,
+      volume_updated_at: volumeRead ? NOW : undefined,
+      start_time: startRead ? sql`${startTime}::timestamp` : undefined,
+      start_time_updated_at: startRead
+        ? sql`CASE WHEN start_time IS DISTINCT FROM ${startTime}::timestamp THEN NOW() ELSE start_time_updated_at END`
+        : undefined,
     })} WHERE event_id = ${row['event_id']} RETURNING *`;
+    if (!startRead) {
+      return update;
+    }
+    // Every statement in the WITH sees the event as it was, so `previous` is the start time before this update.
+    return sql`
+      WITH previous AS (SELECT start_time FROM sm.event WHERE event_id = ${row['event_id']}),
+      updated AS (${update}),
+      logged AS (
+        ${LOG_SCHEDULE_CHANGE} SELECT updated.event_id, updated.start_time, ${event.startTimeSource || null}
+        FROM updated, previous WHERE updated.start_time IS DISTINCT FROM previous.start_time
+      )
+      SELECT * FROM updated`;
   }
 }
 
