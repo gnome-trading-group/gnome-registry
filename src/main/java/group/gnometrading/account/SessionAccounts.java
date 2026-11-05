@@ -1,16 +1,10 @@
 package group.gnometrading.account;
 
-import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
-import com.fasterxml.jackson.databind.DeserializationFeature;
-import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.databind.PropertyNamingStrategies;
 import group.gnometrading.RegistryConnection;
 import group.gnometrading.strings.ViewString;
 import java.io.IOException;
 import java.io.UncheckedIOException;
-import java.nio.ByteBuffer;
 import java.util.List;
-import java.util.Map;
 
 /**
  * The venue accounts the registry bound to a session when it was created, one per exchange the session trades.
@@ -20,14 +14,6 @@ public final class SessionAccounts {
 
     private static final String ENDPOINT = "/api/strategy-sessions/accounts?sessionId=%s";
 
-    private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper()
-            .setPropertyNamingStrategy(PropertyNamingStrategies.SNAKE_CASE)
-            .configure(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false);
-
-    @JsonIgnoreProperties(ignoreUnknown = true)
-    private record AccountResponse(
-            int accountId, int exchangeId, String label, String tradingSecretName, Map<String, Object> venueRef) {}
-
     private final List<VenueAccount> accounts;
 
     private SessionAccounts(final List<VenueAccount> accounts) {
@@ -35,24 +21,9 @@ public final class SessionAccounts {
     }
 
     public static SessionAccounts fetch(final RegistryConnection registryConnection, final String sessionId) {
-        final ByteBuffer response = registryConnection.get(new ViewString(String.format(ENDPOINT, sessionId)));
-        final byte[] body = new byte[response.remaining()];
-        response.get(body);
         try {
-            final AccountResponse[] rows = OBJECT_MAPPER.readValue(body, AccountResponse[].class);
-            final VenueAccount[] accounts = new VenueAccount[rows.length];
-            for (int i = 0; i < rows.length; i++) {
-                final AccountResponse row = rows[i];
-                final Object funder =
-                        row.venueRef() == null ? null : row.venueRef().get("funderAddress");
-                accounts[i] = new VenueAccount(
-                        row.accountId(),
-                        row.exchangeId(),
-                        row.label(),
-                        row.tradingSecretName(),
-                        funder == null ? null : funder.toString());
-            }
-            return new SessionAccounts(List.of(accounts));
+            return new SessionAccounts(
+                    AccountRows.parse(registryConnection.get(new ViewString(String.format(ENDPOINT, sessionId)))));
         } catch (IOException e) {
             throw new UncheckedIOException("Unreadable accounts for session " + sessionId, e);
         }

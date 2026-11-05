@@ -102,38 +102,39 @@ describeDb('resource handlers round-trip awkward values, against Postgres', () =
       .toMatchObject({ description: null, tags: null, resolved: true, title: AWKWARD });
   });
 
-  it('events: by subject, following a merged key to where its propositions are', async () => {
+  it('events: only those with a contract whose proposition matches', async () => {
     await client.query('TRUNCATE sm.proposition_subject RESTART IDENTITY CASCADE');
     const exchangeId = await exchange();
     const events = on(new EventHandler());
-    const event = async (nativeEventId: string, subjectId: number) => {
+    await client.query("INSERT INTO sm.proposition_subject (key) VALUES ('game:cs2:a-b')");
+    const event = async (nativeEventId: string, propositions: Record<string, string>[]) => {
       const row = await ok(events.createOne(JSON.stringify({ title: nativeEventId, exchangeId, nativeEventId })));
-      const security = await ok(on(new SecurityHandler()).createOne(JSON.stringify({ symbol: nativeEventId, type: 1 })));
-      await client.query(
-        'INSERT INTO sm.event_contract (event_id, security_id, outcome_label) VALUES ($1, $2, $3)',
-        [row.event_id, security.security_id, 'Yes']);
-      await client.query(
-        `INSERT INTO sm.contract_proposition
-           (security_id, subject_id, extracted_subject_id, fields, method, extractor_version, source_hash)
-         VALUES ($1, $2, $2, '{}', 'LLM', 'v1', 'h')`,
-        [security.security_id, subjectId]);
+      for (const [i, fields] of propositions.entries()) {
+        const security = await ok(on(new SecurityHandler()).createOne(
+          JSON.stringify({ symbol: `${nativeEventId}-${i}`, type: 1 })));
+        await client.query(
+          'INSERT INTO sm.event_contract (event_id, security_id, outcome_label) VALUES ($1, $2, $3)',
+          [row.event_id, security.security_id, String(i)]);
+        await client.query(
+          `INSERT INTO sm.contract_proposition
+             (security_id, subject_id, extracted_subject_id, fields, method, extractor_version, source_hash)
+           VALUES ($1, 1, 1, $2, 'LLM', 'v1', 'h')`,
+          [security.security_id, fields]);
+      }
       return row.event_id;
     };
-    await client.query(
-      'INSERT INTO sm.proposition_subject (key) VALUES ($1), ($2), ($3), ($4)', ['btc-usd', 'bitcoin', 'eth-usd', AWKWARD]);
-    await client.query(
-      "INSERT INTO sm.proposition_subject_alias (alias_subject_id, canonical_subject_id, actor) VALUES (2, 1, 'test')");
-    const btc = await event('btc', 1);
-    const eth = await event('eth', 3);
-    const awkward = await event('awkward', 4);
+    const series = await event('series', [{ kind: 'WINNER', scope: 'match' }, { kind: 'WINNER', scope: 'map:1' }]);
+    const maps = await event('maps', [{ kind: 'WINNER', scope: 'map:2' }]);
+    const totals = await event('totals', [{ kind: 'THRESHOLD', scope: AWKWARD }]);
+    await event('unread', []);
 
-    const ids = async (subjects: string) => (await ok(events.get({ subjects }))).map((e: any) => e.event_id).sort();
-    expect(await ids('btc-usd')).toEqual([btc]);
-    expect(await ids('bitcoin')).toEqual([btc]);
-    expect(await ids('btc-usd,eth-usd')).toEqual([btc, eth].sort());
-    expect(await ids(AWKWARD)).toEqual([awkward]);
-    expect(await ids('unknown')).toEqual([]);
-    expect(await ok(events.get({ subjects: 'eth-usd', exchangeIds: String(exchangeId + 1) }))).toEqual([]);
+    const ids = async (params: Record<string, string>) =>
+      (await ok(events.get(params))).map((e: any) => e.event_id).sort();
+    expect(await ids({ propositionKinds: 'WINNER', propositionScopes: 'match' })).toEqual([series]);
+    expect(await ids({ propositionKinds: 'WINNER' })).toEqual([series, maps].sort());
+    expect(await ids({ propositionScopes: `match,${AWKWARD}` })).toEqual([series, totals].sort());
+    expect(await ids({ propositionKinds: 'SCORE' })).toEqual([]);
+    expect(await ok(events.get({ propositionKinds: 'WINNER', exchangeIds: String(exchangeId + 1) }))).toEqual([]);
   });
 
   it('strategies and sessions: jsonb, status guards and first-stop-wins', async () => {

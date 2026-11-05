@@ -20,6 +20,7 @@ import group.gnometrading.sm.EventQuery;
 import group.gnometrading.sm.Exchange;
 import group.gnometrading.sm.Listing;
 import group.gnometrading.sm.ListingSpec;
+import group.gnometrading.sm.PropositionFilter;
 import group.gnometrading.sm.Security;
 import group.gnometrading.sm.SecurityType;
 import group.gnometrading.sm.SimulationParameters;
@@ -339,7 +340,7 @@ public final class SecurityMaster {
         appendList(path, "exchangeIds", query.exchangeIds());
         appendList(path, "categories", query.categories());
         appendList(path, "tags", query.tags());
-        appendList(path, "subjects", query.subjects());
+        appendPropositions(path, query.propositions());
         if (query.expiresBeforeMillis() > 0) {
             path.append("&expiryTo=").append(Instant.ofEpochMilli(query.expiresBeforeMillis()));
         }
@@ -369,11 +370,11 @@ public final class SecurityMaster {
     }
 
     /**
-     * Every stream of these events, as the registry has them now: both sides of each contract's listings, and vendor
-     * streams of the event; each names its event. In requests of {@link #EVENTS_PER_REQUEST} events. Not cached, as
+     * Every stream of these events, as the registry has them now: both sides of each contract's listings (only contracts
+     * matching {@code propositions}, unless it is null), and vendor streams of the event; each names its event. In requests of {@link #EVENTS_PER_REQUEST} events. Not cached, as
      * {@link #getStreams(int[])}.
      */
-    public List<Stream> getStreamsForEvents(final int[] eventIds) {
+    public List<Stream> getStreamsForEvents(final int[] eventIds, final PropositionFilter propositions) {
         final List<Stream> streams = new ArrayList<>();
         for (int from = 0; from < eventIds.length; from += EVENTS_PER_REQUEST) {
             final StringBuilder path = new StringBuilder(STREAM_ENDPOINT).append("eventIds=");
@@ -381,9 +382,17 @@ public final class SecurityMaster {
             for (int i = from; i < to; i++) {
                 path.append(i == from ? "" : ",").append(eventIds[i]);
             }
+            appendPropositions(path, propositions);
             streams.addAll(List.of(fetch(new ViewString(path.toString()), Stream[].class)));
         }
         return streams;
+    }
+
+    private static void appendPropositions(final StringBuilder path, final PropositionFilter propositions) {
+        if (propositions != null) {
+            appendList(path, "propositionKinds", propositions.kinds());
+            appendList(path, "propositionScopes", propositions.scopes());
+        }
     }
 
     private static void appendList(final StringBuilder path, final String name, final List<?> values) {

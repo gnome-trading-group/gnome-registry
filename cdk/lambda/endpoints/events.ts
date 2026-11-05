@@ -1,6 +1,7 @@
 import { APIGatewayProxyEvent, APIGatewayProxyEventQueryStringParameters } from 'aws-lambda';
 import { parseIdList, ResourceHandler, ValidationError } from './base';
 import { ICreateEvent, IDeleteEvent } from '../types';
+import { propositionMatch } from './proposition-match';
 import { anyId, NOW, raw, set, Sql, sql, where } from './sql';
 
 /** Comma-separated text values, e.g. "Sports,Politics"; empty items are dropped. */
@@ -35,22 +36,12 @@ const LOG_SCHEDULE_CHANGE = raw('INSERT INTO sm.event_schedule_change (event_id,
 
 const tagArray = (tags: string[] | null | undefined) => (tags && tags.length > 0 ? tags : null);
 
-/**
- * Events with a contract whose proposition is about any of these subject keys. Propositions hold the end of their
- * subject's merge chain, so a key merged elsewhere is followed to where its propositions now are. Driven from the
- * subjects rather than probed per event: an event list ordered by volume would otherwise be walked event by event
- * until enough matched, which for a rare subject is every open event.
- */
-function aboutSubjects(keys: string[]): Sql {
+/** Events with a contract whose proposition matches, found from the propositions rather than probed event by event. */
+function withProposition(match: Sql): Sql {
   return sql`event_id IN (
-    WITH RECURSIVE chain(subject_id) AS (
-      SELECT subject_id FROM sm.proposition_subject WHERE key = ANY(${keys}::text[])
-      UNION
-      SELECT a.canonical_subject_id FROM chain JOIN sm.proposition_subject_alias a ON a.alias_subject_id = chain.subject_id
-    )
-    SELECT ec.event_id FROM chain
-    JOIN sm.contract_proposition p ON p.subject_id = chain.subject_id
-    JOIN sm.event_contract ec ON ec.security_id = p.security_id)`;
+    SELECT ec.event_id FROM sm.contract_proposition p
+    JOIN sm.event_contract ec ON ec.security_id = p.security_id
+    WHERE ${match})`;
 }
 
 export class EventHandler extends ResourceHandler {
@@ -96,6 +87,7 @@ export class EventHandler extends ResourceHandler {
       }
     }
     const pattern = `%${params?.search}%`;
+    const proposition = propositionMatch(params);
     const query = sql`SELECT * FROM sm.event${where([
       params?.eventId && sql`event_id = ${params.eventId}`,
       params?.category && sql`category = ${params.category}`,
@@ -107,7 +99,7 @@ export class EventHandler extends ResourceHandler {
       params?.exchangeIds !== undefined && anyId('exchange_id', parseIdList(params.exchangeIds)),
       params?.categories && sql`category = ANY(${textList(params.categories)}::text[])`,
       params?.tags && sql`tags && ${textList(params.tags)}::text[]`,
-      params?.subjects && aboutSubjects(textList(params.subjects)),
+      proposition && withProposition(proposition),
       params?.expiryFrom && sql`expiry >= ${timestamp('expiryFrom', params.expiryFrom)}`,
       params?.expiryTo && sql`expiry < ${timestamp('expiryTo', params.expiryTo)}`,
       params?.startFrom && sql`start_time >= ${timestamp('startFrom', params.startFrom)}`,

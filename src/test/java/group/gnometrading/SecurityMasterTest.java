@@ -10,6 +10,7 @@ import group.gnometrading.sm.EventQuery;
 import group.gnometrading.sm.Exchange;
 import group.gnometrading.sm.Listing;
 import group.gnometrading.sm.ListingSpec;
+import group.gnometrading.sm.PropositionFilter;
 import group.gnometrading.sm.Security;
 import group.gnometrading.sm.SecurityType;
 import group.gnometrading.sm.SimulationParameters;
@@ -449,7 +450,7 @@ class SecurityMasterTest {
     @Test
     void testEventsAreQueriedByEveryFilterAndReadWithTheirVolume() {
         when(registryConnection.get(new ViewString("/api/events?resolved=false&exchangeIds=1,2&categories=Sports"
-                        + "&tags=nfl,college+football&subjects=nfl%3A2026%3Aweek-10,us-senate-2026-control"
+                        + "&tags=nfl,college+football&propositionKinds=WINNER&propositionScopes=match,map%3A1"
                         + "&expiryTo=2026-11-01T00:00:00Z&minVolume24h=5000.0"
                         + "&sortBy=volume_24h&sortOrder=desc&limit=30")))
                 .thenReturn(ByteBuffer.wrap(
@@ -463,7 +464,7 @@ class SecurityMasterTest {
                 java.util.List.of(1, 2),
                 java.util.List.of("Sports"),
                 java.util.List.of("nfl", "college football"),
-                java.util.List.of("nfl:2026:week-10", "us-senate-2026-control"),
+                new PropositionFilter(java.util.List.of("WINNER"), java.util.List.of("match", "map:1")),
                 java.time.Instant.parse("2026-11-01T00:00:00Z").toEpochMilli(),
                 5000,
                 EventQuery.Order.VOLUME,
@@ -530,11 +531,26 @@ class SecurityMasterTest {
             ids[i] = i + 1;
         }
 
-        final java.util.List<group.gnometrading.md.Stream> streams = securityMaster.getStreamsForEvents(ids);
+        final java.util.List<group.gnometrading.md.Stream> streams = securityMaster.getStreamsForEvents(ids, null);
 
         assertEquals(300, streams.size());
         assertEquals(1, streams.get(1).eventId());
         verify(registryConnection, times(2)).get(any());
+    }
+
+    @Test
+    void testStreamsForEventsAskOnlyForContractsMatchingThePropositionFilter() {
+        when(registryConnection.get(
+                        new ViewString("/api/streams?eventIds=7,8&propositionKinds=WINNER&propositionScopes=match")))
+                .thenReturn(ByteBuffer.wrap("[{\"stream_id\": 71, \"event_id\": 7}]".getBytes()));
+
+        assertEquals(
+                1,
+                securityMaster
+                        .getStreamsForEvents(
+                                new int[] {7, 8},
+                                new PropositionFilter(java.util.List.of("WINNER"), java.util.List.of("match")))
+                        .size());
     }
 
     @Test

@@ -1,5 +1,6 @@
 import { APIGatewayProxyEvent, APIGatewayProxyEventQueryStringParameters } from 'aws-lambda';
 import { parseIdList, ResourceHandler } from './base';
+import { propositionMatch } from './proposition-match';
 import { anyId, raw, Sql, sql, where } from './sql';
 
 // A listing's stream stores only its listing_id, so its subject id and active flag are read from the listing here, and
@@ -32,12 +33,22 @@ function eventFilter(ids: number[]): Sql {
     WHERE c.event_id = ANY(${ids}::int[]))`;
 }
 
+/**
+ * Vendor streams, and listing streams whose contract's proposition matches. A vendor stream belongs to its event, not to
+ * a contract, so no proposition filter leaves it out.
+ */
+function withProposition(match: Sql): Sql {
+  return sql`(st.listing_id IS NULL OR EXISTS (
+    SELECT 1 FROM sm.contract_proposition p WHERE p.security_id = l.security_id AND ${match}))`;
+}
+
 export class StreamHandler extends ResourceHandler {
   allowedSortColumns(): string[] {
     return ['stream_id', 'source_id', 'listing_id', 'family', 'date_created'];
   }
 
   generateSelectQuery(params: APIGatewayProxyEventQueryStringParameters | null): Sql {
+    const proposition = propositionMatch(params);
     return sql`${raw(STREAM_SELECT)}${where([
       params?.streamId && sql`st.stream_id = ${Number(params.streamId)}`,
       params?.streamIds !== undefined && anyId('st.stream_id', parseIdList(params.streamIds)),
@@ -48,6 +59,7 @@ export class StreamHandler extends ResourceHandler {
       params?.eventId && eventFilter(parseIdList(params.eventId)),
       params?.eventIds !== undefined && eventFilter(parseIdList(params.eventIds)),
       params?.active !== undefined && sql`COALESCE(st.active, l.active) = ${params.active === 'true'}`,
+      proposition && withProposition(proposition),
     ])}`;
   }
 }

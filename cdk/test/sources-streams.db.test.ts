@@ -133,6 +133,34 @@ describeDb('market-data sources and streams, against Postgres', () => {
     expect(await getStreams({ eventIds: '' })).toEqual([]);
   });
 
+  it("keeps only an event's contracts whose proposition matches, and its vendor streams", async () => {
+    await client.query(`INSERT INTO sm.event (event_id, title, exchange_id, native_event_id) VALUES (7, 'E', 1, 'E')`);
+    await client.query(`INSERT INTO sm.security (security_id, symbol, type) VALUES (3, 'Z', 4)`);
+    await client.query(`INSERT INTO sm.event_contract (event_id, security_id, outcome_label)
+      VALUES (7, 1, 'Match'), (7, 2, 'Map 1'), (7, 3, 'Unread')`);
+    await client.query(`INSERT INTO sm.listing (listing_id, exchange_id, security_id, exchange_security_id, active)
+      VALUES (502, 1, 2, 'MAP1:yes', true), (503, 1, 3, 'UNREAD:yes', true)`);
+    await client.query('TRUNCATE sm.proposition_subject RESTART IDENTITY CASCADE');
+    await client.query(`INSERT INTO sm.proposition_subject (subject_id, key) VALUES (1, 'game:cs2:a-b')`);
+    await client.query(`INSERT INTO sm.contract_proposition
+        (security_id, subject_id, extracted_subject_id, fields, method, extractor_version, source_hash)
+      VALUES (1, 1, 1, '{"kind": "WINNER", "scope": "match"}', 'VENUE', 'p7', 'h'),
+             (2, 1, 1, '{"kind": "WINNER", "scope": "map:1"}', 'VENUE', 'p7', 'h')`);
+    const vendor = JSON.parse((await withClient(new SourceHandler()).createOne(JSON.stringify(
+      { code: 'PANDASCORE', homeRegion: 'eu-west-1', adapter: 'PANDASCORE', families: ['esports'] }))).body);
+    await client.query(`INSERT INTO md.stream (source_id, subject_kind, native_subject_id, family, active, event_id)
+      VALUES ($1, 'MATCH', '12345', 'esports', true, 7)`, [vendor.source_id]);
+
+    const subjects = async (params: Record<string, string>) =>
+      (await getStreams({ eventIds: '7', ...params })).map((s: any) => s.native_subject_id).sort();
+    expect(await subjects({ propositionKinds: 'WINNER', propositionScopes: 'match' }))
+      .toEqual(['12345', 'MKT:no', 'MKT:yes']);
+    expect(await subjects({ propositionKinds: 'WINNER' })).toEqual(['12345', 'MAP1:yes', 'MKT:no', 'MKT:yes']);
+    expect(await subjects({ propositionScopes: 'map:1,map:2' })).toEqual(['12345', 'MAP1:yes']);
+    expect(await subjects({ propositionKinds: 'SCORE' })).toEqual(['12345']);
+    expect(await subjects({})).toHaveLength(5);
+  });
+
   it("finds an event's streams by index, without scanning every stream and listing", async () => {
     await client.query(`INSERT INTO sm.event (event_id, title, exchange_id, native_event_id) VALUES (7, 'E', 1, 'E')`);
     await client.query(`INSERT INTO sm.event_contract (event_id, security_id, outcome_label) VALUES (7, 1, 'X')`);
