@@ -339,6 +339,7 @@ public final class SecurityMaster {
         appendList(path, "exchangeIds", query.exchangeIds());
         appendList(path, "categories", query.categories());
         appendList(path, "tags", query.tags());
+        appendList(path, "subjects", query.subjects());
         if (query.expiresBeforeMillis() > 0) {
             path.append("&expiryTo=").append(Instant.ofEpochMilli(query.expiresBeforeMillis()));
         }

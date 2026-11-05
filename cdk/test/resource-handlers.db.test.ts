@@ -102,6 +102,40 @@ describeDb('resource handlers round-trip awkward values, against Postgres', () =
       .toMatchObject({ description: null, tags: null, resolved: true, title: AWKWARD });
   });
 
+  it('events: by subject, following a merged key to where its propositions are', async () => {
+    await client.query('TRUNCATE sm.proposition_subject RESTART IDENTITY CASCADE');
+    const exchangeId = await exchange();
+    const events = on(new EventHandler());
+    const event = async (nativeEventId: string, subjectId: number) => {
+      const row = await ok(events.createOne(JSON.stringify({ title: nativeEventId, exchangeId, nativeEventId })));
+      const security = await ok(on(new SecurityHandler()).createOne(JSON.stringify({ symbol: nativeEventId, type: 1 })));
+      await client.query(
+        'INSERT INTO sm.event_contract (event_id, security_id, outcome_label) VALUES ($1, $2, $3)',
+        [row.event_id, security.security_id, 'Yes']);
+      await client.query(
+        `INSERT INTO sm.contract_proposition
+           (security_id, subject_id, extracted_subject_id, fields, method, extractor_version, source_hash)
+         VALUES ($1, $2, $2, '{}', 'LLM', 'v1', 'h')`,
+        [security.security_id, subjectId]);
+      return row.event_id;
+    };
+    await client.query(
+      'INSERT INTO sm.proposition_subject (key) VALUES ($1), ($2), ($3), ($4)', ['btc-usd', 'bitcoin', 'eth-usd', AWKWARD]);
+    await client.query(
+      "INSERT INTO sm.proposition_subject_alias (alias_subject_id, canonical_subject_id, actor) VALUES (2, 1, 'test')");
+    const btc = await event('btc', 1);
+    const eth = await event('eth', 3);
+    const awkward = await event('awkward', 4);
+
+    const ids = async (subjects: string) => (await ok(events.get({ subjects }))).map((e: any) => e.event_id).sort();
+    expect(await ids('btc-usd')).toEqual([btc]);
+    expect(await ids('bitcoin')).toEqual([btc]);
+    expect(await ids('btc-usd,eth-usd')).toEqual([btc, eth].sort());
+    expect(await ids(AWKWARD)).toEqual([awkward]);
+    expect(await ids('unknown')).toEqual([]);
+    expect(await ok(events.get({ subjects: 'eth-usd', exchangeIds: String(exchangeId + 1) }))).toEqual([]);
+  });
+
   it('strategies and sessions: jsonb, status guards and first-stop-wins', async () => {
     const listingId = await listing(await exchange());
     const strategy = await ok(on(new StrategyHandler()).createOne(JSON.stringify({
@@ -116,6 +150,15 @@ describeDb('resource handlers round-trip awkward values, against Postgres', () =
     })));
     expect(await ok(sessions.get({ status: 'SUBMITTED,RUNNING', listingId: String(listingId) })))
       .toMatchObject([{ session_id: 's-1', config: { listings: [listingId], note: AWKWARD }, research_commit: AWKWARD }]);
+
+    const other = await ok(on(new StrategyHandler()).createOne(JSON.stringify({ name: 'other', parameters: {} })));
+    const second = await ok(sessions.createOne(JSON.stringify({
+      sessionId: 's-1b', strategyId: other.strategy_id, status: 'SUBMITTED', mode: 'paper', config: { listings: [listingId] },
+    })));
+    const [first] = await ok(sessions.get({ sessionId: 's-1' }));
+    expect(Number(second.session_seq)).toBeGreaterThan(Number(first.session_seq));
+    await expect(client.query("UPDATE strategy.session SET session_seq = 1 WHERE session_id = 's-1b'"))
+      .rejects.toThrow(/session_seq/);
 
     const stop = (stopReason: string, expectedStatus: string[]) => sessions.modifyOne({ sessionId: 's-1' },
       JSON.stringify({ status: 'STOPPING', stopReason, stoppedBy: AWKWARD, failureReason: AWKWARD, expectedStatus }));

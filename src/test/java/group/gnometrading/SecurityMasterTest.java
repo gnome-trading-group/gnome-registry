@@ -449,7 +449,8 @@ class SecurityMasterTest {
     @Test
     void testEventsAreQueriedByEveryFilterAndReadWithTheirVolume() {
         when(registryConnection.get(new ViewString("/api/events?resolved=false&exchangeIds=1,2&categories=Sports"
-                        + "&tags=nfl,college+football&expiryTo=2026-11-01T00:00:00Z&minVolume24h=5000.0"
+                        + "&tags=nfl,college+football&subjects=nfl%3A2026%3Aweek-10,us-senate-2026-control"
+                        + "&expiryTo=2026-11-01T00:00:00Z&minVolume24h=5000.0"
                         + "&sortBy=volume_24h&sortOrder=desc&limit=30")))
                 .thenReturn(ByteBuffer.wrap(
                         """
@@ -462,6 +463,7 @@ class SecurityMasterTest {
                 java.util.List.of(1, 2),
                 java.util.List.of("Sports"),
                 java.util.List.of("nfl", "college football"),
+                java.util.List.of("nfl:2026:week-10", "us-senate-2026-control"),
                 java.time.Instant.parse("2026-11-01T00:00:00Z").toEpochMilli(),
                 5000,
                 EventQuery.Order.VOLUME,
@@ -483,7 +485,8 @@ class SecurityMasterTest {
         assertEquals(
                 0,
                 securityMaster
-                        .getEvents(new EventQuery(null, java.util.List.of(), null, 0, 0, EventQuery.Order.EXPIRY, 10))
+                        .getEvents(new EventQuery(
+                                null, java.util.List.of(), null, null, 0, 0, EventQuery.Order.EXPIRY, 10))
                         .size());
     }
 
