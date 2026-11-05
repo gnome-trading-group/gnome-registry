@@ -11,6 +11,7 @@ import java.util.List;
  * @param tags carrying any of these tags
  * @param propositions with a contract matching this ({@code null}: any)
  * @param expiresBeforeMillis expiring before this epoch millis
+ * @param startsBeforeMillis starting before this epoch millis; events with no start time never match
  * @param minVolume24h with at least this 24-hour volume; events with no reading yet never match
  * @param order which events come first, and so which a {@code limit} keeps
  * @param limit at most this many
@@ -21,6 +22,7 @@ public record EventQuery(
         List<String> tags,
         PropositionFilter propositions,
         long expiresBeforeMillis,
+        long startsBeforeMillis,
         double minVolume24h,
         Order order,
         int limit) {

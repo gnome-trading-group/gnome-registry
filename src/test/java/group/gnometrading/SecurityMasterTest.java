@@ -451,7 +451,7 @@ class SecurityMasterTest {
     void testEventsAreQueriedByEveryFilterAndReadWithTheirVolume() {
         when(registryConnection.get(new ViewString("/api/events?resolved=false&exchangeIds=1,2&categories=Sports"
                         + "&tags=nfl,college+football&propositionKinds=WINNER&propositionScopes=match,map%3A1"
-                        + "&expiryTo=2026-11-01T00:00:00Z&minVolume24h=5000.0"
+                        + "&expiryTo=2026-11-01T00:00:00Z&startTo=2026-10-31T00:00:00Z&minVolume24h=5000.0"
                         + "&sortBy=volume_24h&sortOrder=desc&limit=30")))
                 .thenReturn(ByteBuffer.wrap(
                         """
@@ -466,6 +466,7 @@ class SecurityMasterTest {
                 java.util.List.of("nfl", "college football"),
                 new PropositionFilter(java.util.List.of("WINNER"), java.util.List.of("match", "map:1")),
                 java.time.Instant.parse("2026-11-01T00:00:00Z").toEpochMilli(),
+                java.time.Instant.parse("2026-10-31T00:00:00Z").toEpochMilli(),
                 5000,
                 EventQuery.Order.VOLUME,
                 30));
@@ -487,7 +488,7 @@ class SecurityMasterTest {
                 0,
                 securityMaster
                         .getEvents(new EventQuery(
-                                null, java.util.List.of(), null, null, 0, 0, EventQuery.Order.EXPIRY, 10))
+                                null, java.util.List.of(), null, null, 0, 0, 0, EventQuery.Order.EXPIRY, 10))
                         .size());
     }
 

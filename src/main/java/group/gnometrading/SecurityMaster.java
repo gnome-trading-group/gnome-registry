@@ -344,6 +344,9 @@ public final class SecurityMaster {
         if (query.expiresBeforeMillis() > 0) {
             path.append("&expiryTo=").append(Instant.ofEpochMilli(query.expiresBeforeMillis()));
         }
+        if (query.startsBeforeMillis() > 0) {
+            path.append("&startTo=").append(Instant.ofEpochMilli(query.startsBeforeMillis()));
+        }
         if (query.minVolume24h() > 0) {
             path.append("&minVolume24h=").append(query.minVolume24h());
         }
