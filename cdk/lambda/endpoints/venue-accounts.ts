@@ -235,14 +235,14 @@ export const handler = async (event: APIGatewayProxyEvent) => {
       if (!gatewayKey) return createResponse(400, { message: 'gatewayKey is required' });
       return createResponse(200, await gatewayAccounts(client, gatewayKey));
     }
-    // The account-creation Lambda (outside the VPC) replacing or deleting an account's secrets: their names, never
-    // their contents, which the registry doesn't have.
+    // The account-creation Lambda (outside the VPC) replacing or deleting an account's secrets, or starting its
+    // emergency cancel where its venue trades: their names, never their contents, which the registry doesn't have.
     if (resource === '/venue-accounts/secrets' && event.httpMethod === 'GET') {
       const accountId = Number(event.queryStringParameters?.accountId);
       if (!isPositiveInt(accountId)) return createResponse(400, { message: 'accountId must be a positive integer' });
       const row = (await client.query(
-        `SELECT a.account_id, a.exchange_id, e.exchange_code, a.label, a.status, a.venue_ref, a.trading_secret_name,
-           a.read_secret_name
+        `SELECT a.account_id, a.exchange_id, e.exchange_code, e.region AS exchange_region, a.label, a.status, a.venue_ref,
+           a.trading_secret_name, a.read_secret_name
          FROM account_master.venue_account a JOIN sm.exchange e USING (exchange_id) WHERE a.account_id = $1`,
         [accountId])).rows[0];
       return row ? createResponse(200, row) : createResponse(404, { message: `Unknown account ${accountId}` });

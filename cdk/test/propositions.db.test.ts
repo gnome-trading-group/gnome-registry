@@ -378,6 +378,45 @@ describeDb('propositions, subjects and derived relationships, against Postgres',
       }))).deleted).toBe(1);
     });
 
+    async function inEvent(securityIds: number[], resolved: boolean) {
+      const exchangeId = (await client.query(
+        'INSERT INTO sm.exchange (exchange_name, exchange_code, region) VALUES ($1, $1, \'us-east-1\') RETURNING exchange_id',
+        [`x${securityIds[0]}`])).rows[0].exchange_id;
+      const eventId = (await client.query(
+        'INSERT INTO sm.event (title, exchange_id, native_event_id, resolved) VALUES ($1, $2, $1, $3) RETURNING event_id',
+        [`e${securityIds[0]}`, exchangeId, resolved])).rows[0].event_id;
+      for (const sid of securityIds) {
+        await client.query("INSERT INTO sm.event_contract (event_id, security_id, outcome_label) VALUES ($1, $2, 'x')", [eventId, sid]);
+      }
+    }
+
+    it('keeps a row whose other side, outside the set, has settled', async () => {
+      const [open1, open2, settled] = await securities(3);
+      await inEvent([open1, open2], false);
+      await inEvent([settled], true);
+      await client.query(
+        "INSERT INTO sm.contract_relationship (security_id_a, security_id_b, relationship_type, method) VALUES ($1, $2, 'IMPLIES', 'derived'), ($3, $4, 'IMPLIES', 'derived')",
+        [open1, settled, open1, open2],
+      );
+      const result = await reconcileRelationships(client, parseReconcile({
+        securityIds: [open1, open2], method: 'derived', derivationVersion: 'd1', relationships: [],
+      }));
+      expect(result.deleted).toBe(1);
+      expect((await rows()).map((r) => [r.security_id_a, r.security_id_b])).toEqual([[open1, settled]]);
+    });
+
+    it('still deletes a row to an open security outside the set', async () => {
+      const [s1, s2, outside] = await securities(3);
+      await inEvent([s1, s2, outside], false);
+      await client.query(
+        "INSERT INTO sm.contract_relationship (security_id_a, security_id_b, relationship_type, method) VALUES ($1, $2, 'IMPLIES', 'derived')",
+        [outside, s1],
+      );
+      expect((await reconcileRelationships(client, parseReconcile({
+        securityIds: [s1, s2], method: 'derived', derivationVersion: 'd1', relationships: [],
+      }))).deleted).toBe(1);
+    });
+
     it('stays due a derivation when the subject changed after the classifier read it', async () => {
       const btc = await subject('btc-usd');
       await reconcileRelationships(client, parseReconcile({

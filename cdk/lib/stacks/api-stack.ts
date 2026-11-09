@@ -11,7 +11,7 @@ import * as ssm from 'aws-cdk-lib/aws-ssm';
 import { join } from 'path';
 import { Runtime } from 'aws-cdk-lib/aws-lambda';
 import {
-  API_KEY_SECRET_NAMES, ApiKeySecret, CallerKind, GnomeApiAuthorizer, RouteMethods, Stage,
+  API_KEY_SECRET_NAMES, ApiKeySecret, CallerKind, GnomeApiAuthorizer, platformRegions, RouteMethods, Stage,
 } from '@gnome-trading-group/gnome-shared-cdk';
 import { CONTROLLER_READ_PATHS } from '../../lambda/endpoints/controller-read-paths';
 import { ALERT_BUS_NAME } from '../../lambda/alerts/model';
@@ -224,6 +224,14 @@ export class ApiStack extends cdk.Stack {
     this.route('venue-accounts/create', accountCreation, { POST: [PERSON] });
     this.route('venue-accounts/credentials', accountCreation, { POST: [PERSON] });
     this.route('venue-accounts/delete-secrets', accountCreation, { POST: [PERSON] });
+    // The break-glass around a broken order gateway: starts gnome-orchestrator's EmergencyCancel in the account's
+    // venue's region. People only, so it carries who did it.
+    this.route('venue-accounts/emergency-cancel', accountCreation, { POST: [PERSON] });
+    accountCreator.addToRolePolicy(new iam.PolicyStatement({
+      actions: ['lambda:InvokeFunction'],
+      resources: platformRegions().map(region =>
+        `arn:aws:lambda:${region}:${this.account}:function:EmergencyCancel`),
+    }));
     // Not even bots read which market-data keys are set.
     this.route('market-data-accounts', accountCreation, { GET: [PERSON], POST: [PERSON] });
 

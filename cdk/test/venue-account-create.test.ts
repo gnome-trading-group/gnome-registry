@@ -1,6 +1,7 @@
 import { generateKeyPairSync } from 'crypto';
 import {
-  CreateError, credentialsFor, MARKET_DATA_EXCHANGES, needsKey, readSecretFor, secretStatus,
+  CreateError, credentialsFor, emergencyCancel, emergencyRegion, MARKET_DATA_EXCHANGES, needsKey, readSecretFor,
+  secretStatus,
 } from '../lambda/endpoints/venue-account-create';
 
 const pem = generateKeyPairSync('rsa', { modulusLength: 2048 }).privateKey
@@ -97,5 +98,19 @@ describe('venue account credentials', () => {
     expect(secretStatus('gnome/market-data/polymarket-us/md-1', null)).toMatchObject({
       secretName: 'gnome/market-data/polymarket-us/md-1', exists: false, inSync: false,
     });
+  });
+});
+
+describe('emergency cancel', () => {
+  it('runs where the exchange trades, if the platform runs there', () => {
+    expect(emergencyRegion('POLYMARKET_INTL', 'eu-west-1')).toBe('eu-west-1');
+    expect(emergencyRegion('KALSHI', 'us-east-1')).toBe('us-east-1');
+    expect(() => emergencyRegion('KALSHI', 'global')).toThrow(CreateError);
+    expect(() => emergencyRegion('KALSHI', null)).toThrow(CreateError);
+  });
+
+  it('refuses a request without an account or a reason before reading anything', async () => {
+    await expect(emergencyCancel({ reason: 'hung' }, 'ops')).rejects.toThrow('accountId');
+    await expect(emergencyCancel({ accountId: 4, reason: '  ' }, 'ops')).rejects.toThrow('reason is required');
   });
 });

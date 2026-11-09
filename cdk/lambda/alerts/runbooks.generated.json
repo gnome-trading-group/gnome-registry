@@ -9,6 +9,15 @@
       ],
       "url": "https://github.com/gnome-trading-group/gnome-registry/blob/main/docs/runbooks/alerts/ACCOUNT_DUE_FOR_ROTATION.md"
     },
+    "ACCOUNT_HALT": {
+      "summary": "All trading on one venue account is halted.",
+      "firstSteps": [
+        "Check the reason and who turned it on (By:).",
+        "Confirm the account has no orders left resting on the venue.",
+        "Fix the cause, then resume the account on Treasury."
+      ],
+      "url": "https://github.com/gnome-trading-group/gnome-registry/blob/main/docs/runbooks/alerts/ACCOUNT_HALT.md"
+    },
     "ACCOUNT_READY_TO_RETIRE": {
       "summary": "A draining account is empty and can be retired.",
       "firstSteps": [
@@ -132,6 +141,15 @@
         "Retire the old account once flat."
       ],
       "url": "https://github.com/gnome-trading-group/gnome-registry/blob/main/docs/runbooks/alerts/DRAINING_EXPOSURE.md"
+    },
+    "EMERGENCY_CANCEL": {
+      "summary": "Someone cancelled every open order on a venue account around the order gateway.",
+      "firstSteps": [
+        "Read the body: how many orders were open, how many failed to cancel, how many are still open.",
+        "If any are still open, run it again, or cancel them in the venue's UI.",
+        "Find out why the gateway couldn't be trusted to cancel, before trading resumes on the account."
+      ],
+      "url": "https://github.com/gnome-trading-group/gnome-registry/blob/main/docs/runbooks/alerts/EMERGENCY_CANCEL.md"
     },
     "EXCHANGE_HALT": {
       "summary": "All trading on one exchange is halted.",

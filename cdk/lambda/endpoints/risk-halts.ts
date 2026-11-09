@@ -54,7 +54,8 @@ export type HaltTarget =
 // when the switch is already on so repeated halts (OMS retries) don't churn the history table, and the
 // fallback SELECT still returns the policy_id in that case. The fallback matches the target exactly, so a session's
 // kill and its strategy's kill are never both returned. A session that doesn't exist inserts nothing and returns no
-// rows. The ON CONFLICT names idx_risk_policy_unique's exact expressions (migration 037), so the two change together.
+// rows. The ON CONFLICT names idx_risk_policy_unique's exact expressions (migration 065), so the two change together.
+// A halt never targets an account: those are the order gateway's kills.
 export function generateHaltUpsertQuery(target: HaltTarget): Sql {
   const isOrEquals = (column: string, id: number | undefined) =>
     (id == null ? sql`${raw(column)} IS NULL` : sql`${raw(column)} = ${id}`);
@@ -63,7 +64,7 @@ export function generateHaltUpsertQuery(target: HaltTarget): Sql {
   if ('sessionId' in target) {
     source = sql`SELECT 'KILL_SWITCH', session_id, strategy_id, NULL::integer, NULL::integer, '{}'::jsonb, true
        FROM strategy.session WHERE session_id = ${target.sessionId}`;
-    match = sql`session_id = ${target.sessionId} AND exchange_id IS NULL AND listing_id IS NULL`;
+    match = sql`session_id = ${target.sessionId} AND exchange_id IS NULL AND listing_id IS NULL AND account_id IS NULL`;
   } else {
     const strategyId = 'strategyId' in target ? target.strategyId : undefined;
     const listingId = 'listingId' in target ? target.listingId : undefined;
@@ -71,14 +72,15 @@ export function generateHaltUpsertQuery(target: HaltTarget): Sql {
     source = sql`SELECT 'KILL_SWITCH', NULL, ${strategyId ?? null}::integer, ${target.exchangeId ?? null}::integer,
        ${listingId ?? null}::integer, '{}'::jsonb, true`;
     match = sql`session_id IS NULL AND ${isOrEquals('strategy_id', strategyId)}
-      AND ${isOrEquals('exchange_id', target.exchangeId)} AND ${isOrEquals('listing_id', listingId)}`;
+      AND ${isOrEquals('exchange_id', target.exchangeId)} AND ${isOrEquals('listing_id', listingId)}
+      AND account_id IS NULL`;
   }
   return sql`
     WITH upserted AS (
       INSERT INTO risk.policy (policy_type, session_id, strategy_id, exchange_id, listing_id, parameters, enabled)
       ${source}
       ON CONFLICT (policy_type, COALESCE(session_id, ''), COALESCE(strategy_id, 0), COALESCE(exchange_id, 0),
-                   COALESCE(listing_id, 0))
+                   COALESCE(listing_id, 0), COALESCE(account_id, 0))
       DO UPDATE SET enabled=true, date_modified=NOW()
       WHERE risk.policy.enabled = false
       RETURNING policy_id

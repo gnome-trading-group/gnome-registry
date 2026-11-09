@@ -4,10 +4,11 @@ import { Finding, finding, Mode } from './types';
 // Every enabled kill switch, except those of sessions that have ended or are being stopped: a stop kills its own
 // session, which is routine. Which mode a halt matters to: a session's own; a strategy's, live if any of its live
 // sessions is active (a strategy halt stops them all); an exchange-wide or global one, always live. One with no
-// session shows on both overviews, as it applies to both.
+// session shows on both overviews, as it applies to both. An account kill is the order gateway's alone, so live only.
 export async function halts(client: PoolClient): Promise<Finding[]> {
   const kills = (await client.query(`
-    SELECT p.policy_id, p.strategy_id, p.listing_id, p.exchange_id, p.session_id, p.date_modified, s.mode AS session_mode,
+    SELECT p.policy_id, p.strategy_id, p.listing_id, p.exchange_id, p.session_id, p.account_id, va.label AS account_label,
+      p.date_modified, s.mode AS session_mode,
       st.name AS strategy_name, l.exchange_security_symbol AS symbol, e.exchange_name, h.actor, h.reason,
       EXISTS (SELECT 1 FROM strategy.session ls WHERE ls.strategy_id = p.strategy_id AND ls.mode = 'live'
         AND ls.status IN ('SUBMITTED', 'STARTING', 'RUNNING')) AS strategy_live
@@ -16,6 +17,7 @@ export async function halts(client: PoolClient): Promise<Finding[]> {
     LEFT JOIN sm.listing l ON l.listing_id = p.listing_id
     LEFT JOIN sm.exchange e ON e.exchange_id = p.exchange_id
     LEFT JOIN strategy.session s ON s.session_id = p.session_id
+    LEFT JOIN account_master.venue_account va ON va.account_id = p.account_id
     LEFT JOIN LATERAL (
       SELECT actor, reason FROM risk.policy_history ph WHERE ph.policy_id = p.policy_id
       ORDER BY ph.history_id DESC LIMIT 1
@@ -34,6 +36,10 @@ export async function halts(client: PoolClient): Promise<Finding[]> {
       visibleIn: k.session_id !== null ? [mode] : ['live', 'paper'] as Mode[],
     };
     const key = [k.policy_id];
+    if (k.account_id !== null) {
+      return finding('live', 'critical', 'ACCOUNT_HALT', key, `All trading on account ${k.account_label} is halted`,
+        { ...fields, accountId: k.account_id, accountLabel: k.account_label, visibleIn: ['live'] as Mode[] });
+    }
     if (k.exchange_id !== null && k.strategy_id === null) {
       return finding(mode, 'critical', 'EXCHANGE_HALT', key, `All trading on ${k.exchange_name} is halted`, fields);
     }

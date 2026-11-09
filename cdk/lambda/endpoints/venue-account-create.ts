@@ -4,7 +4,8 @@ import {
   ResourceExistsException, ResourceNotFoundException, SecretsManagerClient, TagResourceCommand,
 } from '@aws-sdk/client-secrets-manager';
 import { createPrivateKey } from 'crypto';
-import { replicaRegions } from '@gnome-trading-group/gnome-shared-cdk/dist/regions';
+import { InvokeCommand, LambdaClient } from '@aws-sdk/client-lambda';
+import { platformRegions, replicaRegions } from '@gnome-trading-group/gnome-shared-cdk/dist/regions';
 import { registryFetch, resolveApiKey } from '../sync/registry-client';
 import { getActor } from './base';
 import { gamertag } from './gamertag';
@@ -415,6 +416,45 @@ export async function setMarketDataAccount(body: SetAccountRequest, actor: strin
   }
 }
 
+export const EMERGENCY_CANCEL_FUNCTION = 'EmergencyCancel';
+
+/**
+ * Cancels every open order on the account around the order gateway, by starting the EmergencyCancel in the region its
+ * venue trades from (sm.exchange.region, where its order gateway runs too). It returns once started: cancelling
+ * thousands of orders outlasts an API request, and the outcome comes as an EMERGENCY_CANCEL alert, with the person
+ * and reason on it.
+ */
+export async function emergencyCancel(body: { accountId?: unknown; reason?: unknown; dryRun?: unknown }, actor: string) {
+  if (!isPositiveInt(body.accountId)) throw new CreateError(400, 'accountId must be a positive integer');
+  const reason = typeof body.reason === 'string' ? body.reason.trim() : '';
+  if (!reason) throw new CreateError(400, 'reason is required');
+  const apiKey = await resolveApiKey();
+  const account = await registryFetch<{
+    label: string; exchange_code: string; exchange_region: string | null; trading_secret_name: string;
+  }>(`/venue-accounts/secrets?accountId=${body.accountId}`, 'GET', apiKey);
+  const region = emergencyRegion(account.exchange_code, account.exchange_region);
+  const dryRun = body.dryRun === true;
+  const answer = await new LambdaClient({ region }).send(new InvokeCommand({
+    FunctionName: EMERGENCY_CANCEL_FUNCTION,
+    InvocationType: 'Event',
+    Payload: Buffer.from(JSON.stringify({
+      exchange: account.exchange_code, secretName: account.trading_secret_name, reason, actor,
+      accountId: body.accountId, dryRun,
+    })),
+  }));
+  if (answer.StatusCode !== 202) throw new CreateError(502, `EmergencyCancel in ${region} wasn't started (${answer.StatusCode})`);
+  console.log(`Started an emergency cancel${dryRun ? ' (dry run)' : ''} of ${account.label} for ${actor}`);
+  return { label: account.label, exchange: account.exchange_code, region, dryRun, started: true };
+}
+
+/** Where an exchange's EmergencyCancel runs: the exchange's own region, which must be one the platform runs in. */
+export function emergencyRegion(exchangeCode: string, region: string | null): string {
+  if (!region || !platformRegions().includes(region)) {
+    throw new CreateError(400, `${exchangeCode} trades from ${region ?? 'no region'}, where no EmergencyCancel runs`);
+  }
+  return region;
+}
+
 export const handler = async (event: APIGatewayProxyEvent) => {
   const resource = event.resource ?? '';
   try {
@@ -430,6 +470,9 @@ export const handler = async (event: APIGatewayProxyEvent) => {
     }
     if (resource === '/market-data-accounts' && event.httpMethod === 'POST') {
       return createResponse(200, await setMarketDataAccount(body, getActor(event)));
+    }
+    if (resource === '/venue-accounts/emergency-cancel' && event.httpMethod === 'POST') {
+      return createResponse(202, await emergencyCancel(body, getActor(event)));
     }
     if (resource === '/venue-accounts/delete-secrets' && event.httpMethod === 'POST') {
       return createResponse(200, await deleteAccountSecrets(body.accountId));

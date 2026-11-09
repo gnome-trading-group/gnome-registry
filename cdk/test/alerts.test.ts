@@ -40,6 +40,11 @@ describe('alert severity', () => {
     expect(severityOf({ ...base, type: 'SESSION_EXITED', severity: 'CRITICAL' }, 'live', 'prod')).toBe('INFO');
   });
 
+  it('pages an emergency cancel, but not a dry run of one', () => {
+    expect(severityOf({ ...base, type: 'EMERGENCY_CANCEL', labels: { dryRun: 'false' } }, 'live', 'prod')).toBe('CRITICAL');
+    expect(severityOf({ ...base, type: 'EMERGENCY_CANCEL', labels: { dryRun: 'true' } }, 'live', 'prod')).toBe('INFO');
+  });
+
   it('keeps an unknown type as a CUSTOM warning', () => {
     expect(normalizeType({ ...base, type: 'NEW_THING', severity: 'CRITICAL' })).toMatchObject({
       type: 'CUSTOM', severity: 'WARNING', labels: { originalType: 'NEW_THING' },

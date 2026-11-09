@@ -99,24 +99,33 @@ describe('risk policy targets and validation', () => {
 
   it('stores exactly the ids it is given, as nulls when absent', async () => {
     await handler(event('POST', { policyType: 'MAX_POSITION', listingId: 500, parameters: { maxPosition: 10 } }));
-    expect(insert().values).toEqual(['MAX_POSITION', null, null, null, 500, '{"maxPosition":10}', true]);
+    expect(insert().values).toEqual(['MAX_POSITION', null, null, null, 500, null, '{"maxPosition":10}', true]);
   });
 
   it('stores a strategy\'s budget on one exchange', async () => {
     await handler(event('POST', {
       policyType: 'MAX_COMMITTED_CAPITAL', strategyId: 7, exchangeId: 3, parameters: { maxCapital: 500_000_000_000 },
     }));
-    expect(insert().values).toEqual(['MAX_COMMITTED_CAPITAL', null, 7, 3, null, '{"maxCapital":500000000000}', true]);
+    expect(insert().values).toEqual(['MAX_COMMITTED_CAPITAL', null, 7, 3, null, null, '{"maxCapital":500000000000}', true]);
   });
 
   it('fills a session row\'s strategy from its session', async () => {
     await handler(event('POST', { policyType: 'KILL_SWITCH', sessionId: 'abc', parameters: {} }));
     expect(insert().text).toContain('$2, (SELECT strategy_id FROM strategy.session WHERE session_id = $3)');
-    expect(insert().values).toEqual(['KILL_SWITCH', 'abc', 'abc', null, null, '{}', true]);
+    expect(insert().values).toEqual(['KILL_SWITCH', 'abc', 'abc', null, null, null, '{}', true]);
+  });
+
+  it('stores a kill of one venue account, naming nothing else', async () => {
+    await handler(event('POST', { policyType: 'KILL_SWITCH', accountId: 4, parameters: {} }));
+    expect(insert().values).toEqual(['KILL_SWITCH', null, null, null, null, 4, '{}', true]);
   });
 
   it.each([
     [{ policyType: 'NOT_A_POLICY', parameters: {} }],
+    [{ policyType: 'MAX_POSITION', accountId: 4, parameters: { maxPosition: 10 } }],
+    [{ policyType: 'KILL_SWITCH', accountId: 4, strategyId: 7, parameters: {} }],
+    [{ policyType: 'KILL_SWITCH', accountId: 4, exchangeId: 3, parameters: {} }],
+    [{ policyType: 'KILL_SWITCH', accountId: 0, parameters: {} }],
     [{ policyType: 'MAX_POSITION', parameters: {} }],
     [{ policyType: 'MAX_POSITION', parameters: { maxPositon: 10 } }],
     [{ policyType: 'MAX_POSITION', parameters: { maxPosition: 0 } }],
@@ -167,6 +176,27 @@ describe('risk policy targets and validation', () => {
     mockQuery.mockClear();
     await handler(event('GET', null, undefined, { forSession: 'none' }));
     expect(textOf(mockQuery.mock.calls[0][0])).toContain('session_id IS NULL');
+  });
+
+  it('never gives an OMS an account row, which it would read as a global kill', async () => {
+    mockQuery.mockImplementation(async () => ({ rowCount: 0, rows: [] }));
+    await handler(event('GET', null, undefined, { forStrategy: '7', forSession: 'abc' }));
+    expect(textOf(mockQuery.mock.calls[0][0])).toContain('account_id IS NULL');
+    mockQuery.mockClear();
+    await handler(event('GET', null, undefined, { enabled: 'true', policyType: 'KILL_SWITCH' }));
+    expect(textOf(mockQuery.mock.calls[0][0])).not.toContain('account_id IS NULL');
+  });
+
+  it('filters by policy type and account', async () => {
+    mockQuery.mockImplementation(async () => ({ rowCount: 0, rows: [] }));
+    await handler(event('GET', null, undefined, { policyType: 'KILL_SWITCH', accountId: '4' }));
+    const query = mockQuery.mock.calls[0][0];
+    expect(query.text).toContain('account_id = $1');
+    expect(query.text).toContain('policy_type = $2');
+    expect(query.values.slice(0, 2)).toEqual([4, 'KILL_SWITCH']);
+    mockQuery.mockClear();
+    const bad = await handler(event('GET', null, undefined, { policyType: 'NOPE' }));
+    expect(bad.statusCode).toBe(400);
   });
 
   it('narrows rows naming no strategy to the session\'s listings and exchanges', async () => {

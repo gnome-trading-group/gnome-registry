@@ -182,8 +182,21 @@ describeDb('monitoring rules against Postgres', () => {
     expect((await attention(client, 'live', now)).find(i => i.kind === 'SESSION_HALT')?.actor).toBe('oms');
   });
 
+  it('shows an account kill as that account halted, never as everything halted', async () => {
+    const account = (await client.query(`INSERT INTO account_master.venue_account (exchange_id, label, trading_secret_name)
+      VALUES (1, 'calm-otter-01', 'gnome/accounts/calm-otter-01/trading') RETURNING account_id`)).rows[0].account_id;
+    await client.query(`INSERT INTO risk.policy (policy_type, account_id, parameters, enabled)
+      VALUES ('KILL_SWITCH', $1, '{}', true)`, [account]);
+
+    const halts = (await runRules(client, now)).filter(f => f.kind.endsWith('HALT'));
+
+    expect(halts.map(f => [f.kind, f.accountId, f.accountLabel, f.mode, f.visibleIn])).toEqual([
+      ['ACCOUNT_HALT', account, 'calm-otter-01', 'live', ['live']],
+    ]);
+  });
+
   it('every kind a rule can produce has an alert type', async () => {
-    const kinds = ['GLOBAL_HALT', 'EXCHANGE_HALT', 'STRATEGY_HALT', 'STRATEGY_EXCHANGE_HALT', 'LISTING_HALT',
+    const kinds = ['GLOBAL_HALT', 'EXCHANGE_HALT', 'ACCOUNT_HALT', 'STRATEGY_HALT', 'STRATEGY_EXCHANGE_HALT', 'LISTING_HALT',
       'SESSION_HALT', 'SILENT', 'LEDGER_FENCED', 'LEDGER_FAILING', 'RISK_STALE', 'RISK_UNGUARDED', 'POLICY_UNBUILDABLE',
       'LATCHES_DROPPED', 'AGENT_EXITED', 'AGENT_STALLED', 'RECONNECTING', 'BOOK_RESYNCS', 'MARKET_DATA_BAD',
       'MARKET_DATA_BAD_HELD', 'RATE_LIMIT_THROTTLING', 'FAILED', 'START_STUCK', 'STOP_STUCK', 'NEEDS_REVIEW', 'NO_PRICE', 'SETTLEMENT_PENDING', 'SETTLEMENT_BLOCKED',

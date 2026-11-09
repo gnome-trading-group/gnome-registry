@@ -127,7 +127,7 @@ describe('POST /risk/halts upsert', () => {
     expect(query.values).toEqual([7, null, null, 7]);
     expect(sql).toContain(
       "ON CONFLICT (policy_type, COALESCE(session_id, ''), COALESCE(strategy_id, 0), COALESCE(exchange_id, 0),"
-        + ' COALESCE(listing_id, 0))',
+        + ' COALESCE(listing_id, 0), COALESCE(account_id, 0))',
     );
     expect(sql).toContain('session_id IS NULL AND strategy_id = $4 AND exchange_id IS NULL AND listing_id IS NULL');
     expect(sql).toContain('DO UPDATE SET enabled=true, date_modified=NOW() WHERE risk.policy.enabled = false');

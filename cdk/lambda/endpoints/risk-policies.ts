@@ -4,9 +4,11 @@ import { NOW, set, Sql, sql, where } from './sql';
 
 // A policy applies to exactly the ids it carries: none is global, a strategy covers every session of it, a listing
 // covers every strategy on it, an exchange covers every listing on it, and a session narrows a strategy to one
-// running instance. A listing already implies its exchange, so a row names one or the other.
+// running instance. A listing already implies its exchange, so a row names one or the other. A kill switch may instead
+// name one venue account, and nothing else: the order gateway's kill of everything on it, which the OMS never reads.
 interface ICreateRiskPolicy {
   policyType: string;
+  accountId?: number;
   sessionId?: string;
   strategyId?: number;
   exchangeId?: number;
@@ -80,6 +82,11 @@ function idList(name: string, value: string): number[] {
   return ids as number[];
 }
 
+function policyType(value: string): string {
+  if (!POLICY_PARAMETERS[value]) throw new ValidationError(`Unknown policyType ${value}`);
+  return value;
+}
+
 function optionalSessionId(value: unknown): string | null {
   if (value == null) return null;
   if (typeof value !== 'string' || !SESSION_ID_PATTERN.test(value)) {
@@ -120,6 +127,11 @@ export class RiskPolicyHandler extends ResourceHandler {
       params?.strategyId && sql`strategy_id = ${optionalId('strategyId', Number(params.strategyId))}`,
       params?.listingId && sql`listing_id = ${optionalId('listingId', Number(params.listingId))}`,
       params?.exchangeId && sql`exchange_id = ${optionalId('exchangeId', Number(params.exchangeId))}`,
+      params?.accountId && sql`account_id = ${optionalId('accountId', Number(params.accountId))}`,
+      params?.policyType && sql`policy_type = ${policyType(params.policyType)}`,
+      // An account row names no strategy or session, so an OMS would read it as a global kill: the OMS's queries
+      // never return them. The order gateway asks without these.
+      (params?.forStrategy || params?.forSession) && sql`account_id IS NULL`,
       // What one running OMS needs: rows for every strategy or its own, and for no session or its own. Without
       // these an OMS would load every session's and strategy's rows and hit its policy cap fleet-wide.
       params?.forStrategy
@@ -144,17 +156,23 @@ export class RiskPolicyHandler extends ResourceHandler {
     const strategyId = optionalId('strategyId', p.strategyId);
     const exchangeId = optionalId('exchangeId', p.exchangeId);
     const listingId = optionalId('listingId', p.listingId);
+    const accountId = optionalId('accountId', p.accountId);
     if (exchangeId !== null && listingId !== null) {
       throw new ValidationError('a policy names an exchange or a listing, not both');
+    }
+    if (accountId !== null && (p.policyType !== 'KILL_SWITCH'
+        || sessionId !== null || strategyId !== null || exchangeId !== null || listingId !== null)) {
+      throw new ValidationError('an account is named only by a kill switch, and alone');
     }
     // A session row carries its session's strategy; one naming another strategy fails the foreign key.
     const strategy = sessionId == null || strategyId != null
       ? strategyId
       : sql`(SELECT strategy_id FROM strategy.session WHERE session_id = ${sessionId})`;
     return sql`
-      INSERT INTO risk.policy (policy_type, session_id, strategy_id, exchange_id, listing_id, parameters, enabled)
-      VALUES (${p.policyType}, ${sessionId}, ${strategy}, ${exchangeId}, ${listingId}, ${JSON.stringify(p.parameters)},
-        ${p.enabled !== false})
+      INSERT INTO risk.policy
+        (policy_type, session_id, strategy_id, exchange_id, listing_id, account_id, parameters, enabled)
+      VALUES (${p.policyType}, ${sessionId}, ${strategy}, ${exchangeId}, ${listingId}, ${accountId},
+        ${JSON.stringify(p.parameters)}, ${p.enabled !== false})
       RETURNING *`;
   }
 

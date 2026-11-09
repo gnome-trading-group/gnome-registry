@@ -14,6 +14,8 @@ import { sql } from './sql';
 // transaction: rows it no longer derives are deleted, changed rows updated, new rows inserted. A row needs only one
 // side in the set, so the classifier can send a large group of a subject's securities in chunks, each with every row
 // touching its chunk. Manual rows are never touched, and a derived row on a pair a person already related is skipped.
+// A row whose other side, outside the set, has settled is kept: the classifier derives only open securities, so it no
+// longer sends that row, and deleting it would erase the relationship the two had while both traded.
 // Setting the subject's derived_at ends its "due a derivation" state, unless it changed after the classifier read it
 // (derivedAt is when it read it); the classifier sends subjectId only with its last chunk.
 
@@ -78,16 +80,20 @@ export async function reconcileRelationships(client: PoolClient, r: IReconcile) 
       if (!subject) throw new PropositionError(404, `Unknown subject ${r.subjectId}`);
     }
     const existing = r.securityIds.length === 0 ? [] : (await client.query(sql`
-      SELECT relationship_id, security_id_a, security_id_b, method FROM sm.contract_relationship
-      WHERE security_id_a = ANY(${r.securityIds}::int[]) OR security_id_b = ANY(${r.securityIds}::int[])
-      FOR UPDATE`)).rows;
+      SELECT r.relationship_id, r.security_id_a, r.security_id_b, r.method,
+        EXISTS (SELECT 1 FROM sm.event_contract ec JOIN sm.event e ON e.event_id = ec.event_id
+                WHERE e.resolved AND ec.security_id = CASE WHEN r.security_id_a = ANY(${r.securityIds}::int[])
+                                                           THEN r.security_id_b ELSE r.security_id_a END) AS partner_settled
+      FROM sm.contract_relationship r
+      WHERE r.security_id_a = ANY(${r.securityIds}::int[]) OR r.security_id_b = ANY(${r.securityIds}::int[])
+      FOR UPDATE OF r`)).rows;
 
     const manualPairs = new Set(existing.filter((e) => e.method === 'manual').map((e) => pairKey(e.security_id_a, e.security_id_b)));
     const desired = r.relationships.filter((rel) => !manualPairs.has(pairKey(rel.securityIdA, rel.securityIdB)));
     const desiredKeys = new Set(desired.map((rel) => `${rel.securityIdA}>${rel.securityIdB}`));
 
     const stale = existing
-      .filter((e) => e.method !== 'manual' && !desiredKeys.has(`${e.security_id_a}>${e.security_id_b}`))
+      .filter((e) => e.method !== 'manual' && !e.partner_settled && !desiredKeys.has(`${e.security_id_a}>${e.security_id_b}`))
       .map((e) => e.relationship_id);
     if (stale.length > 0) {
       await client.query(sql`DELETE FROM sm.contract_relationship WHERE relationship_id = ANY(${stale}::int[])`);
