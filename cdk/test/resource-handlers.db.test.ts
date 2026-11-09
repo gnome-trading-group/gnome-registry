@@ -158,6 +158,9 @@ describeDb('resource handlers round-trip awkward values, against Postgres', () =
     })));
     const [first] = await ok(sessions.get({ sessionId: 's-1' }));
     expect(Number(second.session_seq)).toBeGreaterThan(Number(first.session_seq));
+    expect(first.rate_weight).toBe(1);
+    await client.query('UPDATE strategy.strategy SET rate_weight = 3 WHERE strategy_id = $1', [other.strategy_id]);
+    expect(await ok(sessions.get({ sessionId: 's-1b' }))).toMatchObject([{ rate_weight: 3 }]);
     await expect(client.query("UPDATE strategy.session SET session_seq = 1 WHERE session_id = 's-1b'"))
       .rejects.toThrow(/session_seq/);
 

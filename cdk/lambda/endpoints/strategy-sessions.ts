@@ -72,7 +72,10 @@ export class StrategySessionHandler extends ResourceHandler {
     const statuses = parseStatuses(params?.status);
     const listingIds = parseIdList(params?.listingId);
     const eventIds = parseIdList(params?.eventId);
-    return sql`SELECT * FROM strategy.session${where([
+    // The strategy's weight in its share of a venue account's request budget, which the order gateway reads at a
+    // session's hello.
+    return sql`SELECT *, (SELECT st.rate_weight FROM strategy.strategy st WHERE st.strategy_id = session.strategy_id)
+        AS rate_weight FROM strategy.session${where([
       params?.sessionId && sql`session_id = ${params.sessionId}`,
       params?.strategyId && sql`strategy_id = ${params.strategyId}`,
       statuses.length > 0 && sql`status = ANY(${statuses}::text[])`,
