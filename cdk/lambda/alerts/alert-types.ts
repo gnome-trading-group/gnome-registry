@@ -103,6 +103,20 @@ export const ALERT_TYPES: Record<string, AlertType> = {
   LEASED_STREAM_UNPLACED: { severity: 'WARNING', debounce: 1 },
   // Raised after 15 minutes without the registry's sessions; until then leases simply aren't extended or released.
   LEASE_HOLDERS_UNREADABLE: { severity: 'WARNING', debounce: 1 },
+  // The order gateway reconciler (gnome-orchestrator), per gateway. Each waits before raising (a start 6 minutes, a
+  // DEGRADED gateway 2 ticks, a failing reconcile 3), so none debounces again.
+  GATEWAY_START_STUCK: { severity: 'ERROR', debounce: 1 },
+  // Orders resting at the venue with nothing watching them page; a gateway gone with only sessions linked doesn't.
+  GATEWAY_DOWN: { severity: e => Number(e.labels?.workingOrders ?? '0') > 0 ? 'CRITICAL' : 'ERROR', debounce: 1 },
+  GATEWAY_DEGRADED: { severity: 'ERROR', debounce: 1 },
+  GATEWAY_RECONCILE_FAILED: { severity: 'ERROR', debounce: 1 },
+  // The order gateway's own. Kill switches already in force still hold while kills are stale, but one turned on now
+  // isn't seen, so nothing can halt its sessions.
+  GATEWAY_KILLS_STALE: { severity: 'CRITICAL', debounce: 1 },
+  GATEWAY_FATAL: { severity: 'CRITICAL', debounce: 1 },
+  GATEWAY_ORDERS_UNANSWERED: { severity: 'ERROR', debounce: 1 },
+  GATEWAY_UNATTRIBUTED_ORDERS: { severity: 'ERROR', debounce: 1 },
+  GATEWAY_VENUE_RATE_LIMITED: { severity: 'WARNING', debounce: 1 },
   PIPELINE_FAILED: { severity: e => e.labels?.trigger === 'scheduled' ? 'ERROR' : 'INFO', debounce: 1 },
   CUSTOM: { severity: e => e.severity ?? 'WARNING', debounce: 1 },
 

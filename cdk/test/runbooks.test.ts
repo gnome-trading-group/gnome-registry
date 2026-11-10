@@ -5,7 +5,9 @@ import { ALERT_TYPES } from '../lambda/alerts/alert-types';
 
 // Every alert carries its runbook, so every type must have one that's complete, and the router must bundle the
 // latest version of them.
-const SERVICES = ['MarketData', 'Registry', 'Classifier', 'Controller', 'Launcher', 'Pipelines', 'AlertingMeta', 'Bot'];
+const SERVICES = [
+  'MarketData', 'Registry', 'Classifier', 'Controller', 'Launcher', 'Pipelines', 'AlertingMeta', 'Bot', 'GatewayReconciler',
+];
 
 describe('runbooks', () => {
   const alerts = readRunbooks('alerts');
