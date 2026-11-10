@@ -186,6 +186,48 @@ export class ApiStack extends cdk.Stack {
     const gateways = this.createIntegration('gateways.ts');
     this.route('gateways', gateways, { GET: [SERVICE, PERSON, BOT], PATCH: [SERVICE, PERSON] });
     this.route('gateways/accounts', gateways, { POST: [PERSON] });
+    // Starts a live order gateway, in its exchange's region, when a session wants it: the launcher and a waiting
+    // session call it. Outside the VPC, as it drives ECS and EC2 in every platform region; it reads and writes the
+    // gateway's row through this API.
+    const gatewayStarter = new lambda.NodejsFunction(this, 'gateway-ensure-lambda', {
+      entry: join(__dirname, '..', '..', 'lambda', 'endpoints', 'gateway-ensure.ts'),
+      ...this.nodeJsProps,
+      bundling: {
+        externalModules: ['pg-native', '@aws-sdk/*'],
+      },
+      environment: {
+        REGISTRY_API_URL: `https://${this.api.restApiId}.execute-api.${this.region}.${this.urlSuffix}/${ApiStack.STAGE_NAME}/`,
+        REGISTRY_API_KEY_ID: this.apiKey.keyId,
+      },
+    });
+    gatewayStarter.addToRolePolicy(new iam.PolicyStatement({
+      actions: ['apigateway:GET'],
+      resources: [`arn:aws:apigateway:${this.region}::/apikeys/${this.apiKey.keyId}`],
+    }));
+    gatewayStarter.addToRolePolicy(new iam.PolicyStatement({
+      actions: ['ssm:GetParameter'],
+      resources: [`arn:aws:ssm:us-east-1:${this.account}:parameter/gnome/orchestrator/latest-version`],
+    }));
+    gatewayStarter.addToRolePolicy(new iam.PolicyStatement({
+      actions: ['ecs:DescribeServices', 'ecs:CreateService', 'ecs:UpdateService'],
+      resources: platformRegions().map(region => `arn:aws:ecs:${region}:${this.account}:service/order-gateways/*`),
+    }));
+    gatewayStarter.addToRolePolicy(new iam.PolicyStatement({
+      // Task definitions take no resource-level permission for these.
+      actions: ['ecs:DescribeTaskDefinition', 'ecs:RegisterTaskDefinition', 'ec2:DescribeAddresses'],
+      resources: ['*'],
+    }));
+    gatewayStarter.addToRolePolicy(new iam.PolicyStatement({
+      actions: ['ec2:AllocateAddress', 'ec2:CreateTags'],
+      resources: platformRegions().map(region => `arn:aws:ec2:${region}:${this.account}:elastic-ip/*`),
+    }));
+    gatewayStarter.addToRolePolicy(new iam.PolicyStatement({
+      actions: ['iam:PassRole'],
+      resources: [`arn:aws:iam::${this.account}:role/gnome-order-gateway-*`],
+      conditions: { StringEquals: { 'iam:PassedToService': 'ecs-tasks.amazonaws.com' } },
+    }));
+    this.route('gateways/ensure', new apigw.LambdaIntegration(gatewayStarter, { scopePermissionToMethod: false }),
+      { POST: [SERVICE, PERSON] });
 
     // Creating an account from the controller puts its credentials in Secrets Manager, which the registry's isolated
     // subnets can't reach, so this one runs outside the VPC and registers the account through the API. People only,

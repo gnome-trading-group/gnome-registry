@@ -17,7 +17,7 @@ aws logs tail /gnome/orchestrator/<region> --log-stream-names ec2/<instance-id> 
 ```
 
 Look for `FATAL_ERROR_EXITING`, `UNKNOWN_ERROR`, `STRATEGY_LATCHED`, `LEDGER_FAILING_HALTED`, `RISK_UNGUARDED`,
-`MARKET_DATA_GAP`, `RATE_LIMIT_THROTTLING` and `SOCKET_*`.
+`MARKET_DATA_GAP` and `SOCKET_*`.
 
 ## The instance
 

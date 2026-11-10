@@ -14,7 +14,6 @@ interface Health {
   gateways?: { name: string; reconnecting: boolean; resyncsLast5m?: number }[];
   ledger?: { consecutiveFailures: number; fenced: boolean } | null;
   risk?: { stale: boolean; unguarded: boolean; unbuildablePolicies: number; droppedLatches: number } | null;
-  rateLimit?: { account: string; throttling: boolean }[];
   // A reading the host can't give (no /proc off Linux, no CPU share before the second sample) is -1.
   host?: {
     cpuBusyPermille: number; cpuStealPermille: number; memAvailableBytes: number; memTotalBytes: number;
@@ -102,9 +101,6 @@ export async function sessions(client: PoolClient, now: Date): Promise<Finding[]
         on('critical', 'MARKET_DATA_BAD_HELD', subject,
           `Book bad for ${seconds(badMs)} with a position held; new orders refused`, extra);
       }
-    }
-    for (const limiter of health.rateLimit ?? []) {
-      if (limiter.throttling) on('warning', 'RATE_LIMIT_THROTTLING', limiter.account, `${limiter.account} is rate limited`);
     }
     hostFindings(health, on);
   }

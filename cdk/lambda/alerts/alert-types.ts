@@ -50,7 +50,6 @@ export const ALERT_TYPES: Record<string, AlertType> = {
   // The OMS refuses new orders on the listing; with a position held, nobody can trade out of it.
   MARKET_DATA_BAD: { severity: 'WARNING', debounce: 1 },
   MARKET_DATA_BAD_HELD: { severity: 'ERROR', debounce: 1 },
-  RATE_LIMIT_THROTTLING: { severity: 'WARNING', debounce: 3 },
   // Sustained for ten minutes: a busy minute is normal, a busy ten is an undersized instance or a runaway loop.
   HOST_CPU_HIGH: { severity: 'WARNING', debounce: 10 },
   // Running out kills the process, which pages as FAILED; this is the warning before it.

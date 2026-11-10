@@ -371,15 +371,6 @@
       ],
       "url": "https://github.com/gnome-trading-group/gnome-registry/blob/main/docs/runbooks/alerts/POLICY_UNBUILDABLE.md"
     },
-    "RATE_LIMIT_THROTTLING": {
-      "summary": "A venue account is being rate limited; orders are being refused locally.",
-      "firstSteps": [
-        "Check which account on the session page.",
-        "Look for VENUE_RATE_LIMITED in the logs.",
-        "Reduce the strategy's order rate or split it across accounts."
-      ],
-      "url": "https://github.com/gnome-trading-group/gnome-registry/blob/main/docs/runbooks/alerts/RATE_LIMIT_THROTTLING.md"
-    },
     "RECONNECTING": {
       "summary": "A gateway has been reconnecting for over a minute.",
       "firstSteps": [

@@ -15,7 +15,6 @@ const HEALTHY = {
   gateways: [{ name: 'KalshiReader', reconnecting: false, resyncsLast5m: 0 }],
   ledger: { lastAcceptedAgoMs: 100, consecutiveFailures: 0, fenced: false },
   risk: { stale: false, unguarded: false, unbuildablePolicies: 0, droppedLatches: 0 },
-  rateLimit: [{ account: 'steady-heron-01', throttling: false }],
 };
 
 describeDb('monitoring rules against Postgres', () => {
@@ -55,19 +54,17 @@ describeDb('monitoring rules against Postgres', () => {
     await client.query('COMMIT');
   }
 
-  it('reads the new health: risk it can\'t trust, policies it can\'t apply, dropped halts, throttling and resyncs', async () => {
+  it('reads the new health: risk it can\'t trust, policies it can\'t apply, dropped halts and resyncs', async () => {
     await session('s1', { health: {
       ...HEALTHY,
       gateways: [{ name: 'KalshiReader', reconnecting: false, resyncsLast5m: 4 }],
       risk: { stale: true, unguarded: false, unbuildablePolicies: 2, droppedLatches: 1 },
-      rateLimit: [{ account: 'steady-heron-01', throttling: true }],
     } });
     const findings = await runRules(client, now);
     expect(findings.map(f => [f.kind, f.key]).sort()).toEqual([
       ['BOOK_RESYNCS', 'BOOK_RESYNCS:s1:KalshiReader'],
       ['LATCHES_DROPPED', 'LATCHES_DROPPED:s1:-'],
       ['POLICY_UNBUILDABLE', 'POLICY_UNBUILDABLE:s1:-'],
-      ['RATE_LIMIT_THROTTLING', 'RATE_LIMIT_THROTTLING:s1:steady-heron-01'],
       ['RISK_STALE', 'RISK_STALE:s1:-'],
     ]);
   });
@@ -199,7 +196,7 @@ describeDb('monitoring rules against Postgres', () => {
     const kinds = ['GLOBAL_HALT', 'EXCHANGE_HALT', 'ACCOUNT_HALT', 'STRATEGY_HALT', 'STRATEGY_EXCHANGE_HALT', 'LISTING_HALT',
       'SESSION_HALT', 'SILENT', 'LEDGER_FENCED', 'LEDGER_FAILING', 'RISK_STALE', 'RISK_UNGUARDED', 'POLICY_UNBUILDABLE',
       'LATCHES_DROPPED', 'AGENT_EXITED', 'AGENT_STALLED', 'RECONNECTING', 'BOOK_RESYNCS', 'MARKET_DATA_BAD',
-      'MARKET_DATA_BAD_HELD', 'RATE_LIMIT_THROTTLING', 'FAILED', 'START_STUCK', 'STOP_STUCK', 'NEEDS_REVIEW', 'NO_PRICE', 'SETTLEMENT_PENDING', 'SETTLEMENT_BLOCKED',
+      'MARKET_DATA_BAD_HELD', 'FAILED', 'START_STUCK', 'STOP_STUCK', 'NEEDS_REVIEW', 'NO_PRICE', 'SETTLEMENT_PENDING', 'SETTLEMENT_BLOCKED',
       'RECON_MISMATCH', 'RECON_STALE', 'BALANCE_LOW', 'SHARD_BALANCE_LOW', 'ALLOCATION_EXCEEDS_BALANCE',
       'DRAINING_EXPOSURE', 'ACCOUNT_DUE_FOR_ROTATION', 'ACCOUNT_READY_TO_RETIRE', 'FEE_MISMATCH',
       'FEE_SCHEDULE_MISSING', 'FEE_SCHEDULE_CHANGED', 'FEE_TYPE_UNSUPPORTED', 'HOST_CPU_HIGH', 'HOST_MEMORY_LOW',

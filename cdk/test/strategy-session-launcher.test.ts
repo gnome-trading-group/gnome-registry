@@ -94,6 +94,9 @@ let postBodies: any[] = [];
 let sessionRow: any;
 let patchStatus = 200;
 let postStatus = 200;
+// The gateways a launch asked to start, and how the route answers.
+let ensured: string[] = [];
+let ensureStatus = 200;
 let sleeps: number[] = [];
 // Market-data API calls: each request, and the statuses successive lease POSTs answer with (then 200).
 let marketDataCalls: { method: string; path: string; body: any; headers: any }[] = [];
@@ -164,6 +167,8 @@ beforeEach(() => {
   patchStatus = 200;
   patchStatusQueue = [];
   postStatus = 200;
+  ensured = [];
+  ensureStatus = 200;
   runInstancesError = null;
   marketDataCalls = [];
   leaseStatusQueue = [];
@@ -199,6 +204,10 @@ beforeEach(() => {
     }
     const path = url.replace('https://registry.test/api', '').split('?')[0];
     events.push(`${method} ${path}`);
+    if (path === '/gateways/ensure') {
+      ensured.push(new URL(url).searchParams.get('gatewayKey')!);
+      return ensureStatus === 200 ? jsonResponse({ action: 'created' }) : jsonResponse({ message: 'ecs down' }, ensureStatus);
+    }
     if (path === '/risk/halts') {
       haltBodies.push(JSON.parse(init.body));
       return haltFails ? jsonResponse({ message: 'db down' }, 500) : jsonResponse({ policyId: 9 });
@@ -964,6 +973,34 @@ describe('market-data streams and leases', () => {
     expect(res.statusCode).toBe(200);
     expect(leasePosts().map((c) => [c.headers['x-api-key'], c.headers['x-api-key'] === marketDataSecret]))
       .toEqual([['md-key', false], ['md-key-rotated', true]]);
+  });
+
+  it("starts a live session's order gateways after its lease and before its instance, so both boot together", async () => {
+    const res = await launch({ mode: 'live' });
+
+    expect(res.statusCode).toBe(200);
+    expect(ensured).toEqual(['live:kalshi:main']);
+    const started = events.indexOf('POST /gateways/ensure');
+    expect(started).toBeGreaterThan(events.indexOf('POST /strategy-sessions'));
+    expect(started).toBeLessThan(events.indexOf('RunInstances'));
+  });
+
+  it('starts no gateway for a paper session', async () => {
+    await launch();
+
+    expect(ensured).toEqual([]);
+  });
+
+  it('fails a live session, launching nothing and releasing its lease, when its gateway can\'t be started', async () => {
+    ensureStatus = 500;
+
+    const res = await launch({ mode: 'live' });
+
+    expect(res.statusCode).toBe(502);
+    expect(events).not.toContain('RunInstances');
+    expect(patchBodies[0]).toMatchObject({ status: 'FAILED', expectedStatus: ['SUBMITTED'] });
+    expect(patchBodies[0].failureReason).toContain('Order gateway start failed');
+    expect(marketDataCalls.some((c) => c.method === 'DELETE')).toBe(true);
   });
 
   it('fails the session, launching nothing, when the lease is refused', async () => {

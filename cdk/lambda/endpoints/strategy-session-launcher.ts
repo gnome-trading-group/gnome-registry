@@ -138,6 +138,11 @@ function toEnvVarName(key: string): string {
   return key.replace(/\./g, '_').toUpperCase();
 }
 
+/** The gateway a live session trades an exchange through, as the session (SessionOrders) and migration 061 name it. */
+export function liveGatewayKey(exchangeCode: string): string {
+  return `live:${exchangeCode.toLowerCase()}:main`;
+}
+
 // The listings and exchanges endpoints return their rows as stored, in snake_case.
 async function listingExchanges(listingIds: number[]): Promise<Map<number, number>> {
   const exchangeOf = new Map<number, number>();
@@ -705,6 +710,21 @@ async function handleLaunch(body: string | null) {
     const message = error instanceof Error ? error.message : String(error);
     await markLaunchFailed(s.sessionId, `Market-data lease failed: ${message}`);
     return createResponse(502, { message: `Market-data lease failed: ${message}` });
+  }
+
+  // A live session trades through its venues' order gateways, which run only while wanted: started here, so each boots
+  // while the session's instance does. The session asks again while it waits for them.
+  if (s.mode === 'live') {
+    try {
+      for (const exchange of exchanges.values()) {
+        await registryFetch('/gateways/ensure', 'POST', {}, { gatewayKey: liveGatewayKey(exchange.exchange_code) });
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      await markLaunchFailed(s.sessionId, `Order gateway start failed: ${message}`);
+      await releaseLease(s.sessionId);
+      return createResponse(502, { message: `Order gateway start failed: ${message}` });
+    }
   }
 
   const tags = [
