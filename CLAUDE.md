@@ -120,13 +120,13 @@ synth step, so run `npm test` yourself before handing off.
     published by gnome-market-data) and the key mirror `gnome/api-keys/market-data`, cached per container until a
     401/403; the session gets `STREAMS` (always the leased data-only streams; an `overrides.streams` can't change
     it), `MARKET_DATA_API_URL` and `MARKET_DATA_API_KEY_SECRET` to poll its lease.
-  - Order gateways run only while live sessions want them: after the lease, the launcher calls
-    `POST /gateways/ensure?gatewayKey=live:<exchange>:main` for each venue a live session trades (a failure fails the
-    launch), and the session calls it every 10 s while it waits for its gateways. The route (outside the VPC; reads
-    and marks the gateway row wanted through the API) starts the gateway in its row's region, on its pinned release or
-    SSM `/gnome/orchestrator/latest-version`: an ECS service in cluster `order-gateways` from gnome-orchestrator's base
-    task definition `order-gateway`, with its Elastic IP allocated once (tag `gnome:order-gateway`). An idle gateway
-    sets its service to zero itself.
+  - Order gateways run only while live sessions want them, decided by gnome-orchestrator's gateway reconciler (its
+    OrderGatewayReconcilerStack), as market data's collection reconciler decides shards; the registry holds what is
+    wanted. `POST /gateways/ensure?gatewayKey=live:<exchange>:main` marks the gateway row wanted (through the API; it
+    runs outside the VPC) and wakes the reconciler on its queue `gateway-reconciler.fifo` (this account, us-east-1): the
+    launcher calls it for each venue a live session trades (a failure fails the launch), and the session every 10 s
+    until linked, then every minute. The reconciler reads the rows (`GET /gateways?mode=live`) with the API key, at the
+    URL ApiStack publishes in SSM `/gnome/registry/api-url` (us-east-1), for any service outside this repo.
   - DatabaseStack: RDS Postgres 16 (`gnome` db) in isolated subnets, plus the migration Lambda and a query Lambda
     (`{"query": "..."}`, returns rows) for read-only inspection.
   - ExchangeSyncStack: hourly security-master sync (Hyperliquid, Lighter adapters); in prod it reports to `#gnome-security-master`.

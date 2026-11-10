@@ -9,6 +9,7 @@ import * as iam from 'aws-cdk-lib/aws-iam';
 import * as cognito from 'aws-cdk-lib/aws-cognito';
 import * as ssm from 'aws-cdk-lib/aws-ssm';
 import { join } from 'path';
+import { RECONCILER_QUEUE } from '../../lambda/endpoints/gateway-reconciler-queue';
 import { Runtime } from 'aws-cdk-lib/aws-lambda';
 import {
   API_KEY_SECRET_NAMES, ApiKeySecret, CallerKind, GnomeApiAuthorizer, platformRegions, RouteMethods, Stage,
@@ -29,6 +30,8 @@ interface Props extends cdk.StackProps {
 
 export class ApiStack extends cdk.Stack {
   public static readonly STAGE_NAME = 'api';
+  // Where services outside this repo find this API (e.g. gnome-orchestrator's gateway reconciler).
+  public static readonly API_URL_PARAMETER = '/gnome/registry/api-url';
   public readonly api: apigw.RestApi;
   public readonly apiKey: apigw.ApiKey;
   public static readonly USER_POOL_ARN_PARAMETER = '/gnome/cognito/user-pool-arn';
@@ -186,10 +189,11 @@ export class ApiStack extends cdk.Stack {
     const gateways = this.createIntegration('gateways.ts');
     this.route('gateways', gateways, { GET: [SERVICE, PERSON, BOT], PATCH: [SERVICE, PERSON] });
     this.route('gateways/accounts', gateways, { POST: [PERSON] });
-    // Starts a live order gateway, in its exchange's region, when a session wants it: the launcher and a waiting
-    // session call it. Outside the VPC, as it drives ECS and EC2 in every platform region; it reads and writes the
-    // gateway's row through this API.
-    const gatewayStarter = new lambda.NodejsFunction(this, 'gateway-ensure-lambda', {
+    // A session wanting a live order gateway: the launcher and a waiting or linked session call it. It marks the gateway
+    // wanted through this API and wakes the gateway reconciler (gnome-orchestrator's OrderGatewayReconcilerStack), which
+    // starts and stops gateways; outside the VPC, to reach the reconciler's queue, which it names.
+    const reconcilerQueueArn = `arn:aws:sqs:${this.region}:${this.account}:${RECONCILER_QUEUE}`;
+    const gatewayWanted = new lambda.NodejsFunction(this, 'gateway-ensure-lambda', {
       entry: join(__dirname, '..', '..', 'lambda', 'endpoints', 'gateway-ensure.ts'),
       ...this.nodeJsProps,
       bundling: {
@@ -198,36 +202,25 @@ export class ApiStack extends cdk.Stack {
       environment: {
         REGISTRY_API_URL: `https://${this.api.restApiId}.execute-api.${this.region}.${this.urlSuffix}/${ApiStack.STAGE_NAME}/`,
         REGISTRY_API_KEY_ID: this.apiKey.keyId,
+        RECONCILER_QUEUE_URL: `https://sqs.${this.region}.${this.urlSuffix}/${this.account}/${RECONCILER_QUEUE}`,
       },
     });
-    gatewayStarter.addToRolePolicy(new iam.PolicyStatement({
+    gatewayWanted.addToRolePolicy(new iam.PolicyStatement({
       actions: ['apigateway:GET'],
       resources: [`arn:aws:apigateway:${this.region}::/apikeys/${this.apiKey.keyId}`],
     }));
-    gatewayStarter.addToRolePolicy(new iam.PolicyStatement({
-      actions: ['ssm:GetParameter'],
-      resources: [`arn:aws:ssm:us-east-1:${this.account}:parameter/gnome/orchestrator/latest-version`],
+    gatewayWanted.addToRolePolicy(new iam.PolicyStatement({
+      actions: ['sqs:SendMessage'],
+      resources: [reconcilerQueueArn],
     }));
-    gatewayStarter.addToRolePolicy(new iam.PolicyStatement({
-      actions: ['ecs:DescribeServices', 'ecs:CreateService', 'ecs:UpdateService'],
-      resources: platformRegions().map(region => `arn:aws:ecs:${region}:${this.account}:service/order-gateways/*`),
-    }));
-    gatewayStarter.addToRolePolicy(new iam.PolicyStatement({
-      // Task definitions take no resource-level permission for these.
-      actions: ['ecs:DescribeTaskDefinition', 'ecs:RegisterTaskDefinition', 'ec2:DescribeAddresses'],
-      resources: ['*'],
-    }));
-    gatewayStarter.addToRolePolicy(new iam.PolicyStatement({
-      actions: ['ec2:AllocateAddress', 'ec2:CreateTags'],
-      resources: platformRegions().map(region => `arn:aws:ec2:${region}:${this.account}:elastic-ip/*`),
-    }));
-    gatewayStarter.addToRolePolicy(new iam.PolicyStatement({
-      actions: ['iam:PassRole'],
-      resources: [`arn:aws:iam::${this.account}:role/gnome-order-gateway-*`],
-      conditions: { StringEquals: { 'iam:PassedToService': 'ecs-tasks.amazonaws.com' } },
-    }));
-    this.route('gateways/ensure', new apigw.LambdaIntegration(gatewayStarter, { scopePermissionToMethod: false }),
+    this.route('gateways/ensure', new apigw.LambdaIntegration(gatewayWanted, { scopePermissionToMethod: false }),
       { POST: [SERVICE, PERSON] });
+
+    new ssm.StringParameter(this, 'RegistryApiUrl', {
+      parameterName: ApiStack.API_URL_PARAMETER,
+      stringValue: `https://${this.api.restApiId}.execute-api.${this.region}.${this.urlSuffix}/${ApiStack.STAGE_NAME}/`,
+      description: 'The registry API, for services that call it with the registry API key',
+    });
 
     // Creating an account from the controller puts its credentials in Secrets Manager, which the registry's isolated
     // subnets can't reach, so this one runs outside the VPC and registers the account through the API. People only,
