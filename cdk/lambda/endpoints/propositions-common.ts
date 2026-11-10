@@ -1,5 +1,6 @@
 import { APIGatewayProxyEvent } from 'aws-lambda';
 import { PoolClient } from 'pg';
+import { getActor, isService } from './base';
 import { connectLedgerDatabase, createResponse } from './ledger-common';
 import { sql } from './sql';
 
@@ -96,4 +97,15 @@ export function propositionHandler(name: string, routes: Partial<Record<string, 
 export function parseBody(event: APIGatewayProxyEvent): unknown {
   if (!event.body) throw new PropositionError(400, 'Missing body');
   return JSON.parse(event.body);
+}
+
+/** Who a change to subjects is attributed to. A person is who their token says, never the body, so nobody acts as
+ * someone else; a service has no token and must name itself in `actor`, since the logs are the only record of who
+ * changed what. */
+export function requestActor(event: APIGatewayProxyEvent, requested: unknown, doing: string): string {
+  if (!isService(event)) return getActor(event);
+  if (typeof requested !== 'string' || !requested.trim()) {
+    throw new PropositionError(400, `A service ${doing} must name itself in actor`);
+  }
+  return requested.trim();
 }

@@ -1,16 +1,18 @@
 import { APIGatewayProxyEvent } from 'aws-lambda';
 import { PoolClient } from 'pg';
-import { getActor, isService, withTransaction } from './base';
+import { getActor, withTransaction } from './base';
 import {
   canonicalSubject,
   parseBody,
   PropositionError,
   propositionHandler,
+  requestActor,
   requirePositiveInt,
   requireSubject,
   subjectTree,
   touchSubjects,
 } from './propositions-common';
+import { removeMergeAliases } from './subject-key-aliases';
 import { sql, where } from './sql';
 
 // Merging duplicate subjects: a person's call from the controller, or the classifier's merge pass for pairs it judged
@@ -18,7 +20,8 @@ import { sql, where } from './sql';
 // person's). A merge records an alias and moves every
 // proposition that resolves through the merged subject; an unmerge deletes the alias and moves them back (each
 // proposition remembers the subject extraction chose). Both mark the subjects involved for a fresh derivation, which
-// the classifier picks up on its own, and both are appended to the merge log, the only record of an undone merge.
+// the classifier picks up on its own, and both are appended to the merge log, the only record of an undone merge. An
+// unmerge also removes the key aliases recorded with the merge.
 
 // Merges and unmerges change chains other merges read, so they run one at a time.
 const MERGE_LOCK = 1797_0001;
@@ -107,20 +110,11 @@ export async function unmergeSubject(client: PoolClient, subjectId: number, acto
     const moved = (await client.query(sql`
       UPDATE sm.contract_proposition SET subject_id = ${subjectId}, date_modified = now()
       WHERE extracted_subject_id = ANY(${tree}::int[])`)).rowCount;
+    const aliasesRemoved = await removeMergeAliases(client, subjectId, alias.canonical_subject_id);
     await touchSubjects(client, [subjectId, formerTarget]);
     await logMerge(client, 'UNMERGE', subjectId, alias.canonical_subject_id, actor, moved ?? 0);
-    return { ...alias, unmerged_by: actor, propositions_moved: moved };
+    return { ...alias, unmerged_by: actor, propositions_moved: moved, key_aliases_removed: aliasesRemoved };
   }, { actor, reason: 'proposition subject unmerged' });
-}
-
-/** A person is who their token says, never the body, so nobody merges as someone else; a service has no token and
- * must name itself in `actor`, since the merge log is the only record of who merged what. */
-export function mergeActor(event: APIGatewayProxyEvent, requested: unknown): string {
-  if (!isService(event)) return getActor(event);
-  if (typeof requested !== 'string' || !requested.trim()) {
-    throw new PropositionError(400, 'A service merging subjects must name itself in actor');
-  }
-  return requested.trim();
 }
 
 export const handler = propositionHandler('Proposition subject merge', {
@@ -128,7 +122,7 @@ export const handler = propositionHandler('Proposition subject merge', {
   POST: (client, event) => {
     const body = parseBody(event) as { fromSubjectId?: unknown; intoSubjectId?: unknown; actor?: unknown };
     return mergeSubjects(client, requirePositiveInt(body.fromSubjectId, 'fromSubjectId'),
-      requirePositiveInt(body.intoSubjectId, 'intoSubjectId'), mergeActor(event, body.actor));
+      requirePositiveInt(body.intoSubjectId, 'intoSubjectId'), requestActor(event, body.actor, 'merging subjects'));
   },
   DELETE: (client, event) => {
     const body = parseBody(event) as { subjectId?: unknown };

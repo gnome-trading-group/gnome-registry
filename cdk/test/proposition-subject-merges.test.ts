@@ -1,17 +1,17 @@
 import { APIGatewayProxyEvent } from 'aws-lambda';
-import { mergeActor } from '../lambda/endpoints/proposition-subject-merges';
+import { requestActor } from '../lambda/endpoints/propositions-common';
 
 function event(kind: string, actor: string): APIGatewayProxyEvent {
   return { requestContext: { authorizer: { kind, actor } } } as unknown as APIGatewayProxyEvent;
 }
 
-describe('who a merge is attributed to', () => {
+describe('who a change to subjects is attributed to', () => {
   it('takes a person from their token, never the body', () => {
-    expect(mergeActor(event('person', 'me@example.com'), 'someone-else')).toBe('me@example.com');
+    expect(requestActor(event('person', 'me@example.com'), 'someone-else', 'merging subjects')).toBe('me@example.com');
   });
 
   it('takes a service from the actor it names, and refuses one that names none', () => {
-    expect(mergeActor(event('service', 'api-key'), ' classifier:subject-merger ')).toBe('classifier:subject-merger');
-    expect(() => mergeActor(event('service', 'api-key'), '')).toThrow('must name itself');
+    expect(requestActor(event('service', 'api-key'), ' classifier:subject-merger ', 'merging subjects')).toBe('classifier:subject-merger');
+    expect(() => requestActor(event('service', 'api-key'), '', 'merging subjects')).toThrow('must name itself');
   });
 });

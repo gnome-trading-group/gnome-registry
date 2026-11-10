@@ -123,6 +123,7 @@ describe('ApiStack auth', () => {
     ['listings', 'PATCH', ['person', 'service']],
     // Services and people.
     ['proposition-subjects/merges', 'POST', ['person', 'service']],
+    ['proposition-subjects', 'PATCH', ['person', 'service']],
     ['strategy-sessions/launch', 'POST', ['person', 'service']],
     ['strategy-sessions/stop', 'POST', ['person', 'service']],
     ['treasury/snapshots', 'POST', ['person', 'service']],

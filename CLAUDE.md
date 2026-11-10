@@ -72,10 +72,11 @@ synth step, so run `npm test` yourself before handing off.
   (risk policy writes, ledger adjustments, venue-account create/status, treasury transfers) are `PERSON` only.
   `risk/halts` is `SERVICE` only and can only enable a kill.
 - One route tree (no `/cognito` copy); CORS preflights carry no authorizer. Keep the authorizer set per method.
-- The API stack must stay under 475 CloudFormation resources (test-enforced; the hard limit is 500). It holds about
-  450, so a new route or two fits and more need a stack split. Integrations use `scopePermissionToMethod: false` for
-  this reason. Don't merge unrelated routes into one Lambda just to save
-  resources; give a new resource its own Lambda.
+- The API stack must stay under 475 CloudFormation resources (test-enforced; the hard limit is 500). It holds 473
+  (2026-11-10), and a new route costs about 10 (path, a method each plus OPTIONS, function, role, policy, security
+  group, invoke permission), so the next route needs a stack split; a new method on an existing path costs 1.
+  Integrations use `scopePermissionToMethod: false` for this reason. Don't merge unrelated routes into one Lambda just
+  to save resources; give a new resource its own Lambda.
 - SQL: never interpolate a value into query text. `ResourceHandler`'s `generate*Query` methods return `Sql`
   (pg's `{ text, values }`), built with the helpers in `cdk/lambda/endpoints/sql.ts`: the ``sql`...` `` tag turns
   values into `$n` placeholders and composes fragments; `where()`, `set()` and `anyId()` cover optional filters,

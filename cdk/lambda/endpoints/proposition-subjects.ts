@@ -1,11 +1,21 @@
 import { PoolClient } from 'pg';
-import { parseIdList } from './base';
-import { parseBody, PropositionError, propositionHandler, requirePositiveInt, requireString } from './propositions-common';
+import { parseIdList, withTransaction } from './base';
+import {
+  parseBody,
+  PropositionError,
+  propositionHandler,
+  requestActor,
+  requirePositiveInt,
+  requireString,
+} from './propositions-common';
 import { raw, sql, where } from './sql';
+import { changeKeyAliases, listKeyAliases, parseRemove, parseSet } from './subject-key-aliases';
 
 // Proposition subjects. The classifier creates them (an upsert by key); everyone reads them, and the controller's
 // subject page asks for the subjects nearest one by embedding. Duplicates across subjects are found and judged by the
-// classifier's merge pass, which queues the merges it holds back in merge-candidates.
+// classifier's merge pass, which queues the merges it holds back in merge-candidates. A subject's key aliases (one
+// entity spelled two ways, `subject-key-aliases.ts`) are read with `keyAliases=true` and changed with PATCH: by the
+// classifier under the actor it names, or by a person.
 
 const KEY_PATTERN = /^[a-z0-9][a-z0-9:._/-]{0,199}$/;
 const DEFAULT_LIMIT = 500;
@@ -26,6 +36,10 @@ const COLUMNS = sql`
 export async function listSubjects(client: PoolClient, params: Record<string, string | undefined>) {
   const limit = Math.min(Number(params.limit ?? DEFAULT_LIMIT) || DEFAULT_LIMIT, MAX_LIMIT);
   const offset = Number(params.offset ?? 0) || 0;
+  if (params.keyAliases === 'true') {
+    if (params.subjectIds === undefined) throw new PropositionError(400, 'keyAliases needs subjectIds');
+    return (await listKeyAliases(client, parseIdList(params.subjectIds))).slice(offset, offset + limit);
+  }
 
   if (params.similarTo !== undefined) {
     const subjectId = Number(params.similarTo);
@@ -83,6 +97,18 @@ export async function upsertSubjects(client: PoolClient, items: ICreateSubject[]
   return rows;
 }
 
+export async function patchKeyAliases(client: PoolClient, body: unknown, actor: string) {
+  const b = (body ?? {}) as { subjectId?: unknown; set?: unknown; remove?: unknown };
+  const subjectId = requirePositiveInt(b.subjectId, 'subjectId');
+  if ((b.set !== undefined && !Array.isArray(b.set)) || (b.remove !== undefined && !Array.isArray(b.remove))) {
+    throw new PropositionError(400, 'set and remove must be lists');
+  }
+  const set = ((b.set as unknown[] | undefined) ?? []).map(parseSet);
+  const remove = ((b.remove as unknown[] | undefined) ?? []).map(parseRemove);
+  return withTransaction(client, () => changeKeyAliases(client, subjectId, set, remove, actor),
+    { actor, reason: 'subject key aliases changed' });
+}
+
 export const handler = propositionHandler('Proposition subject', {
   GET: (client, event) => listSubjects(client, event.queryStringParameters ?? {}),
   POST: async (client, event) => {
@@ -91,5 +117,9 @@ export const handler = propositionHandler('Proposition subject', {
     if (items.length === 0) throw new PropositionError(400, 'Expected at least one subject');
     const rows = await upsertSubjects(client, items);
     return Array.isArray(body) ? rows : rows[0];
+  },
+  PATCH: (client, event) => {
+    const body = parseBody(event) as { actor?: unknown };
+    return patchKeyAliases(client, body, requestActor(event, body?.actor, 'changing key aliases'));
   },
 });
