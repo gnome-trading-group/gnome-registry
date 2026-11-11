@@ -383,6 +383,15 @@
       ],
       "url": "https://github.com/gnome-trading-group/gnome-registry/blob/main/docs/runbooks/alerts/LEASE_HOLDERS_UNREADABLE.md"
     },
+    "LEASE_ON_ENDED_STREAM": {
+      "summary": "A session still leases streams an hour after their listings ended, so it is probably stuck instead of exiting with its market.",
+      "firstSteps": [
+        "The `session_id` label names the session; the `streams` label lists the ended streams.",
+        "Check the session's status and recent logs for why it hasn't exited.",
+        "Stop the session if it has nothing left to trade."
+      ],
+      "url": "https://github.com/gnome-trading-group/gnome-registry/blob/main/docs/runbooks/alerts/LEASE_ON_ENDED_STREAM.md"
+    },
     "LEDGER_FAILING": {
       "summary": "The session's ledger writes are failing; the OMS halts every strategy in it.",
       "firstSteps": [

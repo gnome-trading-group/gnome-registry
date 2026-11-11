@@ -106,6 +106,8 @@ export const ALERT_TYPES: Record<string, AlertType> = {
   STREAM_STALE: { severity: 'WARNING', debounce: 1 },
   COLLECTION_BUDGET: { severity: 'ERROR', debounce: 1 },
   LEASED_STREAM_UNPLACED: { severity: 'WARNING', debounce: 1 },
+  // The reconciler waits an hour after a leased stream's listing ends before raising it.
+  LEASE_ON_ENDED_STREAM: { severity: 'WARNING', debounce: 1 },
   // Raised after 15 minutes without the registry's sessions; until then leases simply aren't extended or released.
   LEASE_HOLDERS_UNREADABLE: { severity: 'WARNING', debounce: 1 },
   // The order gateway reconciler (gnome-orchestrator), per gateway. Each waits before raising (a start 6 minutes, a

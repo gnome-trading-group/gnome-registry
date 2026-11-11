@@ -9,11 +9,13 @@ first_steps:
 
 ## What it means
 
-The launcher leases every stream a paper session reads (its listings' book streams and its `streams`), and the reconciler places them on shards like any rule's streams, at the lease's priority (paper: research, on Spot). This stream has wanted a shard for 5 minutes (a cold start takes 3-5) and has none, for one of:
+The launcher leases every stream a session reads (its listings' book streams and its `streams`), and the reconciler places them on shards like any rule's streams, at the lease's priority (paper: research, on Spot; live: production). This stream has wanted a shard for 5 minutes (a cold start takes 3-5) and has none, for one of:
 
 - no shard in its partition had room and none could be started (capacity, or the partition is at its `max_shards`);
 - the source has no market-data account with connections left;
-- the stream can never be collected: its listing ended (inactive) or the registry doesn't know it. The alert's source and region are then the registry's, or `unknown` for a stream it doesn't know.
+- the stream can never be collected: the registry doesn't know it. The alert's source and region are then `unknown`.
+
+A stream whose listing ended (inactive) doesn't raise this alert: there is nothing left to collect. A session still holding one an hour later raises [LEASE_ON_ENDED_STREAM](LEASE_ON_ENDED_STREAM.md).
 
 ## Impact
 
@@ -23,21 +25,21 @@ A session waiting on the stream to go live doesn't start; it fails after `market
 
 - The reconciler's log for the tick: placement failures name the reason (no capacity, account budget, scale-out failing).
 - [COLLECTION_BUDGET](COLLECTION_BUDGET.md) keyed `COLLECTION_BUDGET:max_shards:...` firing for the stream's partition means the `max_shards` cap stopped a new shard.
-- The stream in the registry (`GET /streams?streamIds=<id>`): `active` false means its listing ended.
+- The stream in the registry (`GET /streams?streamIds=<id>`): missing means the registry doesn't know it.
 - The region's capacity provider and ASG (Spot capacity for research shards).
 - [COLLECTION_BUDGET](COLLECTION_BUDGET.md) firing for the same source means the accounts are full.
 
 ## Resolve
 
 - Capacity: let the ASG scale or raise its maximum; a Spot shortage clears on its own or by moving the partition to on-demand. A `max_shards` cap: raise it in the `market-data` Service Config.
-- An ended or unknown stream: nothing will place it; stop the session and relaunch without it.
+- An unknown stream: nothing will place it; stop the session and relaunch without it.
 - Account budget: see [COLLECTION_BUDGET](COLLECTION_BUDGET.md).
 - A session that failed to start can be launched again once the stream is placed.
 
 ## Escalate
 
-No: only paper sessions lease streams; live sessions still open their own feeds.
+Yes, if a live session is waiting on the stream: it trades on bad data until the stream is placed. Paper sessions: no.
 
 ## Related
 
-[COLLECTION_BUDGET](COLLECTION_BUDGET.md), [MARKET_DATA_BAD](MARKET_DATA_BAD.md), [STREAM_NOT_LIVE](STREAM_NOT_LIVE.md)
+[COLLECTION_BUDGET](COLLECTION_BUDGET.md), [LEASE_ON_ENDED_STREAM](LEASE_ON_ENDED_STREAM.md), [MARKET_DATA_BAD](MARKET_DATA_BAD.md), [STREAM_NOT_LIVE](STREAM_NOT_LIVE.md)
