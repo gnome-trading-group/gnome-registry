@@ -113,8 +113,13 @@ export const ALERT_TYPES: Record<string, AlertType> = {
   // The order gateway reconciler (gnome-orchestrator), per gateway. Each waits before raising (a start 6 minutes, a
   // DEGRADED gateway 2 ticks, a failing reconcile 3), so none debounces again.
   GATEWAY_START_STUCK: { severity: 'ERROR', debounce: 1 },
-  // Orders resting at the venue with nothing watching them page; a gateway gone with only sessions linked doesn't.
-  GATEWAY_DOWN: { severity: e => Number(e.labels?.workingOrders ?? '0') > 0 ? 'CRITICAL' : 'ERROR', debounce: 1 },
+  // Orders resting at the venue with nothing watching them page; a gateway gone with only sessions linked doesn't, and
+  // one whose planned stop ran to the end (its host shut down: every order cancelled, every session told) only warns.
+  GATEWAY_DOWN: {
+    severity: e => e.labels?.cleanStop === 'true' ? 'WARNING'
+      : Number(e.labels?.workingOrders ?? '0') > 0 ? 'CRITICAL' : 'ERROR',
+    debounce: 1,
+  },
   GATEWAY_DEGRADED: { severity: 'ERROR', debounce: 1 },
   GATEWAY_RECONCILE_FAILED: { severity: 'ERROR', debounce: 1 },
   // The order gateway's own. Kill switches already in force still hold while kills are stale, but one turned on now

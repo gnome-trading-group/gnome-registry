@@ -223,7 +223,7 @@
     "GATEWAY_DOWN": {
       "summary": "A live order gateway that was READY is gone (no running task, or no endpoint item) while sessions were linked or orders working.",
       "firstSteps": [
-        "Read the labels: `workingOrders` above 0 means orders may be resting at the venue with nothing watching them (this pages).",
+        "Read the labels: `workingOrders` above 0 means orders may be resting at the venue with nothing watching them (this pages). `cleanStop` true means its planned stop finished (every order cancelled, every session told) and only the gateway is missing (a warning).",
         "Check the ECS service `order-gateway-<key with : as ->` in `order-gateways` for the stopped task's reason.",
         "If it isn't back within a few minutes and orders were working, run the emergency cancel for each account (`docs/runbooks/procedures/stop-or-kill.md`)."
       ],

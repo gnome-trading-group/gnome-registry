@@ -24,6 +24,13 @@ describe('alert severity', () => {
     expect(severityOf({ ...base, type: 'STRATEGY_HALT', actor: 'slack:mason' }, 'live', 'prod')).toBe('INFO');
   });
 
+  it('pages a gone gateway only with orders working, and only warns for one whose planned stop finished', () => {
+    const down = (labels: Record<string, string>) => severityOf({ ...base, type: 'GATEWAY_DOWN', labels }, null, 'prod');
+    expect(down({ workingOrders: '2', linkedSessions: '1' })).toBe('CRITICAL');
+    expect(down({ workingOrders: '0', linkedSessions: '1' })).toBe('ERROR');
+    expect(down({ workingOrders: '0', linkedSessions: '1', cleanStop: 'true' })).toBe('WARNING');
+  });
+
   it('caps paper, dev and custom alerts below paging', () => {
     expect(severityOf(base, 'live', 'prod')).toBe('CRITICAL');
     expect(severityOf(base, 'paper', 'prod')).toBe('ERROR');

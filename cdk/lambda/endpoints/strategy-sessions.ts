@@ -91,6 +91,10 @@ export class StrategySessionHandler extends ResourceHandler {
       params?.strategyId && sql`strategy_id = ${params.strategyId}`,
       statuses.length > 0 && sql`status = ANY(${statuses}::text[])`,
       params?.instanceId && sql`instance_id = ${params.instanceId}`,
+      // A session by its slot: the order gateway names Polymarket US orders by session_seq, not session id.
+      params?.sessionSeq !== undefined && (/^\d{1,18}$/.test(params.sessionSeq)
+        ? sql`session_seq = ${params.sessionSeq}::bigint`
+        : raw('FALSE')),
       (params?.mode === 'paper' || params?.mode === 'live') && sql`mode = ${params.mode}`,
       // A session's listing rows outlive its lease, so these find sessions that traded a listing as well as those
       // trading it now.

@@ -39,6 +39,13 @@ describe('strategy session queries', () => {
     expect(handler.generateSelectQuery({ eventId: 'abc' }).text).toContain('WHERE FALSE');
   });
 
+  it('finds a session by its session_seq, and nothing for one that is not a number', () => {
+    const query = handler.generateSelectQuery({ sessionSeq: '540' });
+    expect(query.text).toContain('session_seq = $1::bigint');
+    expect(query.values).toEqual(['540']);
+    expect(handler.generateSelectQuery({ sessionSeq: "540' OR 1=1" }).text).toContain('WHERE FALSE');
+  });
+
   it('guards an update on the expected statuses', () => {
     const query = handler.generateModifyQuery(
       { session_id: 's1' },

@@ -2,7 +2,7 @@
 type: GATEWAY_DOWN
 summary: A live order gateway that was READY is gone (no running task, or no endpoint item) while sessions were linked or orders working.
 first_steps:
-  - Read the labels: `workingOrders` above 0 means orders may be resting at the venue with nothing watching them (this pages).
+  - Read the labels: `workingOrders` above 0 means orders may be resting at the venue with nothing watching them (this pages). `cleanStop` true means its planned stop finished (every order cancelled, every session told) and only the gateway is missing (a warning).
   - Check the ECS service `order-gateway-<key with : as ->` in `order-gateways` for the stopped task's reason.
   - If it isn't back within a few minutes and orders were working, run the emergency cancel for each account (`docs/runbooks/procedures/stop-or-kill.md`).
 ---
@@ -11,9 +11,13 @@ first_steps:
 
 The gateway reconciler saw this gateway READY with `linked_sessions` or `working_orders` above zero, and now its endpoint item has expired (no write for 60 s) or ECS runs no task for it, without the reconciler having asked it to stop. The process crashed, was killed (out of memory, host lost) or hangs.
 
+With `cleanStop` true, it was stopped from outside without the reconciler asking (its host shut down or was terminated, or the task was stopped by hand), and its planned stop ran to the end: it cancelled every order, told every session, and wrote that it held none before it went.
+
 ## Impact
 
-Its sessions can't send or cancel orders. Orders it held stay at the venue until it restarts: ECS starts a new task, which takes its open orders back from the ownership log on the host volume and cancels those of sessions that don't return in time. If the host itself is gone, that state went with it, and nothing cancels them.
+Its sessions can't send or cancel orders. Orders it held stay at the venue until it restarts: ECS starts a new task, which takes its open orders back from the ownership log on the host volume and cancels those of sessions that don't return in time. If it comes back on another host, that state is gone: sessions that return have their listed orders looked up and cancelled, and its startup sweep cancels any the venue still holds from before it started about 30 s after it starts (`GATEWAY_UNATTRIBUTED_ORDERS`). On Polymarket Intl the venue itself cancels the account's orders about 10 s after the gateway's heartbeats stop.
+
+After a clean stop nothing rests: sessions only wait for the replacement.
 
 ## Diagnose
 
