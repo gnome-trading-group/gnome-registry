@@ -3,7 +3,8 @@ import { Finding, finding, Mode, seconds } from './types';
 import {
   BOOK_RESYNCS_PER_5M, DISK_FREE_MIN_BYTES, DISK_FREE_MIN_SEGMENTS, HOST_CPU_BUSY_PERMILLE, HOST_CPU_STEAL_PERMILLE,
   HOST_MEM_AVAILABLE_MIN_PERCENT, HOT_PATH_STALL_MS, JOURNAL_BACKLOG_AGE_MS, JOURNAL_BACKLOG_SEGMENTS,
-  MARKET_DATA_BAD_AFTER_MS, MARKET_DATA_BAD_HELD_AFTER_MS, NO_HEARTBEAT_AFTER_MS, SILENT_AFTER_MS,
+  MARKET_DATA_BAD_AFTER_MS, MARKET_DATA_BAD_HELD_AFTER_MS, NO_HEARTBEAT_AFTER_MS, ORDER_GATEWAY_UNLINKED_AFTER_MS,
+  SILENT_AFTER_MS,
 } from './thresholds';
 
 // The heartbeat's health (see the orchestrator's SessionHeartbeatAgent). Older sessions omit the newer parts.
@@ -12,6 +13,8 @@ interface Health {
   // marketDataBadMs: how long the listing's book has been flagged bad data, its OMS refusing new orders; 0 trusted.
   listings?: { listingId: number; priceUnchangedMs: number; marketDataBadMs?: number }[];
   gateways?: { name: string; reconnecting: boolean; resyncsLast5m?: number }[];
+  // A live session's link to each venue's order gateway; workingOrders are its orders there not known to have ended.
+  orderGateways?: { key: string; linked: boolean; unlinkedMs: number; workingOrders: number }[];
   ledger?: { consecutiveFailures: number; fenced: boolean } | null;
   risk?: { stale: boolean; unguarded: boolean; unbuildablePolicies: number; droppedLatches: number } | null;
   // A reading the host can't give (no /proc off Linux, no CPU share before the second sample) is -1.
@@ -89,6 +92,12 @@ export async function sessions(client: PoolClient, now: Date): Promise<Finding[]
         on('warning', 'BOOK_RESYNCS', gateway.name, `${gateway.name} resynced its book ${resyncs} times in 5m`,
           { facts: { resyncsLast5m: resyncs } });
       }
+    }
+    for (const link of health.orderGateways ?? []) {
+      if (link.linked || link.workingOrders === 0 || link.unlinkedMs < ORDER_GATEWAY_UNLINKED_AFTER_MS) continue;
+      on('critical', 'ORDER_GATEWAY_UNLINKED', link.key,
+        `Unlinked from ${link.key} for ${seconds(link.unlinkedMs)} with ${link.workingOrders} order(s) working`,
+        { facts: { unlinkedMs: link.unlinkedMs, workingOrders: link.workingOrders } });
     }
     for (const listing of health.listings ?? []) {
       const badMs = listing.marketDataBadMs ?? 0;

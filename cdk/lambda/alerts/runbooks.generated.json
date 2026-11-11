@@ -263,6 +263,14 @@
       ],
       "url": "https://github.com/gnome-trading-group/gnome-registry/blob/main/docs/runbooks/alerts/GATEWAY_RECONCILE_FAILED.md"
     },
+    "GATEWAY_RESTARTED": {
+      "summary": "An order gateway's task was replaced without the reconciler asking, while sessions had orders working through it.",
+      "firstSteps": [
+        "Read the alert's stop reason for the old task.",
+        "Check that sessions linked to the new gateway (no ORDER_GATEWAY_UNLINKED) and its startup sweep logged."
+      ],
+      "url": "https://github.com/gnome-trading-group/gnome-registry/blob/main/docs/runbooks/alerts/GATEWAY_RESTARTED.md"
+    },
     "GATEWAY_START_STUCK": {
       "summary": "A live order gateway that sessions want hasn't become READY 6 minutes after the reconciler started it.",
       "firstSteps": [
@@ -271,6 +279,14 @@
         "Read the gateway log `/gnome/order-gateway/<region>`, stream `gateway/gateway/<task>`."
       ],
       "url": "https://github.com/gnome-trading-group/gnome-registry/blob/main/docs/runbooks/alerts/GATEWAY_START_STUCK.md"
+    },
+    "GATEWAY_SWEEP_FAILED": {
+      "summary": "A restarted order gateway can't list its account's open orders, so orders an earlier gateway left may still rest unowned.",
+      "firstSteps": [
+        "Read the gateway's log for \"can't list its open orders to sweep them\" and the venue's error.",
+        "Check the account's open orders on the venue directly, or with EmergencyCancel in dry-run mode."
+      ],
+      "url": "https://github.com/gnome-trading-group/gnome-registry/blob/main/docs/runbooks/alerts/GATEWAY_SWEEP_FAILED.md"
     },
     "GATEWAY_UNATTRIBUTED_ORDERS": {
       "summary": "An order gateway found orders at the venue that no session claimed, and cancelled them.",
@@ -429,6 +445,14 @@
         "Nothing to do if the market is quiet."
       ],
       "url": "https://github.com/gnome-trading-group/gnome-registry/blob/main/docs/runbooks/alerts/NO_PRICE.md"
+    },
+    "ORDER_GATEWAY_UNLINKED": {
+      "summary": "A live session has been unlinked from a venue's order gateway for over a minute while it has orders working there.",
+      "firstSteps": [
+        "Check the gateway's ECS service (cluster order-gateways) and its log group /gnome/order-gateway/<region>.",
+        "If the session can't link again soon, cancel the account's orders with EmergencyCancel, then stop the session."
+      ],
+      "url": "https://github.com/gnome-trading-group/gnome-registry/blob/main/docs/runbooks/alerts/ORDER_GATEWAY_UNLINKED.md"
     },
     "PIPELINE_FAILED": {
       "summary": "A data or research pipeline run failed.",

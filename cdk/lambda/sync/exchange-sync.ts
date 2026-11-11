@@ -1,8 +1,8 @@
 import { SecretsManagerClient, GetSecretValueCommand } from '@aws-sdk/client-secrets-manager';
 import {
   CurrencyResponse,
+  ExchangeFetch,
   ExchangeResponse,
-  ExchangeSecurityData,
   ListingResponse,
   ListingSpecResponse,
   SecurityResponse,
@@ -24,6 +24,7 @@ async function resolveSlackToken(): Promise<string | undefined> {
 }
 
 const PAGE_SIZE = 5000;
+const PATCH_BATCH_SIZE = 200;
 
 async function registryFetchAll<T>(path: string, apiKey: string): Promise<T[]> {
   const items: T[] = [];
@@ -46,10 +47,53 @@ async function batchExecute<T>(items: T[], batchSize: number, fn: (item: T) => P
   }
 }
 
+type ListingNote = { exchangeName: string; symbol: string };
+
+interface ListingPatch {
+  listingId: number;
+  active?: boolean;
+  volume24h?: number;
+}
+
+/**
+ * What to change on an exchange's existing listings: each one the venue returned takes the venue's active flag and
+ * volume, and an active one the venue no longer returns is retired, if the fetch covers it. Only listings of the
+ * security types the fetch returned are retired, so contracts the classifier keeps on the same exchange are left alone;
+ * an empty fetch retires nothing.
+ */
+export function listingPatches(
+  fetched: ExchangeFetch,
+  listings: ListingResponse[],
+  securityTypeByListing: Map<number, number>,
+): ListingPatch[] {
+  const byVenueId = new Map(fetched.securities.map(sec => [sec.exchangeSecurityId, sec]));
+  const syncedTypes = new Set(fetched.securities.map(sec => sec.securityType));
+  const patches: ListingPatch[] = [];
+  for (const listing of listings) {
+    const sec = byVenueId.get(listing.exchange_security_id);
+    if (sec) {
+      const patch: ListingPatch = { listingId: listing.listing_id };
+      if (listing.active !== sec.active) patch.active = sec.active;
+      if (sec.volume24h !== undefined && (listing.volume_24h === null || Number(listing.volume_24h) !== sec.volume24h)) {
+        patch.volume24h = sec.volume24h;
+      }
+      if (patch.active !== undefined || patch.volume24h !== undefined) patches.push(patch);
+      continue;
+    }
+    const type = securityTypeByListing.get(listing.listing_id);
+    if (listing.active && type !== undefined && syncedTypes.has(type) && fetched.covers(listing.exchange_security_id)) {
+      patches.push({ listingId: listing.listing_id, active: false });
+    }
+  }
+  return patches;
+}
+
 async function postSlackNotification(
   newSecuritySymbols: string[],
-  newListings: { exchangeName: string; symbol: string }[],
-  summary: { currencies: number; specCreated: number; specUpdated: number; errors: number },
+  newListings: ListingNote[],
+  deactivated: ListingNote[],
+  reactivated: ListingNote[],
+  summary: { currencies: number; specCreated: number; specUpdated: number; volumes: number; errors: number },
 ): Promise<void> {
   const channel = process.env.SLACK_CHANNEL;
   if (!channel) return;
@@ -68,22 +112,27 @@ async function postSlackNotification(
     });
   }
 
-  if (newListings.length > 0) {
+  const listingSection = (notes: ListingNote[], label: string) => {
+    if (notes.length === 0) return;
     const byExchange = new Map<string, string[]>();
-    for (const l of newListings) {
+    for (const l of notes) {
       (byExchange.get(l.exchangeName) ?? (byExchange.set(l.exchangeName, []), byExchange.get(l.exchangeName)!)).push(l.symbol);
     }
     const lines = [...byExchange.entries()].map(([ex, syms]) => `• *${ex}*: ${syms.map(s => `\`${s}\``).join(', ')}`).join('\n');
     blocks.push({
       type: 'section',
-      text: { type: 'mrkdwn', text: `*${newListings.length} new ${newListings.length === 1 ? 'listing' : 'listings'}*\n${lines}` },
+      text: { type: 'mrkdwn', text: `*${notes.length} ${label} ${notes.length === 1 ? 'listing' : 'listings'}*\n${lines}` },
     });
-  }
+  };
+  listingSection(newListings, 'new');
+  listingSection(deactivated, 'deactivated');
+  listingSection(reactivated, 'reactivated');
 
   const parts: string[] = [];
   if (summary.currencies > 0) parts.push(`${summary.currencies} currencies`);
   if (summary.specCreated > 0) parts.push(`${summary.specCreated} specs created`);
   if (summary.specUpdated > 0) parts.push(`${summary.specUpdated} specs updated`);
+  if (summary.volumes > 0) parts.push(`${summary.volumes} volumes`);
   if (summary.errors > 0) parts.push(`${summary.errors} errors`);
   if (parts.length > 0) {
     blocks.push({ type: 'context', elements: [{ type: 'mrkdwn', text: parts.join(' · ') }] });
@@ -114,16 +163,17 @@ export const handler = async () => {
     .filter(e => getAdapter(e.exchange_code) != null)
     .map(e => e.exchange_id);
 
-  const listings: ListingResponse[] = [];
+  const listings: (ListingResponse & { security_type: number })[] = [];
   const existingSpecs: ListingSpecResponse[] = [];
   for (const id of adapterExchangeIds) {
     const [l, s] = await Promise.all([
-      registryFetchAll<ListingResponse>(`/listings?exchangeId=${id}`, apiKey),
+      registryFetchAll<ListingResponse & { security_type: number }>(`/listings?exchangeId=${id}&denormalize=true`, apiKey),
       registryFetchAll<ListingSpecResponse>(`/listing-specs?exchangeId=${id}`, apiKey),
     ]);
     listings.push(...l);
     existingSpecs.push(...s);
   }
+  const securityTypeByListing = new Map<number, number>(listings.map(l => [l.listing_id, Number(l.security_type)]));
 
   const currencyBySymbol = new Map<string, CurrencyResponse>(currencies.map(c => [c.symbol, c]));
   const securityBySymbol = new Map<string, SecurityResponse>(securities.map(s => [s.symbol, s]));
@@ -133,7 +183,7 @@ export const handler = async () => {
   const specByListingId = new Map<number, ListingSpecResponse>(existingSpecs.map(s => [s.listing_id, s]));
   const exchangeNameById = new Map<number, string>(exchanges.map(e => [e.exchange_id, e.exchange_name]));
 
-  const byExchange: Array<{ exchangeId: number; data: ExchangeSecurityData[] }> = [];
+  const byExchange: Array<{ exchangeId: number; fetched: ExchangeFetch; data: ExchangeFetch['securities'] }> = [];
   for (const exchange of exchanges) {
     const adapter = getAdapter(exchange.exchange_code);
     if (!adapter) {
@@ -141,8 +191,8 @@ export const handler = async () => {
       continue;
     }
     try {
-      const data = await adapter.fetchSecurities();
-      byExchange.push({ exchangeId: exchange.exchange_id, data });
+      const fetched = await adapter.fetchSecurities();
+      byExchange.push({ exchangeId: exchange.exchange_id, fetched, data: fetched.securities });
     } catch (err) {
       console.error(`Failed to fetch securities from "${exchange.exchange_name}":`, err);
     }
@@ -153,10 +203,13 @@ export const handler = async () => {
   let listingCreated = 0;
   let specCreated = 0;
   let specUpdated = 0;
+  let volumesWritten = 0;
   let skipped = 0;
   let errors = 0;
   const newSecuritySymbols: string[] = [];
-  const newListings: { exchangeName: string; symbol: string }[] = [];
+  const newListings: ListingNote[] = [];
+  const deactivated: ListingNote[] = [];
+  const reactivated: ListingNote[] = [];
 
   // Phase 1: Currencies
   const allCurrencySymbols = new Set<string>();
@@ -180,7 +233,7 @@ export const handler = async () => {
   });
 
   // Phase 2: Securities (prediction market contracts are handled by the classifier Lambda)
-  const uniqueSecurities = new Map<string, ExchangeSecurityData>();
+  const uniqueSecurities = new Map<string, ExchangeFetch['securities'][number]>();
   for (const { data } of byExchange) {
     for (const sec of data) {
       if (!uniqueSecurities.has(sec.securitySymbol)) {
@@ -233,6 +286,8 @@ export const handler = async () => {
           exchangeSecurityId: sec.exchangeSecurityId,
           exchangeSecuritySymbol: sec.exchangeSecuritySymbol,
           feeGroup: sec.feeGroup ?? null,
+          active: sec.active,
+          volume24h: sec.volume24h ?? null,
         });
         listingByKey.set(key, created);
         newListings.push({ exchangeName: exchangeNameById.get(exchangeId) ?? String(exchangeId), symbol: sec.exchangeSecuritySymbol });
@@ -277,13 +332,39 @@ export const handler = async () => {
     });
   }
 
+  // Phase 5: Existing listings' active flag and 24h volume (new listings were created with both)
+  for (const { exchangeId, fetched } of byExchange) {
+    const existing = listings.filter(l => l.exchange_id === exchangeId);
+    const patches = listingPatches(fetched, existing, securityTypeByListing);
+    const byId = new Map(existing.map(l => [l.listing_id, l]));
+    const exchangeName = exchangeNameById.get(exchangeId) ?? String(exchangeId);
+    for (let i = 0; i < patches.length; i += PATCH_BATCH_SIZE) {
+      const batch = patches.slice(i, i + PATCH_BATCH_SIZE);
+      try {
+        await registryFetch('/listings', 'PATCH', apiKey, batch);
+      } catch (err) {
+        console.error(`Failed to update ${batch.length} listings of exchange ${exchangeName}:`, err);
+        errors++;
+        continue;
+      }
+      for (const patch of batch) {
+        const symbol = byId.get(patch.listingId)?.exchange_security_symbol ?? String(patch.listingId);
+        if (patch.active === false) deactivated.push({ exchangeName, symbol });
+        if (patch.active === true) reactivated.push({ exchangeName, symbol });
+        if (patch.volume24h !== undefined) volumesWritten++;
+      }
+    }
+  }
+
   console.log(
     `Exchange sync complete — currencies=${currencyCreated} securities=${securityCreated} ` +
     `listings=${listingCreated} specs.created=${specCreated} specs.updated=${specUpdated} ` +
+    `volumes=${volumesWritten} deactivated=${deactivated.length} reactivated=${reactivated.length} ` +
     `skipped=${skipped} errors=${errors}`
   );
 
-  if (newSecuritySymbols.length > 0 || newListings.length > 0) {
-    await postSlackNotification(newSecuritySymbols, newListings, { currencies: currencyCreated, specCreated, specUpdated, errors });
+  if (newSecuritySymbols.length > 0 || newListings.length > 0 || deactivated.length > 0 || reactivated.length > 0) {
+    await postSlackNotification(newSecuritySymbols, newListings, deactivated, reactivated,
+      { currencies: currencyCreated, specCreated, specUpdated, volumes: volumesWritten, errors });
   }
 };

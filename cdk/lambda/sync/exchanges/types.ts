@@ -47,10 +47,21 @@ export interface ExchangeSecurityData {
   contractMultiplier: number;
   // The venue's group fee schedules target (sm.listing.fee_group), when it prices this kind of market apart.
   feeGroup?: string;
+  // Whether the venue trades it now; a delisted market is still listed by some venues (sm.listing.active).
+  active: boolean;
+  // About USD traded over the last 24 hours (sm.listing.volume_24h), when the venue reports it.
+  volume24h?: number;
+}
+
+export interface ExchangeFetch {
+  securities: ExchangeSecurityData[];
+  // Whether this fetch would have returned the listing with this venue id had the venue still had it. A part of the
+  // venue that failed to load covers nothing, so its listings aren't taken as gone.
+  covers(exchangeSecurityId: string): boolean;
 }
 
 export interface ExchangeAdapter {
-  fetchSecurities(): Promise<ExchangeSecurityData[]>;
+  fetchSecurities(): Promise<ExchangeFetch>;
 }
 
 // Registry API response types
@@ -78,6 +89,8 @@ export interface ListingResponse {
   security_id: number;
   exchange_security_id: string;
   exchange_security_symbol: string;
+  active: boolean;
+  volume_24h: number | null;
 }
 
 export interface ListingSpecResponse {

@@ -19,7 +19,9 @@ import group.gnometrading.sm.EventContract;
 import group.gnometrading.sm.EventQuery;
 import group.gnometrading.sm.Exchange;
 import group.gnometrading.sm.Listing;
+import group.gnometrading.sm.ListingQuery;
 import group.gnometrading.sm.ListingSpec;
+import group.gnometrading.sm.ListingVolume;
 import group.gnometrading.sm.PropositionFilter;
 import group.gnometrading.sm.Security;
 import group.gnometrading.sm.SecurityType;
@@ -386,6 +388,44 @@ public final class SecurityMaster {
                 path.append(i == from ? "" : ",").append(eventIds[i]);
             }
             appendPropositions(path, propositions);
+            streams.addAll(List.of(fetch(new ViewString(path.toString()), Stream[].class)));
+        }
+        return streams;
+    }
+
+    /**
+     * Active listings matching {@code query}, largest 24-hour volume first. Not cached: collection rules select listings
+     * by a volume the exchange sync keeps updating.
+     */
+    public List<ListingVolume> getListingVolumes(final ListingQuery query) {
+        final StringBuilder path = new StringBuilder(LISTING_ENDPOINT).append("active=true");
+        appendList(path, "exchangeIds", query.exchangeIds());
+        if (query.securityTypes() != null && !query.securityTypes().isEmpty()) {
+            appendList(
+                    path,
+                    "securityTypes",
+                    query.securityTypes().stream().map(SecurityType::code).toList());
+        }
+        if (query.minVolume24h() > 0) {
+            path.append("&minVolume24h=").append(query.minVolume24h());
+        }
+        path.append("&sortBy=volume_24h&sortOrder=desc&limit=").append(query.limit());
+        return List.of(fetch(new ViewString(path.toString()), ListingVolume[].class));
+    }
+
+    /**
+     * The book streams of these listings, as the registry has them now, in requests of {@link #STREAMS_PER_REQUEST}
+     * listings; listings with no stream are left out. Not cached, as {@link #getStreams(int[])}.
+     */
+    public List<Stream> getStreamsForListings(final int[] listingIds) {
+        final List<Stream> streams = new ArrayList<>(listingIds.length);
+        for (int from = 0; from < listingIds.length; from += STREAMS_PER_REQUEST) {
+            final StringBuilder path = new StringBuilder(STREAM_ENDPOINT).append("listingIds=");
+            final int to = Math.min(listingIds.length, from + STREAMS_PER_REQUEST);
+            for (int i = from; i < to; i++) {
+                path.append(i == from ? "" : ",").append(listingIds[i]);
+            }
+            path.append("&limit=").append(STREAMS_PER_REQUEST);
             streams.addAll(List.of(fetch(new ViewString(path.toString()), Stream[].class)));
         }
         return streams;

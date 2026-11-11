@@ -92,6 +92,22 @@ describeDb('monitoring rules against Postgres', () => {
     expect(findings.find(f => f.kind === 'MARKET_DATA_BAD_HELD')?.listingId).toBe(7);
   });
 
+  it('reports a live session unlinked from its order gateway for a minute with orders working', async () => {
+    await session('s1', { mode: 'live', health: { ...HEALTHY, orderGateways: [
+      { key: 'live:kalshi:main', linked: false, unlinkedMs: 90_000, workingOrders: 2 },
+      { key: 'live:polymarket_us:main', linked: false, unlinkedMs: 90_000, workingOrders: 0 },
+    ] } });
+    await session('s2', { mode: 'live', health: { ...HEALTHY, orderGateways: [
+      { key: 'live:kalshi:main', linked: false, unlinkedMs: 20_000, workingOrders: 2 },
+    ] } });
+
+    const findings = (await runRules(client, now)).filter(f => f.kind === 'ORDER_GATEWAY_UNLINKED');
+
+    expect(findings.map(f => [f.key, f.mode, f.facts])).toEqual([
+      ['ORDER_GATEWAY_UNLINKED:s1:live:kalshi:main', 'live', { unlinkedMs: 90_000, workingOrders: 2 }],
+    ]);
+  });
+
   const GB = 1024 ** 3;
   const host = (f: Record<string, number> = {}) => ({
     cpuBusyPermille: 400, cpuStealPermille: 0, memAvailableBytes: GB, memTotalBytes: 2 * GB,
@@ -196,7 +212,7 @@ describeDb('monitoring rules against Postgres', () => {
     const kinds = ['GLOBAL_HALT', 'EXCHANGE_HALT', 'ACCOUNT_HALT', 'STRATEGY_HALT', 'STRATEGY_EXCHANGE_HALT', 'LISTING_HALT',
       'SESSION_HALT', 'SILENT', 'LEDGER_FENCED', 'LEDGER_FAILING', 'RISK_STALE', 'RISK_UNGUARDED', 'POLICY_UNBUILDABLE',
       'LATCHES_DROPPED', 'AGENT_EXITED', 'AGENT_STALLED', 'RECONNECTING', 'BOOK_RESYNCS', 'MARKET_DATA_BAD',
-      'MARKET_DATA_BAD_HELD', 'FAILED', 'START_STUCK', 'STOP_STUCK', 'NEEDS_REVIEW', 'NO_PRICE', 'SETTLEMENT_PENDING', 'SETTLEMENT_BLOCKED',
+      'MARKET_DATA_BAD_HELD', 'ORDER_GATEWAY_UNLINKED', 'FAILED', 'START_STUCK', 'STOP_STUCK', 'NEEDS_REVIEW', 'NO_PRICE', 'SETTLEMENT_PENDING', 'SETTLEMENT_BLOCKED',
       'RECON_MISMATCH', 'RECON_STALE', 'BALANCE_LOW', 'SHARD_BALANCE_LOW', 'SHARD_FUNDS_REJECTED', 'SHARD_UNTARGETED',
       'REBALANCE_DRIFT', 'ALLOCATION_EXCEEDS_BALANCE',
       'DRAINING_EXPOSURE', 'ACCOUNT_DUE_FOR_ROTATION', 'ACCOUNT_READY_TO_RETIRE', 'FEE_MISMATCH',

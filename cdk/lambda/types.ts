@@ -72,6 +72,8 @@ interface IListingBase {
   feeEvent?: string | null;
   // The venue partition whose cash backs the listing's orders (a Kalshi exchange shard).
   venuePartition?: string | null;
+  // About USD traded over the last 24 hours, as the exchange sync last read it.
+  volume24h?: number | null;
 }
 export interface ICreateListing extends IListingBase {}
 export interface IListing extends IListingBase {

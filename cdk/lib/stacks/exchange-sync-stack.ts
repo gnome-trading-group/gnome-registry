@@ -48,7 +48,7 @@ export class ExchangeSyncStack extends cdk.Stack {
     slackBotTokenSecret.grantRead(this.syncLambda);
 
     const rule = new events.Rule(this, 'ExchangeSyncRule', {
-      schedule: events.Schedule.rate(cdk.Duration.hours(1)),
+      schedule: events.Schedule.rate(cdk.Duration.minutes(15)),
     });
     rule.addTarget(new targets.LambdaFunction(this.syncLambda));
   }

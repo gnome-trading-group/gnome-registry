@@ -1,4 +1,4 @@
-import { AssetClass, ContractType, ExchangeAdapter, ExchangeSecurityData, SecurityType } from './types';
+import { AssetClass, ContractType, ExchangeAdapter, ExchangeFetch, ExchangeSecurityData, SecurityType } from './types';
 
 const LIGHTER_MARKETS_URL = 'https://mainnet.zklighter.elliot.ai/api/v1/orderBookDetails';
 const LIGHTER_QUOTE_CURRENCY = 'USDC';
@@ -10,6 +10,8 @@ interface LighterMarket {
   price_decimals: number;
   size_decimals: number;
   min_quote_amount: string;
+  status?: string;
+  daily_quote_token_volume?: number;
 }
 
 interface LighterMarketsResponse {
@@ -18,8 +20,11 @@ interface LighterMarketsResponse {
 }
 
 export class LighterAdapter implements ExchangeAdapter {
-  async fetchSecurities(): Promise<ExchangeSecurityData[]> {
+  async fetchSecurities(): Promise<ExchangeFetch> {
     const res = await fetch(LIGHTER_MARKETS_URL);
+    if (!res.ok) {
+      throw new Error(`Lighter orderBookDetails failed: ${res.status}`);
+    }
     const data = (await res.json()) as LighterMarketsResponse;
 
     const result: ExchangeSecurityData[] = [];
@@ -61,6 +66,8 @@ export class LighterAdapter implements ExchangeAdapter {
           lotSize,
           minNotional,
           contractMultiplier: CONTRACT_MULTIPLIER,
+          active: market.status === 'active',
+          volume24h: Number.isFinite(market.daily_quote_token_volume) ? market.daily_quote_token_volume : undefined,
         });
       }
     };
@@ -68,6 +75,7 @@ export class LighterAdapter implements ExchangeAdapter {
     processMarkets(data.order_book_details, false);
     processMarkets(data.spot_order_book_details, true);
 
-    return result;
+    // One call returns every market, so a market missing from it is gone.
+    return { securities: result, covers: () => true };
   }
 }

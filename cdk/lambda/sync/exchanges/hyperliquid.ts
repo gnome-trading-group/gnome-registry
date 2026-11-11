@@ -1,4 +1,4 @@
-import { AssetClass, ContractType, ExchangeAdapter, ExchangeSecurityData, SecurityType } from './types';
+import { AssetClass, ContractType, ExchangeAdapter, ExchangeFetch, ExchangeSecurityData, SecurityType } from './types';
 
 const HYPERLIQUID_INFO_URL = 'https://api.hyperliquid.xyz/info';
 const PERPS_MAX_DECIMALS = 6;
@@ -9,9 +9,14 @@ const PERPS_MIN_NOTIONAL = 10;
 interface HyperliquidAsset {
   name: string;
   szDecimals: number;
+  isDelisted?: boolean;
 }
 
-interface HyperliquidMetaAndAssetCtxs {
+interface HyperliquidAssetCtx {
+  dayNtlVlm?: string;
+}
+
+interface HyperliquidMeta {
   collateralToken: number;
   universe: HyperliquidAsset[];
 }
@@ -26,9 +31,14 @@ interface HyperliquidSpotPair {
   tokens: number[]; // [baseTokenIndex, quoteTokenIndex]
 }
 
-interface HyperliquidSpotMetaResponse {
+interface HyperliquidSpotMeta {
   tokens: HyperliquidSpotToken[];
   universe: HyperliquidSpotPair[];
+}
+
+interface HyperliquidSpotCtx {
+  coin: string;
+  dayNtlVlm?: string;
 }
 
 interface PerpDex {
@@ -41,6 +51,9 @@ async function infoPost<T>(body: unknown): Promise<T> {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
   });
+  if (!res.ok) {
+    throw new Error(`Hyperliquid info ${JSON.stringify(body)} failed: ${res.status}`);
+  }
   return res.json() as Promise<T>;
 }
 
@@ -51,19 +64,30 @@ async function fetchPerpDexs(): Promise<string[]> {
     .map(d => d.name);
 }
 
-async function fetchMetaAndAssetCtxs(dex?: string): Promise<HyperliquidMetaAndAssetCtxs> {
+async function fetchMetaAndAssetCtxs(dex?: string): Promise<[HyperliquidMeta, HyperliquidAssetCtx[]]> {
   const body: Record<string, string> = { type: 'metaAndAssetCtxs' };
   if (dex) body.dex = dex;
-  // Response is a tuple [metadata, assetContextsArray]; we only need metadata
-  const [metadata] = await infoPost<[HyperliquidMetaAndAssetCtxs, unknown[]]>(body);
-  return metadata;
+  return infoPost<[HyperliquidMeta, HyperliquidAssetCtx[]]>(body);
+}
+
+function dayVolume(value: string | undefined): number | undefined {
+  if (value === undefined) return undefined;
+  const volume = Number(value);
+  return Number.isFinite(volume) ? volume : undefined;
+}
+
+/** The sub-DEX a perp belongs to ("xyz" for "xyz:TSLA"), or null for the main exchange's perps and spot pairs. */
+export function dexOf(exchangeSecurityId: string): string | null {
+  const colonIdx = exchangeSecurityId.indexOf(':');
+  return colonIdx >= 0 ? exchangeSecurityId.slice(0, colonIdx) : null;
 }
 
 function perpFromAsset(
   asset: HyperliquidAsset,
-  exchangeSecuritySymbol: string,
+  ctx: HyperliquidAssetCtx | undefined,
   settleCurrency: string,
 ): ExchangeSecurityData {
+  const exchangeSecuritySymbol = asset.name;
   const priceDecimals = PERPS_MAX_DECIMALS - asset.szDecimals;
   const tickSize = priceDecimals > 9
     ? (console.warn(`Hyperliquid: "${exchangeSecuritySymbol}" priceDecimals=${priceDecimals} exceeds PRICE_SCALING_FACTOR (1e9) — storing tickSize=0`), 0)
@@ -92,14 +116,16 @@ function perpFromAsset(
     lotSize,
     minNotional: PERPS_MIN_NOTIONAL * 1e9,
     contractMultiplier: CONTRACT_MULTIPLIER,
+    active: asset.isDelisted !== true,
+    volume24h: dayVolume(ctx?.dayNtlVlm),
   };
 }
 
 export class HyperliquidAdapter implements ExchangeAdapter {
-  async fetchSecurities(): Promise<ExchangeSecurityData[]> {
-    const [mainMeta, spot, dexNames] = await Promise.all([
+  async fetchSecurities(): Promise<ExchangeFetch> {
+    const [[mainMeta, mainCtxs], [spot, spotCtxs], dexNames] = await Promise.all([
       fetchMetaAndAssetCtxs(),
-      infoPost<HyperliquidSpotMetaResponse>({ type: 'spotMeta' }),
+      infoPost<[HyperliquidSpotMeta, HyperliquidSpotCtx[]]>({ type: 'spotMetaAndAssetCtxs' }),
       fetchPerpDexs(),
     ]);
 
@@ -108,13 +134,13 @@ export class HyperliquidAdapter implements ExchangeAdapter {
 
     const result: ExchangeSecurityData[] = [];
 
-    // Main-exchange perpetuals
+    // A perp's context sits at its asset's index in the universe.
     const mainSettle = resolveSettle(mainMeta.collateralToken);
-    for (const asset of mainMeta.universe) {
-      result.push(perpFromAsset(asset, asset.name, mainSettle));
-    }
+    mainMeta.universe.forEach((asset, i) => result.push(perpFromAsset(asset, mainCtxs[i], mainSettle)));
 
-    // Spot pairs
+    // A spot pair's context names its pair; there are more contexts than pairs.
+    const spotVolumeByPair = new Map<string, number | undefined>(
+      spotCtxs.map(ctx => [ctx.coin, dayVolume(ctx.dayNtlVlm)]));
     for (const pair of spot.universe) {
       const baseToken = spot.tokens[pair.tokens[0]];
       const quoteToken = spot.tokens[pair.tokens[1]];
@@ -145,23 +171,32 @@ export class HyperliquidAdapter implements ExchangeAdapter {
         minNotional: 0,
         contractMultiplier: CONTRACT_MULTIPLIER,
         feeGroup: 'spot',
+        active: true,
+        volume24h: spotVolumeByPair.get(pair.name),
       });
     }
 
-    // Sub-DEX perpetuals
+    const failedDexes = new Set<string>();
     const dexResults = await Promise.allSettled(dexNames.map(name => fetchMetaAndAssetCtxs(name)));
     for (let i = 0; i < dexResults.length; i++) {
-      const result_i = dexResults[i];
-      if (result_i.status === 'rejected') {
-        console.warn(`Hyperliquid: failed to fetch meta for DEX "${dexNames[i]}":`, result_i.reason);
+      const dexResult = dexResults[i];
+      if (dexResult.status === 'rejected') {
+        console.warn(`Hyperliquid: failed to fetch meta for DEX "${dexNames[i]}":`, dexResult.reason);
+        failedDexes.add(dexNames[i]);
         continue;
       }
-      const dexSettle = resolveSettle(result_i.value.collateralToken);
-      for (const asset of result_i.value.universe) {
-        result.push(perpFromAsset(asset, asset.name, dexSettle));
-      }
+      const [meta, ctxs] = dexResult.value;
+      const dexSettle = resolveSettle(meta.collateralToken);
+      meta.universe.forEach((asset, j) => result.push(perpFromAsset(asset, ctxs[j], dexSettle)));
     }
 
-    return result;
+    return {
+      securities: result,
+      // A DEX no longer in perpDexs is covered: its perps are gone with it.
+      covers: (exchangeSecurityId) => {
+        const dex = dexOf(exchangeSecurityId);
+        return dex === null || !failedDexes.has(dex);
+      },
+    };
   }
 }

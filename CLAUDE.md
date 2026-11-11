@@ -130,7 +130,11 @@ synth step, so run `npm test` yourself before handing off.
     URL ApiStack publishes in SSM `/gnome/registry/api-url` (us-east-1), for any service outside this repo.
   - DatabaseStack: RDS Postgres 16 (`gnome` db) in isolated subnets, plus the migration Lambda and a query Lambda
     (`{"query": "..."}`, returns rows) for read-only inspection.
-  - ExchangeSyncStack: hourly security-master sync (Hyperliquid, Lighter adapters); in prod it reports to `#gnome-security-master`.
+  - ExchangeSyncStack: security-master sync every 15 minutes (Hyperliquid, Lighter adapters); in prod it reports to `#gnome-security-master`.
+    Besides creating securities, listings and specs, it writes each listing's `active` flag (the venue's delisted or
+    status flag) and `volume_24h` (the venue's 24h notional, which market-data `listing_filter` rules rank by), and
+    retires an active listing the venue stopped returning, only of a security type the fetch returned and only where
+    the fetch covered it (a Hyperliquid sub-DEX that failed to load covers nothing).
   - VenuePollerStack: every 5 min, reads each venue account's balances/positions and posts treasury snapshots for
     reconciliation. On Kalshi it reads cash per exchange shard and keeps the account's shard rebalancing targets
     (`treasury.account_config.partition_targets`) set on Kalshi, with the read key (scopes `read` + `write::transfer`,

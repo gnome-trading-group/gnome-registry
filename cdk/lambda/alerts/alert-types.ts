@@ -50,6 +50,8 @@ export const ALERT_TYPES: Record<string, AlertType> = {
   // The OMS refuses new orders on the listing; with a position held, nobody can trade out of it.
   MARKET_DATA_BAD: { severity: 'WARNING', debounce: 1 },
   MARKET_DATA_BAD_HELD: { severity: 'ERROR', debounce: 1 },
+  // Its orders work at the venue and nothing can cancel them through the session until it links again.
+  ORDER_GATEWAY_UNLINKED: { severity: 'CRITICAL', debounce: 1 },
   // Sustained for ten minutes: a busy minute is normal, a busy ten is an undersized instance or a runaway loop.
   HOST_CPU_HIGH: { severity: 'WARNING', debounce: 10 },
   // Running out kills the process, which pages as FAILED; this is the warning before it.
@@ -119,6 +121,10 @@ export const ALERT_TYPES: Record<string, AlertType> = {
   GATEWAY_FATAL: { severity: 'CRITICAL', debounce: 1 },
   GATEWAY_ORDERS_UNANSWERED: { severity: 'ERROR', debounce: 1 },
   GATEWAY_UNATTRIBUTED_ORDERS: { severity: 'ERROR', debounce: 1 },
+  // Orders an earlier gateway left may still rest, owned by nobody.
+  GATEWAY_SWEEP_FAILED: { severity: 'CRITICAL', debounce: 1 },
+  // From the gateway reconciler: a gateway's task was replaced without being asked to while orders worked.
+  GATEWAY_RESTARTED: { severity: 'ERROR', debounce: 1 },
   GATEWAY_VENUE_RATE_LIMITED: { severity: 'WARNING', debounce: 1 },
   PIPELINE_FAILED: { severity: e => e.labels?.trigger === 'scheduled' ? 'ERROR' : 'INFO', debounce: 1 },
   CUSTOM: { severity: e => e.severity ?? 'WARNING', debounce: 1 },

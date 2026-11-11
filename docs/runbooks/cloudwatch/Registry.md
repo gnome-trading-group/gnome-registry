@@ -15,7 +15,7 @@ Alarms named `Registry-…`:
 |---|---|
 | RegistryApi 5xx | the API's server errors rise |
 | RegistryDatabase storage / CPU | the database is filling up or busy |
-| ExchangeSync fault | the hourly security-master sync failed |
+| ExchangeSync fault | the security-master sync (every 15 minutes) failed |
 | SettlementSweeper fault | the 5-minute sweeper failed to book a settled position (it fails on purpose when a booking fails) |
 | VenuePoller fault | the 5-minute balance poller crashed (a failed account read is an ERROR snapshot instead, seen as RECON_STALE) |
 | StrategySessionMonitor fault | session status updates from EC2 events failed |

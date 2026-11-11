@@ -9,7 +9,9 @@ import group.gnometrading.sm.Event;
 import group.gnometrading.sm.EventQuery;
 import group.gnometrading.sm.Exchange;
 import group.gnometrading.sm.Listing;
+import group.gnometrading.sm.ListingQuery;
 import group.gnometrading.sm.ListingSpec;
+import group.gnometrading.sm.ListingVolume;
 import group.gnometrading.sm.PropositionFilter;
 import group.gnometrading.sm.Security;
 import group.gnometrading.sm.SecurityType;
@@ -552,6 +554,65 @@ class SecurityMasterTest {
                                 new int[] {7, 8},
                                 new PropositionFilter(java.util.List.of("WINNER"), java.util.List.of("match")))
                         .size());
+    }
+
+    @Test
+    void testListingVolumesAskForActiveListingsByVolumeWithEveryFilter() {
+        when(registryConnection.get(new ViewString("/api/listings?active=true&exchangeIds=3,4&securityTypes=1,0"
+                        + "&minVolume24h=500000.0&sortBy=volume_24h&sortOrder=desc&limit=450")))
+                .thenReturn(ByteBuffer.wrap(
+                        """
+                        [{"listing_id": 10, "exchange_id": 3, "volume_24h": 2700000000.5, "exchange_security_id": "BTC"},
+                         {"listing_id": 13, "exchange_id": 4, "volume_24h": null}]"""
+                                .getBytes()));
+
+        final java.util.List<ListingVolume> listings = securityMaster.getListingVolumes(new ListingQuery(
+                java.util.List.of(3, 4), java.util.List.of(SecurityType.PERPETUAL, SecurityType.SPOT), 500_000, 450));
+
+        assertEquals(
+                java.util.List.of(new ListingVolume(10, 3, 2700000000.5), new ListingVolume(13, 4, 0.0)), listings);
+    }
+
+    @Test
+    void testAnUnfilteredListingQueryAsksOnlyForActiveListingsByVolume() {
+        when(registryConnection.get(
+                        new ViewString("/api/listings?active=true&sortBy=volume_24h&sortOrder=desc&limit=10")))
+                .thenReturn(ByteBuffer.wrap("[]".getBytes()));
+        assertEquals(
+                0,
+                securityMaster
+                        .getListingVolumes(new ListingQuery(null, java.util.List.of(), 0, 10))
+                        .size());
+    }
+
+    @Test
+    void testStreamsForListingsAreFetchedTwoHundredListingsARequest() {
+        when(registryConnection.get(any())).thenAnswer(invocation -> {
+            final String path = invocation.getArgument(0).toString();
+            final String[] listings = path.substring(path.indexOf("listingIds=") + 11, path.indexOf("&limit="))
+                    .split(",");
+            final StringBuilder json = new StringBuilder("[");
+            for (String listing : listings) {
+                json.append(json.length() > 1 ? "," : "")
+                        .append("{\"stream_id\":")
+                        .append(Integer.parseInt(listing) + 1000)
+                        .append(",\"subject_kind\":\"LISTING\",\"listing_id\":")
+                        .append(listing)
+                        .append(",\"active\":true}");
+            }
+            return ByteBuffer.wrap(json.append("]").toString().getBytes());
+        });
+        final int[] ids = new int[250];
+        for (int i = 0; i < ids.length; i++) {
+            ids[i] = i + 1;
+        }
+
+        final java.util.List<group.gnometrading.md.Stream> streams = securityMaster.getStreamsForListings(ids);
+
+        assertEquals(250, streams.size());
+        assertEquals(1001, streams.get(0).streamId());
+        assertEquals(250, streams.get(249).listingId());
+        verify(registryConnection, times(2)).get(any());
     }
 
     @Test

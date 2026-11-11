@@ -10,13 +10,15 @@ first_steps:
 
 After a restart, or when a session new to the gateway said hello, the gateway reconciled the orders it holds with the ones the session lists, and found orders resting at the venue that the session doesn't know (`GATEWAY_UNATTRIBUTED_EVENTS` in its log). It cancelled them.
 
+It also fires from a restarted gateway's startup sweep: an order resting on the account, placed before the gateway started, that it has no record of and no session claimed within its window (the earlier gateway's state was lost, e.g. it came back on another host). The alert then names the account, the order and its market.
+
 ## Impact
 
 Any fills those orders had before the cancel may be missing from the session's ledger, so its position can be wrong until reconciliation (Treasury) catches it.
 
 ## Diagnose
 
-- The gateway log line names the session and the order's counter.
+- The gateway log line names the session and the order's counter, or for the sweep the account, the order's id and its market.
 - The venue's fills on the account around then, against `ledger.fill`.
 
 ## Resolve
