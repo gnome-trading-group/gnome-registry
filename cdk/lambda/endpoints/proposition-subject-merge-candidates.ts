@@ -14,7 +14,7 @@ import { sql, where } from './sql';
 // merges or dismisses each pair from the controller. Re-sending a pair refreshes it while it is pending and leaves a
 // decided one alone, so the classifier can send everything it held each pass.
 
-const HOLDS = ['PRICE', 'COLLISION'];
+const HOLDS = ['PRICE', 'COLLISION', 'START'];
 const STATUSES = ['PENDING', 'MERGED', 'DISMISSED'];
 const DECISIONS = ['MERGED', 'DISMISSED'];
 const DEFAULT_LIMIT = 500;

@@ -267,6 +267,13 @@ describeDb('propositions, subjects and derived relationships, against Postgres',
         .rejects.toMatchObject({ statusCode: 409 });
     });
 
+    it('takes a pair held for its start times, and refuses a hold it does not know', async () => {
+      const [a, b] = [await subject('a'), await subject('b')];
+      const [row] = await upsertCandidates(client, [{ ...held(b, a), hold: 'START', details: { hoursApart: 12 } }]);
+      expect(row).toMatchObject({ hold: 'START', status: 'PENDING' });
+      await expect(upsertCandidates(client, [{ ...held(b, a), hold: 'TIMING' }])).rejects.toThrow('hold_check');
+    });
+
     it('leaves the pair pending when the merge is refused', async () => {
       const [a, b] = [await subject('a'), await subject('b')];
       await mergeSubjects(client, a, b, 'me@example.com');
