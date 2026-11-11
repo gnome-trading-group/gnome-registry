@@ -60,11 +60,15 @@ const LEASE_RELEASE_TIMEOUT_MS = 2000;
 const STANDARD = 'standard';
 const LOW_LATENCY = 'low_latency';
 
-// vCPUs per supported size. Each low-latency size has an AMI whose isolcpus range matches it; c7i.large and
+// vCPUs per supported size. Each low-latency size has an AMI whose isolcpus range matches it; sizes up to
 // c7i.xlarge have too few cores to isolate any, so they only run the standard profile. t3.small is burstable (2 GB):
-// for paper sessions that mostly wait, at about a quarter of c7i.large's price.
+// for paper sessions that mostly wait, at about a quarter of c7i.large's price, but a busy session runs it out of
+// credits and its two vCPUs share one core. c7a.medium is one whole core (no SMT, 2 GB) at about what a busy t3.small
+// costs with its surplus credits; c6a.large is two unthrottled vCPUs (4 GB) for a little less than c7i.large.
 export const INSTANCE_VCPUS: Record<string, number> = {
   't3.small': 2,
+  'c7a.medium': 1,
+  'c6a.large': 2,
   'c7i.large': 2,
   'c7i.xlarge': 4,
   'c7i.4xlarge': 16,

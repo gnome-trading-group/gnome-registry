@@ -398,6 +398,14 @@ describe('POST /strategy-sessions/launch', () => {
     expect(runInstancesInput().InstanceType).toBe('c7i.large');
   });
 
+  it.each(['c7a.medium', 'c6a.large'])('runs %s on the standard AMI', async (instanceType) => {
+    await launcher.handler(apiEvent('/strategy-sessions/launch',
+      launchBody({ instanceType }, { 'latency.profile': 'standard' })));
+
+    expect(runInstancesInput().ImageId).toBe('ami-std');
+    expect(runInstancesInput().InstanceType).toBe(instanceType);
+  });
+
   it('runs t3.small on the standard AMI', async () => {
     await launcher.handler(apiEvent('/strategy-sessions/launch',
       launchBody({ instanceType: 't3.small' }, { 'latency.profile': 'standard' })));
@@ -416,6 +424,7 @@ describe('POST /strategy-sessions/launch', () => {
     [{ instanceType: 'c7i.xlarge' }, {}, 'too small to isolate'],
     [{ instanceType: 'c7i.large' }, {}, 'too small to isolate'],
     [{ instanceType: 't3.small' }, {}, 'too small to isolate'],
+    [{ instanceType: 'c7a.medium' }, {}, 'too small to isolate'],
     [{}, { 'latency.profile': 'turbo' }, 'Unknown latency.profile'],
     [{ availabilityZone: 'us-east-1z' }, {}, 'No platform network subnet'],
   ])('rejects %p %p before creating anything', async (overrides, config, message) => {
