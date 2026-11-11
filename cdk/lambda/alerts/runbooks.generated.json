@@ -464,11 +464,11 @@
       "url": "https://github.com/gnome-trading-group/gnome-registry/blob/main/docs/runbooks/alerts/ORDER_GATEWAY_UNLINKED.md"
     },
     "PIPELINE_FAILED": {
-      "summary": "A data or research pipeline run failed.",
+      "summary": "A data or research pipeline run failed, or a polling source crashed too often and stopped.",
       "firstSteps": [
         "Open the run on the controller's Research → Pipelines page.",
         "Read its logs.",
-        "Re-run it once fixed if trading depends on it."
+        "Re-run it (or start the source again) once fixed if trading depends on it."
       ],
       "url": "https://github.com/gnome-trading-group/gnome-registry/blob/main/docs/runbooks/alerts/PIPELINE_FAILED.md"
     },

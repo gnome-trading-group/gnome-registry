@@ -32,9 +32,13 @@ describe('alert severity', () => {
     expect(severityOf({ ...base, type: 'NO_PRICE' }, 'paper', 'prod')).toBe('INFO');
   });
 
-  it('pages a failed pipeline only when it was scheduled', () => {
+  it('pages a failed pipeline only when it was scheduled, and a failed polling source always', () => {
     expect(severityOf({ ...base, type: 'PIPELINE_FAILED', labels: { trigger: 'scheduled' } }, null, 'prod')).toBe('ERROR');
     expect(severityOf({ ...base, type: 'PIPELINE_FAILED', labels: { trigger: 'manual' } }, null, 'prod')).toBe('INFO');
+    expect(severityOf({ ...base, type: 'PIPELINE_FAILED', labels: { trigger: 'manual', kind: 'pipeline' } }, null, 'prod'))
+      .toBe('INFO');
+    expect(severityOf({ ...base, type: 'PIPELINE_FAILED', labels: { trigger: 'manual', kind: 'source' } }, null, 'prod'))
+      .toBe('ERROR');
     expect(severityOf({ ...base, type: 'SESSION_EXITED' }, 'live', 'prod')).toBe('INFO');
     expect(severityOf({ ...base, type: 'SESSION_EXITED', severity: 'WARNING' }, 'live', 'prod')).toBe('WARNING');
     expect(severityOf({ ...base, type: 'SESSION_EXITED', severity: 'CRITICAL' }, 'live', 'prod')).toBe('INFO');

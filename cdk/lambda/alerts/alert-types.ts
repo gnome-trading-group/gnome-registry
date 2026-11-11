@@ -128,7 +128,11 @@ export const ALERT_TYPES: Record<string, AlertType> = {
   // From the gateway reconciler: a gateway's task was replaced without being asked to while orders worked.
   GATEWAY_RESTARTED: { severity: 'ERROR', debounce: 1 },
   GATEWAY_VENUE_RATE_LIMITED: { severity: 'WARNING', debounce: 1 },
-  PIPELINE_FAILED: { severity: e => e.labels?.trigger === 'scheduled' ? 'ERROR' : 'INFO', debounce: 1 },
+  // A polling source that failed has stopped polling however it was started, so it pages like a scheduled run.
+  PIPELINE_FAILED: {
+    severity: e => e.labels?.trigger === 'scheduled' || e.labels?.kind === 'source' ? 'ERROR' : 'INFO',
+    debounce: 1,
+  },
   CUSTOM: { severity: e => e.severity ?? 'WARNING', debounce: 1 },
 
   // From the alarm's name: cdk-monitoring-constructs ends it with the tier it was declared under.
