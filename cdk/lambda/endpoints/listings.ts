@@ -19,9 +19,10 @@ export class ListingHandler extends ResourceHandler {
   generateInsertQuery(body: string): Sql {
     const listing = JSON.parse(body) as ICreateListing;
     return sql`
-      INSERT INTO sm.listing (exchange_id, security_id, exchange_security_id, exchange_security_symbol, fee_group, fee_event)
+      INSERT INTO sm.listing (exchange_id, security_id, exchange_security_id, exchange_security_symbol, fee_group, fee_event,
+                              venue_partition)
       VALUES (${listing.exchangeId}, ${listing.securityId}, ${listing.exchangeSecurityId}, ${listing.exchangeSecuritySymbol},
-              ${listing.feeGroup ?? null}, ${listing.feeEvent ?? null})
+              ${listing.feeGroup ?? null}, ${listing.feeEvent ?? null}, ${listing.venuePartition ?? null})
       RETURNING *`;
   }
 
@@ -62,6 +63,7 @@ export class ListingHandler extends ResourceHandler {
       // Present-but-null clears a fee key: a venue that stops grouping a listing's fees.
       fee_group: 'feeGroup' in listing ? listing.feeGroup ?? null : undefined,
       fee_event: 'feeEvent' in listing ? listing.feeEvent ?? null : undefined,
+      venue_partition: 'venuePartition' in listing ? listing.venuePartition ?? null : undefined,
       date_modified: NOW,
     })} WHERE listing_id = ${row['listing_id']} RETURNING *`;
   }

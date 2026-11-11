@@ -448,6 +448,15 @@
       ],
       "url": "https://github.com/gnome-trading-group/gnome-registry/blob/main/docs/runbooks/alerts/POLICY_UNBUILDABLE.md"
     },
+    "REBALANCE_DRIFT": {
+      "summary": "Kalshi isn't rebalancing a venue account's cash between shards as its targets say.",
+      "firstSteps": [
+        "Read the alert's detail for Kalshi's error.",
+        "Check the account's read key has the write::transfer scope.",
+        "Confirm the alert resolves on the next poll."
+      ],
+      "url": "https://github.com/gnome-trading-group/gnome-registry/blob/main/docs/runbooks/alerts/REBALANCE_DRIFT.md"
+    },
     "RECONNECTING": {
       "summary": "A gateway has been reconnecting for over a minute.",
       "firstSteps": [
@@ -552,6 +561,24 @@
         "Confirm the alert resolves."
       ],
       "url": "https://github.com/gnome-trading-group/gnome-registry/blob/main/docs/runbooks/alerts/SHARD_BALANCE_LOW.md"
+    },
+    "SHARD_FUNDS_REJECTED": {
+      "summary": "Kalshi is refusing orders for want of cash on one exchange shard.",
+      "firstSteps": [
+        "Check the shard's cash on Treasury.",
+        "Move cash onto that shard on Kalshi.",
+        "Check whether the strategy was halted on the exchange."
+      ],
+      "url": "https://github.com/gnome-trading-group/gnome-registry/blob/main/docs/runbooks/alerts/SHARD_FUNDS_REJECTED.md"
+    },
+    "SHARD_UNTARGETED": {
+      "summary": "Kalshi's rebalancing sweeps cash off a shard live sessions trade.",
+      "firstSteps": [
+        "Check the account's rebalancing targets on Treasury.",
+        "Give the shard a share of the targets.",
+        "Confirm the alert resolves."
+      ],
+      "url": "https://github.com/gnome-trading-group/gnome-registry/blob/main/docs/runbooks/alerts/SHARD_UNTARGETED.md"
     },
     "SHUTDOWN_FAILED": {
       "summary": "The launcher couldn't stop a session it meant to stop.",

@@ -7,7 +7,7 @@ import { sql } from './sql';
 // Shared by the proposition-subject, merge, proposition and relationship-reconcile routes: subjects, their merge
 // chains, and the handler wrapper.
 
-const MAX_ALIAS_DEPTH = 64;
+export const MAX_ALIAS_DEPTH = 64;
 
 export class PropositionError extends Error {
   constructor(readonly statusCode: number, message: string) {

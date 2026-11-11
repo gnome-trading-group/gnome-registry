@@ -1,6 +1,8 @@
 import { PoolClient } from 'pg';
-import { canonicalSubject, PropositionError, requirePositiveInt, requireSubject, subjectTree, touchSubjects } from './propositions-common';
-import { sql } from './sql';
+import {
+  canonicalSubject, MAX_ALIAS_DEPTH, PropositionError, requirePositiveInt, requireSubject, subjectTree, touchSubjects,
+} from './propositions-common';
+import { sql, where } from './sql';
 
 // One entity or measure spelled two ways on a subject (`phi` and `philadelphia`): the classifier's derivation reads
 // `key` as `canonical_key`. Aliases are stored on the subject's canonical subject and read across its merge tree. The
@@ -44,6 +46,44 @@ export async function listKeyAliases(client: PoolClient, subjectIds: number[]) {
       ORDER BY k.kind, k.key`)).rows);
   }
   return rows;
+}
+
+/** The most recently changed aliases across every subject, newest first, each with the subject it is read on (the
+ * root of its merge tree): what the merge pass and key reconcile have been storing. `origin` keeps one origin; `since`
+ * (ISO) keeps those changed at or after it. */
+export async function listRecentKeyAliases(
+  client: PoolClient, params: { origin?: string; since?: string; limit: number; offset: number },
+) {
+  const origin = params.origin === undefined ? undefined : requireOneOf(params.origin, ORIGINS, 'origin');
+  if (params.since !== undefined && Number.isNaN(Date.parse(params.since))) {
+    throw new PropositionError(400, 'since must be an ISO timestamp');
+  }
+  const filters = where([
+    origin !== undefined && sql`k.origin = ${origin}`,
+    params.since !== undefined && sql`k.date_modified >= ${params.since}::timestamptz::timestamp`,
+  ]);
+  return (await client.query(sql`
+    WITH recent AS (
+      SELECT * FROM sm.subject_key_alias k ${filters}
+      ORDER BY k.date_modified DESC, k.subject_id, k.kind, k.key
+      LIMIT ${params.limit} OFFSET ${params.offset}
+    )
+    SELECT r.subject_id AS requested_subject_id, root.subject_id AS canonical_subject_id, s.key AS canonical_subject_key,
+           r.subject_id, r.kind, r.key, r.canonical_key, r.flags, r.origin, r.merge_log_id, r.reason, r.actor,
+           r.date_created, r.date_modified
+    FROM recent r
+    CROSS JOIN LATERAL (
+      WITH RECURSIVE chain(subject_id, depth) AS (
+        SELECT r.subject_id, 0
+        UNION ALL
+        SELECT a.canonical_subject_id, c.depth + 1
+        FROM sm.proposition_subject_alias a JOIN chain c ON a.alias_subject_id = c.subject_id
+        WHERE c.depth < ${MAX_ALIAS_DEPTH}
+      )
+      SELECT subject_id FROM chain ORDER BY depth DESC LIMIT 1
+    ) root
+    JOIN sm.proposition_subject s ON s.subject_id = root.subject_id
+    ORDER BY r.date_modified DESC, r.subject_id, r.kind, r.key`)).rows;
 }
 
 function requireKey(value: unknown, name: string): string {

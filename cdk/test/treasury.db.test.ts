@@ -5,7 +5,7 @@ import { writeBatch } from '../lambda/endpoints/ledger-batch';
 import { attention } from '../lambda/endpoints/monitoring-attention';
 import { StrategySessionHandler } from '../lambda/endpoints/strategy-sessions';
 import { recordSnapshot, SnapshotInput } from '../lambda/endpoints/treasury';
-import { recordTransfer, summary, updateConfig } from '../lambda/endpoints/treasury-api';
+import { pollTargets, recordTransfer, summary, updateConfig } from '../lambda/endpoints/treasury-api';
 import { registerAccount } from '../lambda/endpoints/venue-accounts';
 
 const url = process.env.LEDGER_TEST_DB;
@@ -380,6 +380,124 @@ describeDb('treasury, against Postgres', () => {
     expect((view.accounts[0] as Record<string, any>).cashByPartition['0']).toBe('89309900000');
     await expect(updateConfig(client, JSON.stringify({ accountId: kalshi, partitionLowThresholds: { x: 1 } }),
       'ops@example.com')).rejects.toThrow(/partition numbers/);
+  });
+
+  it('refuses a launch onto a Kalshi shard without the cash for it, though the account total covers it', async () => {
+    const kalshi = await account(1, 'steady-heron-01');
+    await open(kalshi, 100);
+    await client.query(`UPDATE sm.listing SET venue_partition = '3' WHERE listing_id = 501`);
+    await requiredPolicies(30, 1);
+    await requiredPolicies(30, 1, 2);
+    const split = { cashByPartition: { 0: String(80 * DOLLAR), 3: String(20 * DOLLAR) } };
+
+    await snapshot(kalshi, 10000, new Date(), split);
+    const unknown = await live('a', [500], 1, false);
+    expect(unknown.statusCode).toBe(422);
+    expect(JSON.parse(unknown.body).message).toMatch(/listing\(s\) 500 have no known shard/);
+
+    await client.query(`UPDATE sm.listing SET venue_partition = '0' WHERE listing_id = 500`);
+    const short = await live('b', [501], 2, false);
+    expect(short.statusCode).toBe(422);
+    expect(JSON.parse(short.body).message)
+      .toMatch(/holds \$20\.00 on shard 3 with \$0\.00 allocated there, so it can't take a further \$30\.00/);
+    expect((await live('c', [500], 1, false)).statusCode).toBe(200);
+
+    const view = await summary(client, new Date());
+    const partitions = (view.accounts[0] as Record<string, any>).partitions;
+    expect(partitions['0']).toMatchObject({ cash: String(80 * DOLLAR), allocated: String(30 * DOLLAR) });
+    expect(partitions['3']).toMatchObject({ cash: String(20 * DOLLAR), allocated: '0' });
+  });
+
+  it('flags a shard live sessions trade with less behind it than their budgets, with no threshold set', async () => {
+    const kalshi = await account(1, 'steady-heron-01');
+    await open(kalshi, 100);
+    await client.query(`UPDATE sm.listing SET venue_partition = '0' WHERE listing_id IN (500, 501)`);
+    await requiredPolicies(60, 1);
+    await snapshot(kalshi, 10000, new Date(), { cashByPartition: { 0: String(100 * DOLLAR), 3: '0' } });
+    expect((await live('a', [500], 1, false)).statusCode).toBe(200);
+    expect((await attention(client, 'live', new Date())).filter(i => i.kind === 'SHARD_BALANCE_LOW')).toEqual([]);
+
+    // Cash moved off shard 0 after the launch.
+    await snapshot(kalshi, 10000, new Date(), { cashByPartition: { 0: String(40 * DOLLAR), 3: String(60 * DOLLAR) } });
+    const items = (await attention(client, 'live', new Date())).filter(i => i.kind === 'SHARD_BALANCE_LOW');
+    expect(items.map(i => [i.title, i.detail])).toEqual([[
+      'steady-heron-01 shard 0 is low on cash',
+      '$40.00 on shard 0, behind $60.00 of live budgets ($40.00 with positions at cost); move cash onto it',
+    ]]);
+  });
+
+  it('raises orders refused for insufficient funds by the shard they were on', async () => {
+    const kalshi = await account(1, 'steady-heron-01');
+    await open(kalshi, 100);
+    await client.query(`UPDATE sm.listing SET venue_partition = '3' WHERE listing_id = 501`);
+    await requiredPolicies(10, 1);
+    await snapshot(kalshi, 10000, new Date(), { cashByPartition: { 0: String(100 * DOLLAR), 3: '0' } });
+    await client.query(`UPDATE sm.listing SET venue_partition = '0' WHERE listing_id = 500`);
+    expect((await live('a', [500, 501], 1, false)).statusCode).toBe(422);
+    await client.query(`INSERT INTO strategy.session (session_id, strategy_id, status, mode, config)
+      VALUES ('s', 1, 'RUNNING', 'live', '{}')`);
+    const now = new Date();
+    const closings = [now, new Date(now.getTime() - 5 * MINUTE), new Date(now.getTime() - 30 * MINUTE)];
+    for (const [counter, closedAt] of closings.entries()) {
+      await client.query(
+        `INSERT INTO ledger.order (session_id, client_oid_counter, strategy_id, listing_id, exchange_id, mode, status,
+           closed_at, close_state, reject_reason, account_id)
+         VALUES ('s', $1, 1, 501, 1, 'live', 'CLOSED', $2, 'REJECTED', 'INSUFFICIENT_FUNDS', $3)`,
+        [counter, closedAt, kalshi]);
+    }
+    const items = (await attention(client, 'live', now)).filter(i => i.kind === 'SHARD_FUNDS_REJECTED');
+    expect(items.map(i => [i.title, i.detail])).toEqual([[
+      'steady-heron-01 shard 3 is refusing orders for want of cash',
+      '2 order(s) refused for insufficient funds in 15 minutes (arb); move cash onto shard 3',
+    ]]);
+  });
+
+  it('takes shard rebalancing targets that add up to 100, or none, and flags Kalshi not matching them', async () => {
+    const kalshi = await account(1, 'steady-heron-01');
+    const set = (body: Record<string, unknown>) =>
+      updateConfig(client, JSON.stringify({ accountId: kalshi, ...body }), 'ops@example.com');
+    await expect(set({ partitionTargets: { 0: 80, 3: 10 } })).rejects.toThrow(/add up to 100.*not 90/);
+    await expect(set({ partitionTargets: { x: 100 } })).rejects.toThrow(/shard numbers/);
+    await expect(set({ rebalanceReservation: 'all' })).rejects.toThrow(/none, max or sum/);
+    await set({ partitionTargets: { 0: 80, 3: 20 }, rebalanceReservation: 'max' });
+    const [target] = await pollTargets(client);
+    expect([target.partition_targets, target.rebalance_reservation]).toEqual([{ 0: 80, 3: 20 }, 'max']);
+
+    const drift = async () => (await attention(client, 'live', new Date())).filter(i => i.kind === 'REBALANCE_DRIFT');
+    const cash = { cashByPartition: { 0: String(80 * DOLLAR), 3: String(20 * DOLLAR) } };
+    await snapshot(kalshi, 10000, new Date(), { ...cash, rebalanceTargets: {
+      allocations: {}, restingMarginReservation: 'sum', error: 'setting the targets failed: 403 forbidden',
+    } });
+    expect((await drift()).map(i => i.detail)).toEqual(['setting the targets failed: 403 forbidden']);
+    await snapshot(kalshi, 10000, new Date(), { ...cash, rebalanceTargets: {
+      allocations: { 0: 80, 2: 0, 3: 20 }, restingMarginReservation: 'max',
+    } });
+    expect(await drift()).toEqual([]);
+    await set({ partitionTargets: { 0: 100 } });
+    expect((await drift()).map(i => i.detail)).toEqual(['Kalshi is set to shard 0 80%, shard 3 20%, not shard 0 100%']);
+  });
+
+  it('refuses a launch onto a shard rebalancing sweeps, and flags one live sessions already trade', async () => {
+    const kalshi = await account(1, 'steady-heron-01');
+    await open(kalshi, 100);
+    await client.query(`UPDATE sm.listing SET venue_partition = '0' WHERE listing_id = 500`);
+    await client.query(`UPDATE sm.listing SET venue_partition = '3' WHERE listing_id = 501`);
+    await requiredPolicies(10, 1);
+    await requiredPolicies(10, 1, 2);
+    await snapshot(kalshi, 10000, new Date(), {
+      cashByPartition: { 0: String(80 * DOLLAR), 3: String(20 * DOLLAR) },
+      rebalanceTargets: { allocations: { 0: 100 }, restingMarginReservation: 'sum' },
+    });
+    const swept = await live('a', [501], 2, false);
+    expect(swept.statusCode).toBe(422);
+    expect(JSON.parse(swept.body).message).toMatch(/rebalances its cash off shard 3, which this session trades/);
+    expect((await live('b', [500], 1, false)).statusCode).toBe(200);
+
+    const untargeted = async () => (await attention(client, 'live', new Date())).filter(i => i.kind === 'SHARD_UNTARGETED');
+    expect(await untargeted()).toEqual([]);
+    await updateConfig(client, JSON.stringify({ accountId: kalshi, partitionTargets: { 3: 100 } }), 'ops@example.com');
+    expect((await untargeted()).map(i => i.title))
+      .toEqual(['steady-heron-01 rebalances cash off shard 0, which live sessions trade']);
   });
 
   it('flags a draining wallet that is empty as ready to retire', async () => {

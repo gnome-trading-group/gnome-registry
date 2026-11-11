@@ -26,8 +26,10 @@ function strings(value: unknown): unknown {
 // Accounts the poller reads: everything it needs to find each one on its venue, and never a trading secret.
 export async function pollTargets(client: PoolClient) {
   return (await client.query(
-    `SELECT a.account_id, a.exchange_id, e.exchange_code, a.label, a.venue_ref, a.read_secret_name
+    `SELECT a.account_id, a.exchange_id, e.exchange_code, a.label, a.venue_ref, a.read_secret_name,
+       c.partition_targets, COALESCE(c.rebalance_reservation, 'sum') AS rebalance_reservation
      FROM account_master.venue_account a JOIN sm.exchange e USING (exchange_id)
+     LEFT JOIN treasury.account_config c USING (account_id)
      WHERE a.status IN ('PROVISIONING', 'ACTIVE', 'DRAINING') ORDER BY a.account_id`)).rows;
 }
 
@@ -119,6 +121,29 @@ export async function updateConfig(client: PoolClient, body: string, actor: stri
     }
     values.push(JSON.stringify(Object.fromEntries(Object.entries(thresholds).map(([k, v]) => [k, String(v)]))));
     sets.push(`partition_low_thresholds = $${values.length}::jsonb`);
+  }
+  if (c.partitionTargets !== undefined) {
+    const targets = c.partitionTargets;
+    if (targets !== null) {
+      const entries = typeof targets === 'object' && !Array.isArray(targets) ? Object.entries(targets) : null;
+      if (!entries || entries.some(([k, v]) => !/^\d+$/.test(k) || !Number.isInteger(v) || (v as number) < 0
+        || (v as number) > 100)) {
+        throw new TreasuryError(400, 'partitionTargets maps shard numbers to whole percents, or is null');
+      }
+      const total = entries.reduce((sum, [, v]) => sum + (v as number), 0);
+      if (entries.length > 0 && total !== 100) {
+        throw new TreasuryError(400, `partitionTargets must add up to 100 (or be empty to turn rebalancing off), not ${total}`);
+      }
+    }
+    values.push(targets === null ? null : JSON.stringify(targets));
+    sets.push(`partition_targets = $${values.length}::jsonb`);
+  }
+  if (c.rebalanceReservation !== undefined) {
+    if (!['none', 'max', 'sum'].includes(String(c.rebalanceReservation))) {
+      throw new TreasuryError(400, 'rebalanceReservation must be none, max or sum');
+    }
+    values.push(c.rebalanceReservation);
+    sets.push(`rebalance_reservation = $${values.length}`);
   }
   if (sets.length === 0) throw new TreasuryError(400, 'nothing to change');
   values.push(actor);

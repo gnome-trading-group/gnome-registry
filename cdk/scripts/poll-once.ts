@@ -31,6 +31,7 @@ async function main() {
   const exchange = option('exchange');
   const target: PollTarget = {
     account_id: 0, exchange_id: 0, exchange_code: exchange ?? '', label: 'poll-once', read_secret_name: null,
+    partition_targets: null, rebalance_reservation: 'sum',
     venue_ref: option('funder') ? { funderAddress: option('funder') } : {},
   };
   const probe = option('get');

@@ -7,8 +7,9 @@ import { PollTarget, VenueReading } from './venues/types';
 
 // Reads what every venue account holds and posts it to the registry, which reconciles it against the ledger. Runs
 // on a schedule outside the VPC (the venues are on the internet), one deployment per region that can reach its
-// venues; VENUES limits a deployment to some exchange codes. It only ever reads an account's read-only secret,
-// never the trading one. A venue that can't be read is posted as an ERROR snapshot, which the controller flags.
+// venues; VENUES limits a deployment to some exchange codes. It only ever uses an account's read secret, never the
+// trading one; on Kalshi that key also carries `write::transfer`, so the poller keeps the account's shard rebalancing
+// targets set as the registry wants them. A venue that can't be read is posted as an ERROR snapshot, which the controller flags.
 
 const secrets = new SecretsManagerClient({});
 
@@ -45,6 +46,7 @@ function snapshotBody(target: PollTarget, reading: VenueReading) {
     redeemableValue: reading.redeemableValue.toString(),
     cashByPartition: reading.cashByPartition === undefined ? null
       : Object.fromEntries(Object.entries(reading.cashByPartition).map(([k, v]) => [k, v.toString()])),
+    rebalanceTargets: reading.rebalanceTargets ?? null,
     positions: reading.positions?.map(p => ({
       venueKey: p.venueKey, quantity: p.quantity.toString(), redeemable: p.redeemable, value: p.value?.toString() ?? null,
     })) ?? null,

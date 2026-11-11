@@ -29,7 +29,7 @@ describeDb('resource handlers round-trip awkward values, against Postgres', () =
   });
 
   beforeEach(async () => {
-    await client.query('TRUNCATE sm.exchange, sm.security, sm.event, strategy.strategy, risk.policy RESTART IDENTITY CASCADE');
+    await client.query('TRUNCATE sm.exchange, sm.security, sm.event, strategy.strategy, risk.policy, account_master.venue_account RESTART IDENTITY CASCADE');
   });
 
   function on<T extends ResourceHandler>(handler: T): T {
@@ -169,6 +169,31 @@ describeDb('resource handlers round-trip awkward values, against Postgres', () =
     expect(await ok(stop(AWKWARD, ['SUBMITTED']))).toMatchObject({ status: 'STOPPING', stop_reason: AWKWARD });
     expect((await stop('later', ['SUBMITTED'])).statusCode).toBe(409);
     expect(await ok(stop('later', ['STOPPING']))).toMatchObject({ stop_reason: AWKWARD, stopped_by: AWKWARD });
+  });
+
+  it('sessions: say which exchanges they trade and the venue account for each', async () => {
+    const exchangeId = await exchange();
+    const listingId = await listing(exchangeId);
+    const sessions = on(new StrategySessionHandler());
+    for (const sessionId of ['bound', 'paper']) {
+      const strategy = await ok(on(new StrategyHandler()).createOne(JSON.stringify({ name: sessionId, parameters: {} })));
+      await ok(sessions.createOne(JSON.stringify({
+        sessionId, strategyId: strategy.strategy_id, status: 'RUNNING', mode: 'paper', config: { listings: [listingId] },
+      })));
+    }
+    const account = (await client.query(
+      `INSERT INTO account_master.venue_account (exchange_id, label, status, trading_secret_name)
+       VALUES ($1, 'steady-heron-01', 'ACTIVE', 'gnome/accounts/steady-heron-01/trading') RETURNING account_id`,
+      [exchangeId])).rows[0].account_id;
+    await client.query(
+      `INSERT INTO account_master.session_venue_account (session_id, exchange_id, account_id) VALUES ('bound', $1, $2)`,
+      [exchangeId, account]);
+
+    expect(await ok(sessions.get({ sessionId: 'bound' }))).toMatchObject([{
+      exchange_ids: [exchangeId],
+      venue_accounts: [{ exchange_id: exchangeId, exchange_code: 'KALSHI', account_id: account, label: 'steady-heron-01' }],
+    }]);
+    expect(await ok(sessions.get({ sessionId: 'paper' }))).toMatchObject([{ exchange_ids: [exchangeId], venue_accounts: [] }]);
   });
 
   it('risk policies: a session row takes its strategy from the session', async () => {

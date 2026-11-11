@@ -1,5 +1,7 @@
 import { PoolClient } from 'pg';
-import { allocationOf, LaunchCheckError, requireAllocation, requireCoverage, shortfall } from './launch-checks';
+import {
+  allocationOf, LaunchCheckError, requireAllocation, requireCoverage, SessionPartitions, sessionPartitions, shortfall,
+} from './launch-checks';
 import { accountTreasury } from './treasury';
 
 // Which venue account a new live session trades each of its exchanges with, chosen inside the transaction that
@@ -41,7 +43,7 @@ function pinnedLabels(config: Record<string, unknown>): Record<string, unknown> 
 }
 
 async function pickByFreeCapital(
-  client: PoolClient, strategyId: number, exchange: ExchangeRow, now: Date,
+  client: PoolClient, strategyId: number, exchange: ExchangeRow, session: SessionPartitions, now: Date,
 ): Promise<{ account_id: number } | undefined> {
   const budget = await allocationOf(client, strategyId, exchange.exchange_id);
   if (budget === null) {
@@ -53,13 +55,13 @@ async function pickByFreeCapital(
     [exchange.exchange_id])).rows.map(r => r.account_id as number);
   if (active.length === 0) return undefined;
   const accounts = (await accountTreasury(client, active, now)).sort((a, b) => (b.free > a.free ? 1 : b.free < a.free ? -1 : 0));
-  const fits = accounts.find(a => shortfall(a, budget) === null);
-  if (!fits) throw new LaunchCheckError(422, shortfall(accounts[0], budget) as string);
+  const fits = accounts.find(a => shortfall(a, budget, session) === null);
+  if (!fits) throw new LaunchCheckError(422, shortfall(accounts[0], budget, session) as string);
   return { account_id: fits.accountId };
 }
 
 async function chooseAccount(
-  client: PoolClient, strategyId: number, exchange: ExchangeRow, pinned: unknown, now: Date,
+  client: PoolClient, strategyId: number, exchange: ExchangeRow, pinned: unknown, session: SessionPartitions, now: Date,
 ): Promise<{ account_id: number; label: string }> {
   if (pinned !== undefined) {
     if (typeof pinned !== 'string') {
@@ -83,7 +85,7 @@ async function chooseAccount(
      ORDER BY SUM(p.total_cost) DESC, a.account_id
      LIMIT 1`,
     [exchange.exchange_id, strategyId])).rows[0];
-  const chosen = sticky ?? await pickByFreeCapital(client, strategyId, exchange, now);
+  const chosen = sticky ?? await pickByFreeCapital(client, strategyId, exchange, session, now);
   const locked = chosen && (await client.query(
     `SELECT account_id, label FROM account_master.venue_account WHERE account_id = $1 AND status = 'ACTIVE' FOR SHARE`,
     [chosen.account_id])).rows[0];
@@ -123,9 +125,11 @@ export async function bindAccounts(
   const bindings: Binding[] = [];
   for (const exchange of exchanges) {
     await client.query('SELECT pg_advisory_xact_lock($1, $2)', [ACCOUNT_LOCK, exchange.exchange_id]);
-    const account = await chooseAccount(client, strategyId, exchange, pins[exchange.exchange_code], now);
+    const session = await sessionPartitions(client, listings, exchange.exchange_id);
+    const account = await chooseAccount(client, strategyId, exchange, pins[exchange.exchange_code], session, now);
     await refuseOrdersElsewhere(client, strategyId, exchange, account.account_id);
-    await requireAllocation(client, strategyId, exchange.exchange_id, exchange.exchange_code, account.account_id, now);
+    await requireAllocation(
+      client, strategyId, exchange.exchange_id, exchange.exchange_code, account.account_id, session, now);
     await client.query(
       `INSERT INTO account_master.session_venue_account (session_id, exchange_id, account_id) VALUES ($1, $2, $3)`,
       [sessionId, exchange.exchange_id, account.account_id]);

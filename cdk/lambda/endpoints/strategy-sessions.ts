@@ -73,9 +73,20 @@ export class StrategySessionHandler extends ResourceHandler {
     const listingIds = parseIdList(params?.listingId);
     const eventIds = parseIdList(params?.eventId);
     // The strategy's weight in its share of a venue account's request budget, which the order gateway reads at a
-    // session's hello.
+    // session's hello. The exchanges a session trades and the accounts a live one trades them through, so a kill on
+    // either can be shown on the session.
     return sql`SELECT *, (SELECT st.rate_weight FROM strategy.strategy st WHERE st.strategy_id = session.strategy_id)
-        AS rate_weight FROM strategy.session${where([
+        AS rate_weight,
+      COALESCE((SELECT array_agg(DISTINCT l.exchange_id ORDER BY l.exchange_id)
+        FROM strategy.session_listing sl JOIN sm.listing l ON l.listing_id = sl.listing_id
+        WHERE sl.session_id = session.session_id), '{}'::int[]) AS exchange_ids,
+      COALESCE((SELECT json_agg(json_build_object('exchange_id', sva.exchange_id, 'exchange_code', e.exchange_code,
+          'account_id', sva.account_id, 'label', va.label) ORDER BY sva.exchange_id)
+        FROM account_master.session_venue_account sva
+        JOIN account_master.venue_account va ON va.account_id = sva.account_id
+        JOIN sm.exchange e ON e.exchange_id = sva.exchange_id
+        WHERE sva.session_id = session.session_id), '[]'::json) AS venue_accounts
+      FROM strategy.session${where([
       params?.sessionId && sql`session_id = ${params.sessionId}`,
       params?.strategyId && sql`strategy_id = ${params.strategyId}`,
       statuses.length > 0 && sql`status = ANY(${statuses}::text[])`,

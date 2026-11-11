@@ -149,7 +149,26 @@ describeDb('subject key aliases, against Postgres', () => {
     expect((await page(2, 2)).map((a: any) => a.key)).toEqual(['a3']);
   });
 
-  it('asks for subjects when listing aliases', async () => {
-    await expect(listSubjects(client, { keyAliases: 'true' })).rejects.toThrow('keyAliases needs subjectIds');
+  it('lists the latest aliases across subjects, each on the subject it is read on', async () => {
+    const kept = await subject('game:cs2:2026-11-12:nordic-rgg');
+    const merged = await subject('game:cs2:2026-11-12:rggnor-1300');
+    const other = await subject('game:nba:2026-11-11:bos-tor');
+    await patchKeyAliases(client, { subjectId: merged, set: [reconcile('rounds', 'rgg')] }, 'classifier:key-reconcile');
+    await mergeSubjects(client, merged, kept, 'classifier:subject-merger');
+    await patchKeyAliases(client, { subjectId: other, set: [{ ...reconcile('bos', 'celtics'), origin: 'MANUAL' }] }, 'me');
+
+    const rows = await listSubjects(client, { keyAliases: 'true' });
+    expect(rows.map((a: any) => [a.key, a.subject_id, a.canonical_subject_id, a.canonical_subject_key, a.origin])).toEqual([
+      ['bos', other, other, 'game:nba:2026-11-11:bos-tor', 'MANUAL'],
+      ['rounds', merged, kept, 'game:cs2:2026-11-12:nordic-rgg', 'RECONCILE'],
+    ]);
+    expect((await listSubjects(client, { keyAliases: 'true', origin: 'RECONCILE' })).map((a: any) => a.key)).toEqual(['rounds']);
+    expect(await listSubjects(client, { keyAliases: 'true', since: '2999-01-01T00:00:00Z' })).toEqual([]);
+    expect((await listSubjects(client, { keyAliases: 'true', limit: '1', offset: '1' })).map((a: any) => a.key)).toEqual(['rounds']);
+  });
+
+  it('refuses an unknown origin or a since that is not a time', async () => {
+    await expect(listSubjects(client, { keyAliases: 'true', origin: 'JUDGE' })).rejects.toThrow('origin must be one of');
+    await expect(listSubjects(client, { keyAliases: 'true', since: 'yesterday' })).rejects.toThrow('since must be an ISO');
   });
 });

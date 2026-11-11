@@ -1,6 +1,13 @@
 import { PoolClient } from 'pg';
-import { accountTreasury } from '../../endpoints/treasury';
+import { accountTreasury, sweptPartitions } from '../../endpoints/treasury';
+import { RebalanceTargets, sameTargets } from '../../sync/venues/types';
 import { Finding, finding, money } from './types';
+
+function targetText(allocations: Record<string, number>): string {
+  const named = Object.entries(allocations).filter(([, p]) => p > 0)
+    .sort(([a], [b]) => a.localeCompare(b, undefined, { numeric: true }));
+  return named.length === 0 ? 'no rebalancing' : named.map(([k, p]) => `shard ${k} ${p}%`).join(', ');
+}
 
 // The money side, live only: venue accounts whose balances or positions disagree with the ledger, can't be read,
 // run low or are over-allocated, and accounts due to be rotated or ready to retire.
@@ -60,14 +67,41 @@ export async function treasury(client: PoolClient, now: Date): Promise<Finding[]
       on('warning', 'BALANCE_LOW', null, `${a.label} is low on cash`, { detail: `${money(a.cashAvailable)} available` });
     }
     // Kalshi's cash is split by exchange shard and only backs orders on that shard's markets, so a shard can run dry
-    // while the account's total looks healthy; only shards given a threshold are checked.
-    for (const [partition, threshold] of Object.entries(a.partitionLowThresholds)) {
+    // while the account's total looks healthy: one below its threshold, or one live sessions trade with less behind
+    // it than their budgets.
+    const shards = new Set([...Object.keys(a.partitionLowThresholds), ...Object.keys(a.partitions ?? {})]);
+    for (const partition of a.snapshotFresh ? [...shards].sort() : []) {
       const shardCash = a.cashByPartition?.[partition] ?? 0n;
-      if (a.snapshotFresh && shardCash < threshold) {
+      const threshold = a.partitionLowThresholds[partition];
+      const shard = a.partitions?.[partition];
+      const reasons = [
+        threshold !== undefined && shardCash < threshold && `below ${money(threshold)}`,
+        shard && shard.allocated > 0n && shard.allocated > shard.base
+          && `behind ${money(shard.allocated)} of live budgets (${money(shard.base)} with positions at cost)`,
+      ].filter(Boolean);
+      if (reasons.length > 0) {
         on('warning', 'SHARD_BALANCE_LOW', partition, `${a.label} shard ${partition} is low on cash`, {
-          detail: `${money(shardCash)} on shard ${partition}, below ${money(threshold)}; move cash onto it`,
+          detail: `${money(shardCash)} on shard ${partition}, ${reasons.join(' and ')}; move cash onto it`,
         });
       }
+    }
+    // The poller keeps Kalshi's rebalancing set to the account's targets; still different after a poll means it
+    // couldn't (usually a read key without the write::transfer scope).
+    const found = a.rebalanceTargets;
+    if (a.snapshotFresh && a.partitions !== null && a.partitionTargets !== null && (found?.allocations === undefined
+      || !sameTargets(found as RebalanceTargets,
+        { allocations: a.partitionTargets, restingMarginReservation: a.rebalanceReservation }))) {
+      on('warning', 'REBALANCE_DRIFT', null, `${a.label} isn't rebalancing between shards as set`, {
+        detail: found?.error ?? `Kalshi is set to ${targetText(found?.allocations ?? {})}, `
+          + `not ${targetText(a.partitionTargets)}`,
+      });
+    }
+    const traded = Object.entries(a.partitions ?? {}).filter(([, p]) => p.allocated > 0n).map(([k]) => k);
+    for (const partition of a.snapshotFresh ? sweptPartitions(a, traded) : []) {
+      const title = `${a.label} rebalances cash off shard ${partition}, which live sessions trade`;
+      on('warning', 'SHARD_UNTARGETED', partition, title, {
+        detail: `Shard ${partition} has no share of the rebalancing targets, so its free cash is swept to other shards`,
+      });
     }
     if (a.snapshotFresh && a.allocated > a.base - a.minBuffer) {
       on('warning', 'ALLOCATION_EXCEEDS_BALANCE', null, `${a.label} is over-allocated`, {
@@ -82,6 +116,29 @@ export async function treasury(client: PoolClient, now: Date): Promise<Finding[]
       && a.cashTotal + a.redeemable <= BigInt(c.dust_threshold)) {
       on('info', 'ACCOUNT_READY_TO_RETIRE', null, `${a.label} is empty and can be retired`);
     }
+  }
+
+  // Orders a venue refused for want of cash on the listing's shard, though the account as a whole may have plenty.
+  const refused = (await client.query(
+    `SELECT o.account_id, a.label, a.exchange_id, e.exchange_code, l.venue_partition, COUNT(*)::int AS rejects,
+       MIN(o.closed_at) AS since, ARRAY_AGG(DISTINCT st.name ORDER BY st.name) AS strategies
+     FROM ledger.order o
+     JOIN account_master.venue_account a ON a.account_id = o.account_id
+     JOIN sm.exchange e ON e.exchange_id = a.exchange_id
+     JOIN sm.listing l ON l.listing_id = o.listing_id
+     JOIN strategy.strategy st ON st.strategy_id = o.strategy_id
+     WHERE o.reject_reason = 'INSUFFICIENT_FUNDS' AND o.close_state = 'REJECTED' AND o.mode = 'live'
+       AND o.closed_at >= $1::timestamptz - INTERVAL '15 minutes' AND l.venue_partition IS NOT NULL
+     GROUP BY o.account_id, a.label, a.exchange_id, e.exchange_code, l.venue_partition`, [now])).rows;
+  for (const r of refused) {
+    const partition: string = r.venue_partition;
+    findings.push(finding('live', 'critical', 'SHARD_FUNDS_REJECTED', [r.account_id, partition],
+      `${r.label} shard ${partition} is refusing orders for want of cash`, {
+        exchangeId: r.exchange_id, exchangeName: r.exchange_code, accountId: r.account_id, accountLabel: r.label,
+        subject: partition, since: r.since.toISOString(),
+        detail: `${r.rejects} order(s) refused for insufficient funds in 15 minutes (${r.strategies.join(', ')});`
+          + ` move cash onto shard ${partition}`,
+      }));
   }
 
   // A strategy holding a listing on a draining account while trading it again on another: its limits only see the

@@ -1,5 +1,6 @@
 import { PoolClient } from 'pg';
 import { abs, committedCapital, notional, PRICE_SCALE, toBigInt } from './ledger-math';
+import { RebalanceReading } from '../sync/venues/types';
 
 // Reconciles each venue account against the ledger. Money is in price units (1e9 per dollar), quantities in size
 // units (1e6 per unit).
@@ -38,6 +39,7 @@ export interface SnapshotInput {
   portfolioValue?: string | number | null;
   redeemableValue?: string | number | null;
   cashByPartition?: Record<string, string | number> | null;
+  rebalanceTargets?: RebalanceReading | null;
   // Null when the venue can't list positions: then only cash is reconciled.
   positions?: VenuePositionInput[] | null;
   raw?: unknown;
@@ -63,6 +65,11 @@ export function parseSnapshot(body: string, source: 'POLLER' | 'MANUAL', actor: 
   if (s.status === 'OK' && scaled('cashTotal', s.cashTotal) === null) throw new TreasuryError(400, 'cashTotal is required');
   for (const key of ['cashTotal', 'cashAvailable', 'portfolioValue', 'redeemableValue'] as const) scaled(key, s[key]);
   for (const [partition, cash] of Object.entries(s.cashByPartition ?? {})) scaled(`cashByPartition.${partition}`, cash);
+  const allocations = s.rebalanceTargets?.allocations;
+  if (allocations !== undefined && (allocations === null || typeof allocations !== 'object'
+    || Object.values(allocations).some(p => !Number.isInteger(p) || p < 0 || p > 100))) {
+    throw new TreasuryError(400, 'rebalanceTargets.allocations must map partitions to whole percents');
+  }
   for (const p of s.positions ?? []) {
     if (typeof p.venueKey !== 'string' || p.venueKey.length === 0) throw new TreasuryError(400, 'positions need a venueKey');
     scaled('quantity', p.quantity);
@@ -331,14 +338,15 @@ export async function recordSnapshot(client: PoolClient, input: SnapshotInput, n
   const account = await loadAccount(client, input.accountId);
   const snapshot = (await client.query(
     `INSERT INTO treasury.balance_snapshot (account_id, taken_at, source, status, error, cash_total, cash_available,
-       portfolio_value, redeemable_value, raw, actor, cash_by_partition)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12) RETURNING snapshot_id`,
+       portfolio_value, redeemable_value, raw, actor, cash_by_partition, rebalance_targets)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13) RETURNING snapshot_id`,
     [input.accountId, now, input.source, input.status, input.error ?? null, scaled('cashTotal', input.cashTotal)?.toString(),
       scaled('cashAvailable', input.cashAvailable)?.toString(), scaled('portfolioValue', input.portfolioValue)?.toString(),
       scaled('redeemableValue', input.redeemableValue)?.toString(), input.raw === undefined ? null : JSON.stringify(input.raw),
       input.actor ?? null,
       input.cashByPartition == null ? null : JSON.stringify(Object.fromEntries(
-        Object.entries(input.cashByPartition).map(([k, v]) => [k, String(v)])))])).rows[0];
+        Object.entries(input.cashByPartition).map(([k, v]) => [k, String(v)]))),
+      input.rebalanceTargets == null ? null : JSON.stringify(input.rebalanceTargets)])).rows[0];
   if (input.status === 'ERROR') {
     await client.query(
       `INSERT INTO treasury.recon_run (account_id, snapshot_id, ran_at, cash_status) VALUES ($1, $2, $3, 'ERROR')`,
@@ -366,6 +374,17 @@ export async function recordSnapshot(client: PoolClient, input: SnapshotInput, n
     snapshotId: snapshot.snapshot_id, cashStatus: cash.status, cashDiff: cash.diff?.toString() ?? null,
     positionsChecked: positions.checked, positionBreaks: positions.breaks,
   };
+}
+
+// One venue partition of an account (a Kalshi exchange shard), whose cash only backs orders on its own listings.
+export interface PartitionTreasury {
+  cash: bigint;
+  heldAtCost: bigint;
+  base: bigint;
+  // The budget of every active live session trading a listing on it, each in full (a session spanning partitions
+  // counts against all of them), plus what positions no running session holds tie up on it.
+  allocated: bigint;
+  free: bigint;
 }
 
 export interface AccountTreasury {
@@ -396,6 +415,28 @@ export interface AccountTreasury {
   // The latest reading's cash per partition (Kalshi shards), and the thresholds set for them; null where unsplit.
   cashByPartition: Record<string, bigint> | null;
   partitionLowThresholds: Record<string, bigint>;
+  // Automatic rebalancing between partitions: what the latest reading found the venue set to (null where the venue
+  // doesn't rebalance), and what the account wants it set to (null leaves the venue's alone).
+  rebalanceTargets: RebalanceReading | null;
+  partitionTargets: Record<string, number> | null;
+  rebalanceReservation: string;
+  // Per partition, every one the reading, a position or a running session names; null where the venue doesn't split.
+  partitions: Record<string, PartitionTreasury> | null;
+}
+
+const LIVE_STATUSES = ['SUBMITTED', 'STARTING', 'RUNNING', 'STOPPING'];
+
+// The partitions the venue's rebalancing moves cash toward, by percent: the account's own targets where it names them
+// (the poller sets the venue to them), else what the venue was found set to. Null when unknown; empty when off.
+export function rebalancingTargets(account: AccountTreasury): Record<string, number> | null {
+  return account.partitionTargets ?? account.rebalanceTargets?.allocations ?? null;
+}
+
+// Partitions rebalancing sweeps cash off: it is on, and gives them nothing.
+export function sweptPartitions(account: AccountTreasury, partitions: string[]): string[] {
+  const targets = rebalancingTargets(account);
+  if (!targets || !Object.values(targets).some(p => p > 0)) return [];
+  return partitions.filter(p => !((targets[p] ?? 0) > 0));
 }
 
 // Where each account stands: its latest good reading, what the ledger says is tied up on it, and how much of it the
@@ -403,8 +444,8 @@ export interface AccountTreasury {
 export async function accountTreasury(client: PoolClient, accountIds: number[] | null, now: Date): Promise<AccountTreasury[]> {
   const accounts = (await client.query(
     `SELECT a.account_id, a.exchange_id, e.exchange_code, a.label, a.status, c.min_buffer, c.low_balance_threshold,
-       c.partition_low_thresholds, s.taken_at, s.cash_total, s.cash_available, s.portfolio_value, s.redeemable_value,
-       s.cash_by_partition, r.taken_at AS last_reading_at, CASE WHEN r.status = 'ERROR' THEN COALESCE(r.error, 'unknown error') END
+       c.partition_low_thresholds, c.partition_targets, c.rebalance_reservation, s.taken_at, s.cash_total, s.cash_available, s.portfolio_value, s.redeemable_value,
+       s.cash_by_partition, s.rebalance_targets, r.taken_at AS last_reading_at, CASE WHEN r.status = 'ERROR' THEN COALESCE(r.error, 'unknown error') END
          AS last_reading_error,
        (s.taken_at IS NOT NULL AND s.taken_at >= $2::timestamptz - c.snapshot_max_age) AS fresh
      FROM account_master.venue_account a
@@ -424,7 +465,7 @@ export async function accountTreasury(client: PoolClient, accountIds: number[] |
   const ids = accounts.map(a => a.account_id);
 
   const positions = (await client.query(
-    `SELECT p.account_id, p.strategy_id, p.listing_id, p.net_quantity, p.total_cost,
+    `SELECT p.account_id, p.strategy_id, p.listing_id, p.net_quantity, p.total_cost, l.venue_partition,
        (s.type = 4 AND s.contract_type IN (7, 8)) AS binary,
        COALESCE(o.buy_qty, 0) AS buy_qty, COALESCE(o.buy_notional, 0) AS buy_notional,
        COALESCE(o.sell_qty, 0) AS sell_qty, COALESCE(o.sell_notional, 0) AS sell_notional,
@@ -457,12 +498,32 @@ export async function accountTreasury(client: PoolClient, accountIds: number[] |
      JOIN strategy.session s ON s.session_id = sva.session_id
      LEFT JOIN treasury.allocation al ON al.strategy_id = s.strategy_id AND al.exchange_id = sva.exchange_id
      WHERE sva.account_id = ANY($1::int[]) AND s.mode = 'live' AND s.status = ANY($2::text[])
-     GROUP BY sva.account_id`, [ids, ['SUBMITTED', 'STARTING', 'RUNNING', 'STOPPING']])).rows;
+     GROUP BY sva.account_id`, [ids, LIVE_STATUSES])).rows;
+
+  const sessionPartitions = (await client.query(
+    `SELECT sva.account_id, COALESCE(al.max_capital, 0) AS budget,
+       ARRAY(SELECT DISTINCT l.venue_partition FROM strategy.session_listing sl
+             JOIN sm.listing l ON l.listing_id = sl.listing_id
+             WHERE sl.session_id = sva.session_id AND sl.active AND l.exchange_id = sva.exchange_id
+               AND l.venue_partition IS NOT NULL) AS partitions
+     FROM account_master.session_venue_account sva
+     JOIN strategy.session s ON s.session_id = sva.session_id
+     LEFT JOIN treasury.allocation al ON al.strategy_id = s.strategy_id AND al.exchange_id = sva.exchange_id
+     WHERE sva.account_id = ANY($1::int[]) AND s.mode = 'live' AND s.status = ANY($2::text[])`,
+    [ids, LIVE_STATUSES])).rows;
 
   return accounts.map(a => {
     let heldAtCost = 0n;
     let committed = 0n;
     let idle = 0n;
+    const cashByPartition: Record<string, bigint> | null = a.cash_by_partition === null ? null
+      : Object.fromEntries(Object.entries(a.cash_by_partition as Record<string, string>).map(([k, v]) => [k, toBigInt(v)]));
+    const partitions: Record<string, PartitionTreasury> | null = cashByPartition === null ? null : {};
+    const partitionOf = (key: string): PartitionTreasury => {
+      partitions![key] ??= { cash: cashByPartition![key] ?? 0n, heldAtCost: 0n, base: 0n, allocated: 0n, free: 0n };
+      return partitions![key];
+    };
+    if (partitions !== null) Object.keys(cashByPartition!).forEach(partitionOf);
     for (const p of positions.filter(p => p.account_id === a.account_id)) {
       const net = toBigInt(p.net_quantity);
       const cost = toBigInt(p.total_cost);
@@ -478,6 +539,20 @@ export async function accountTreasury(client: PoolClient, accountIds: number[] |
       heldAtCost += held;
       committed += withOrders;
       if (!p.held_by_session) idle += withOrders;
+      if (partitions !== null && p.venue_partition !== null) {
+        const partition = partitionOf(p.venue_partition);
+        partition.heldAtCost += held;
+        if (!p.held_by_session) partition.allocated += withOrders;
+      }
+    }
+    if (partitions !== null) {
+      for (const session of sessionPartitions.filter(s => s.account_id === a.account_id)) {
+        for (const key of session.partitions as string[]) partitionOf(key).allocated += toBigInt(session.budget);
+      }
+      for (const partition of Object.values(partitions)) {
+        partition.base = partition.cash + partition.heldAtCost;
+        partition.free = partition.base - partition.allocated;
+      }
     }
     const budget = budgets.find(b => b.account_id === a.account_id);
     const cashTotal = toBigInt(a.cash_total);
@@ -492,10 +567,13 @@ export async function accountTreasury(client: PoolClient, accountIds: number[] |
       cashAvailable: toBigInt(a.cash_available), portfolioValue: toBigInt(a.portfolio_value), redeemable,
       heldAtCost, committed, base, allocated, minBuffer, free: base - minBuffer - allocated,
       lowBalanceThreshold: toBigInt(a.low_balance_threshold),
-      cashByPartition: a.cash_by_partition === null ? null
-        : Object.fromEntries(Object.entries(a.cash_by_partition as Record<string, string>).map(([k, v]) => [k, toBigInt(v)])),
+      cashByPartition,
       partitionLowThresholds: Object.fromEntries(
         Object.entries((a.partition_low_thresholds ?? {}) as Record<string, string>).map(([k, v]) => [k, toBigInt(v)])),
+      rebalanceTargets: a.rebalance_targets ?? null,
+      partitionTargets: a.partition_targets ?? null,
+      rebalanceReservation: a.rebalance_reservation,
+      partitions,
     };
   });
 }

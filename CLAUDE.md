@@ -132,7 +132,10 @@ synth step, so run `npm test` yourself before handing off.
     (`{"query": "..."}`, returns rows) for read-only inspection.
   - ExchangeSyncStack: hourly security-master sync (Hyperliquid, Lighter adapters); in prod it reports to `#gnome-security-master`.
   - VenuePollerStack: every 5 min, reads each venue account's balances/positions and posts treasury snapshots for
-    reconciliation.
+    reconciliation. On Kalshi it reads cash per exchange shard and keeps the account's shard rebalancing targets
+    (`treasury.account_config.partition_targets`) set on Kalshi, with the read key (scopes `read` + `write::transfer`,
+    never `write`); it never touches the trading key. Each listing's shard is `sm.listing.venue_partition` (text, set
+    by the classifier); launch checks and the treasury rules check each shard a session trades on.
   - MarkPollerStack: every minute, marks listings still held after their sessions stopped.
   - SettlementSweeperStack: every 5 min, books SETTLEMENT entries for settled positions no session holds.
   - StrategySessionMonitorStack: updates session status from EC2 instance state-change events.

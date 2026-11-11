@@ -9,13 +9,14 @@ import {
   requireString,
 } from './propositions-common';
 import { raw, sql, where } from './sql';
-import { changeKeyAliases, listKeyAliases, parseRemove, parseSet } from './subject-key-aliases';
+import { changeKeyAliases, listKeyAliases, listRecentKeyAliases, parseRemove, parseSet } from './subject-key-aliases';
 
 // Proposition subjects. The classifier creates them (an upsert by key); everyone reads them, and the controller's
 // subject page asks for the subjects nearest one by embedding. Duplicates across subjects are found and judged by the
 // classifier's merge pass, which queues the merges it holds back in merge-candidates. A subject's key aliases (one
-// entity spelled two ways, `subject-key-aliases.ts`) are read with `keyAliases=true` and changed with PATCH: by the
-// classifier under the actor it names, or by a person.
+// entity spelled two ways, `subject-key-aliases.ts`) are read with `keyAliases=true` (with `subjectIds`, those subjects'
+// aliases; without, the latest changed across every subject) and changed with PATCH: by the classifier under the actor
+// it names, or by a person.
 
 const KEY_PATTERN = /^[a-z0-9][a-z0-9:._/-]{0,199}$/;
 const DEFAULT_LIMIT = 500;
@@ -37,7 +38,9 @@ export async function listSubjects(client: PoolClient, params: Record<string, st
   const limit = Math.min(Number(params.limit ?? DEFAULT_LIMIT) || DEFAULT_LIMIT, MAX_LIMIT);
   const offset = Number(params.offset ?? 0) || 0;
   if (params.keyAliases === 'true') {
-    if (params.subjectIds === undefined) throw new PropositionError(400, 'keyAliases needs subjectIds');
+    if (params.subjectIds === undefined) {
+      return listRecentKeyAliases(client, { origin: params.origin, since: params.since, limit, offset });
+    }
     return (await listKeyAliases(client, parseIdList(params.subjectIds))).slice(offset, offset + limit);
   }
 

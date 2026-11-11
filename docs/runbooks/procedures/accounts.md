@@ -15,7 +15,8 @@ Lifecycle: `PROVISIONING` → `ACTIVE` → `DRAINING` → `RETIRED` (a draining 
 2. On the **Treasury** page, click **Register account**, pick the exchange and enter the credentials (or upload them:
    a JSON file for Polymarket, the `.pem` key file for Kalshi). Every venue takes three keys of its own, each revocable
    without breaking the others: trading, the poller's (`/read`), and market data (set once per exchange, see below).
-   Create Kalshi's poller key with only the `read` scope. Polymarket Intl is the exception: the poller reads the
+   Create Kalshi's poller key with the `read` and `write::transfer` scopes and never `write`: the poller also keeps
+   the account's shard rebalancing targets set, which moves cash between its shards but can't trade. Polymarket Intl is the exception: the poller reads the
    wallet from the chain and its market data is public, so it takes only the trading key.
    The registry draws a gamer-tag label (e.g. `sleepy-otter-42`), stores the credentials in Secrets Manager as
    `gnome/accounts/<label>/trading` (and `/read`) in every trading region, derives the public identifiers (wallet
@@ -23,7 +24,10 @@ Lifecycle: `PROVISIONING` → `ACTIVE` → `DRAINING` → `RETIRED` (a draining 
    written to the database or logged; the dialog shows where they were stored.
 3. Wait for the venue poller to post a green balance snapshot (Treasury page).
 4. Record the account's `OPENING` transfer: the cash it holds now. Reconciliation starts there.
-5. Set the account's buffer and thresholds, then **Activate** it.
+5. Set the account's buffer and thresholds, then **Activate** it. On Kalshi, also set the shard rebalancing targets
+   (percent of free cash per shard, adding up to 100) in proportion to the budgets that will trade each shard: Kalshi
+   keeps each shard's cash for its own markets and never moves it for API orders on its own. Leave them empty to
+   turn rebalancing off, or unset to leave Kalshi's alone.
 
 ## Update an account's credentials
 

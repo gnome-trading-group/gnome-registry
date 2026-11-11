@@ -70,6 +70,8 @@ interface IListingBase {
   // The venue's keys that fee schedules target (sm.fee_schedule): a coarse group and the venue's own event id.
   feeGroup?: string | null;
   feeEvent?: string | null;
+  // The venue partition whose cash backs the listing's orders (a Kalshi exchange shard).
+  venuePartition?: string | null;
 }
 export interface ICreateListing extends IListingBase {}
 export interface IListing extends IListingBase {

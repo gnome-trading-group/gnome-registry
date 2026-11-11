@@ -62,6 +62,8 @@ describe('venue keys', () => {
   });
 });
 
+const UNMANAGED = { partition_targets: null, rebalance_reservation: 'sum' };
+
 // Real answers captured in Phase 0 (Kalshi demo, the Polymarket Intl test wallet), replayed through the readers.
 describe('venue readers on captured answers', () => {
   const fixture = (name: string) =>
@@ -70,15 +72,94 @@ describe('venue readers on captured answers', () => {
 
   afterEach(() => jest.restoreAllMocks());
 
-  it('reads Kalshi cash to the sub-cent from its dollars field', async () => {
+  const kalshiAnswers = (url: unknown) => {
+    const target = String(url);
+    if (target.includes('/subaccounts/balances')) return respond(fixture('kalshi-subaccount-balances.json'));
+    if (target.includes('/portfolio/balance')) return respond(fixture('kalshi-balance.json'));
+    return respond({ market_positions: [], cursor: '' });
+  };
+  const kalshiCredentials = () => {
     const { privateKey } = generateKeyPairSync('rsa', { modulusLength: 2048 });
-    jest.spyOn(global, 'fetch').mockImplementation(async (url) => respond(String(url).includes('/balance')
-      ? fixture('kalshi-balance.json') : { market_positions: [], cursor: '' }));
+    return { apiKey: 'k', privateKey: privateKey.export({ type: 'pkcs8', format: 'pem' }).toString() };
+  };
+
+  it('reads Kalshi cash to the sub-cent from its dollars field, per shard for the primary account', async () => {
+    jest.spyOn(global, 'fetch').mockImplementation(async (url) => kalshiAnswers(url));
     const reading = await readKalshi(
-      { account_id: 1, exchange_id: 1, exchange_code: 'KALSHI', label: 'x', venue_ref: {}, read_secret_name: null },
-      { apiKey: 'k', privateKey: privateKey.export({ type: 'pkcs8', format: 'pem' }).toString() });
+      { account_id: 1, exchange_id: 1, exchange_code: 'KALSHI', label: 'x', venue_ref: {}, read_secret_name: null, ...UNMANAGED },
+      kalshiCredentials());
     expect(reading.cashTotal).toBe(99_309_900_000n);
     expect(reading.cashByPartition).toEqual({ 0: 89_309_900_000n, 1: 0n, 2: 10_000_000_000n, 3: 0n });
+  });
+
+  // The balance's breakdown sums every subaccount, so a subaccount's shards must come from its own rows.
+  it('reads a Kalshi subaccount\'s shards from its own rows, not the account-wide breakdown', async () => {
+    const fetch = jest.spyOn(global, 'fetch').mockImplementation(async (url) => kalshiAnswers(url));
+    const reading = await readKalshi(
+      { account_id: 1, exchange_id: 1, exchange_code: 'KALSHI', label: 'x', venue_ref: { subaccount: 2 },
+        read_secret_name: null, ...UNMANAGED },
+      kalshiCredentials());
+    expect(reading.cashByPartition).toEqual({ 0: 40_000_000_000n, 3: 12_500_000_000n });
+    expect(fetch.mock.calls.map(([url]) => String(url)))
+      .toContain('https://external-api.kalshi.com/trade-api/v2/portfolio/balance?subaccount=2');
+  });
+
+  describe('Kalshi shard rebalancing', () => {
+    const kalshi = { account_id: 1, exchange_id: 1, exchange_code: 'KALSHI', label: 'x', venue_ref: {}, read_secret_name: null };
+    // Answers Kalshi's reads, holding the targets it was last set to, and records each request.
+    const venue = (targets: unknown, setStatus = 200) => {
+      let current = targets;
+      const requests: { method: string; url: string; body?: unknown }[] = [];
+      jest.spyOn(global, 'fetch').mockImplementation(async (url, init) => {
+        const target = String(url);
+        requests.push({ method: init?.method ?? 'GET', url: target, body: init?.body && JSON.parse(String(init.body)) });
+        if (!target.includes('/target_balance_allocation')) return kalshiAnswers(url);
+        if (init?.method !== 'POST') return respond(current);
+        if (setStatus !== 200) return new Response('{"error":{"code":"forbidden"}}', { status: setStatus });
+        current = JSON.parse(String(init.body));
+        return respond({});
+      });
+      return requests;
+    };
+    const posts = <T extends { method: string }>(requests: T[]) => requests.filter(r => r.method === 'POST');
+
+    it('reads the targets and leaves them alone when the account names none', async () => {
+      const requests = venue({ allocations: [{ exchange_index: 0, percent: 100 }], resting_margin_reservation: 'sum' });
+      const reading = await readKalshi({ ...kalshi, ...UNMANAGED }, kalshiCredentials());
+      expect(reading.rebalanceTargets).toEqual({ allocations: { 0: 100 }, restingMarginReservation: 'sum' });
+      expect(posts(requests)).toEqual([]);
+    });
+
+    it('sets targets that differ from the account\'s, then reads them back', async () => {
+      const requests = venue({ allocations: [], resting_margin_reservation: 'sum' });
+      const reading = await readKalshi(
+        { ...kalshi, partition_targets: { 0: 80, 3: 20 }, rebalance_reservation: 'max' }, kalshiCredentials());
+      expect(posts(requests).map(r => r.body)).toEqual([{
+        allocations: [{ exchange_index: 0, percent: 80 }, { exchange_index: 3, percent: 20 }],
+        resting_margin_reservation: 'max',
+      }]);
+      expect(reading.rebalanceTargets).toEqual({ allocations: { 0: 80, 3: 20 }, restingMarginReservation: 'max' });
+    });
+
+    it('leaves targets that match alone, a zero-percent shard counting as unnamed', async () => {
+      const requests = venue({
+        allocations: [{ exchange_index: 0, percent: 100 }, { exchange_index: 2, percent: 0 }],
+        resting_margin_reservation: 'sum',
+      });
+      await readKalshi({ ...kalshi, partition_targets: { 0: 100 }, rebalance_reservation: 'sum' }, kalshiCredentials());
+      expect(posts(requests)).toEqual([]);
+    });
+
+    it('records a refused change on the reading without failing it', async () => {
+      venue({ allocations: [], resting_margin_reservation: 'sum' }, 403);
+      const reading = await readKalshi(
+        { ...kalshi, partition_targets: { 0: 100 }, rebalance_reservation: 'sum' }, kalshiCredentials());
+      expect(reading.cashTotal).toBe(99_309_900_000n);
+      expect(reading.rebalanceTargets).toEqual({
+        allocations: {}, restingMarginReservation: 'sum',
+        error: 'setting the targets failed: 403 {"error":{"code":"forbidden"}}',
+      });
+    });
   });
 
   it('reads Polymarket Intl positions keyed by token, with resolved losers worth nothing', async () => {
@@ -88,7 +169,7 @@ describe('venue readers on captured answers', () => {
       ? { result: '0x0000000000000000000000000000000000000000000000000000000000f38054' }
       : fixture('polymarket-intl-positions.json')));
     const reading = await readPolymarketIntl({
-      account_id: 2, exchange_id: 2, exchange_code: 'POLYMARKET_INTL', label: 'x', read_secret_name: null,
+      account_id: 2, exchange_id: 2, exchange_code: 'POLYMARKET_INTL', label: 'x', read_secret_name: null, ...UNMANAGED,
       venue_ref: { funderAddress: '0xe65019f319d3b20a9883b43283c91ca9d8c81cfb' },
     });
     expect(reading.cashTotal).toBe(15_958_100_000n);
@@ -112,7 +193,7 @@ describe('venue readers on captured answers', () => {
         : { data: [row('1', 7.352, 0.0845)], pagination: { next_cursor: 'abc+/=' } });
     });
     const reading = await readPolymarketIntl({
-      account_id: 2, exchange_id: 2, exchange_code: 'POLYMARKET_INTL', label: 'x', read_secret_name: null,
+      account_id: 2, exchange_id: 2, exchange_code: 'POLYMARKET_INTL', label: 'x', read_secret_name: null, ...UNMANAGED,
       venue_ref: { funderAddress: '0xe65019f319d3b20a9883b43283c91ca9d8c81cfb' },
     });
     expect(reading.positions).toEqual([
@@ -224,7 +305,7 @@ describe('venue reads that fail transiently', () => {
         : { jsonrpc: '2.0', id: 1, result: '0x00000000000000000000000000000000000000000000000000000000000f4240' }));
     });
     const reading = await settle(readPolymarketIntl({
-      account_id: 2, exchange_id: 2, exchange_code: 'POLYMARKET_INTL', label: 'x', read_secret_name: null,
+      account_id: 2, exchange_id: 2, exchange_code: 'POLYMARKET_INTL', label: 'x', read_secret_name: null, ...UNMANAGED,
       venue_ref: { funderAddress: '0xe65019f319d3b20a9883b43283c91ca9d8c81cfb' },
     }));
     expect(reading.cashTotal).toBe(1_000_000_000n);
@@ -237,7 +318,7 @@ describe('venue reads that fail transiently', () => {
       ? new Response(JSON.stringify({ result: '0x0' }))
       : new Response('{"error":"Too Many Requests"}', { status: 429 }));
     const error = await settle(readPolymarketIntl({
-      account_id: 2, exchange_id: 2, exchange_code: 'POLYMARKET_INTL', label: 'x', read_secret_name: null,
+      account_id: 2, exchange_id: 2, exchange_code: 'POLYMARKET_INTL', label: 'x', read_secret_name: null, ...UNMANAGED,
       venue_ref: { funderAddress: '0xe65019f319d3b20a9883b43283c91ca9d8c81cfb' },
     }));
     expect((error as Error).message).toBe('Polymarket positions failed: 429 {"error":"Too Many Requests"}');

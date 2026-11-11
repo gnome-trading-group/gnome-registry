@@ -1,5 +1,5 @@
 import { PoolClient } from 'pg';
-import { accountTreasury, AccountTreasury } from './treasury';
+import { accountTreasury, AccountTreasury, sweptPartitions } from './treasury';
 
 // What a live session needs before it may be created. Both run inside the transaction that creates it, under the
 // per-exchange account lock, so two launches can't each pass on the same money.
@@ -56,21 +56,63 @@ function dollars(value: bigint): string {
   return `${sign}$${abs / 1_000_000_000n}.${String((abs % 1_000_000_000n) / 10_000_000n).padStart(2, '0')}`;
 }
 
+// The venue partitions a session's listings on one exchange trade on (Kalshi exchange shards), and those whose
+// partition isn't known yet.
+export interface SessionPartitions {
+  partitions: string[];
+  unknownListings: number[];
+}
+
+export async function sessionPartitions(
+  client: PoolClient, listings: number[], exchangeId: number,
+): Promise<SessionPartitions> {
+  const rows = (await client.query(
+    'SELECT listing_id, venue_partition FROM sm.listing WHERE listing_id = ANY($1::int[]) AND exchange_id = $2',
+    [listings, exchangeId])).rows;
+  return {
+    partitions: [...new Set(rows.filter(r => r.venue_partition !== null).map(r => r.venue_partition as string))].sort(),
+    unknownListings: rows.filter(r => r.venue_partition === null).map(r => r.listing_id as number),
+  };
+}
+
 // Whether an account can carry one more session with this budget: its latest reading must be recent, and what the
-// running sessions already claim plus this budget must leave the buffer free.
-export function shortfall(account: AccountTreasury, budget: bigint): string | null {
+// running sessions already claim plus this budget must leave the buffer free. Where the venue splits cash by
+// partition, each partition the session trades must carry the whole budget too, since its cash backs no other
+// partition's orders.
+export function shortfall(account: AccountTreasury, budget: bigint, session: SessionPartitions): string | null {
+  const name = `${account.exchangeCode} account ${account.label}`;
   if (!account.snapshotFresh) {
-    return `${account.exchangeCode} account ${account.label} has no recent balance snapshot; check the venue poller`;
+    return `${name} has no recent balance snapshot; check the venue poller`;
   }
   if (account.allocated + budget > account.base - account.minBuffer) {
-    return `${account.exchangeCode} account ${account.label} holds ${dollars(account.base)} with ${dollars(account.allocated)}`
+    return `${name} holds ${dollars(account.base)} with ${dollars(account.allocated)}`
       + ` allocated and ${dollars(account.minBuffer)} kept free, so it can't take a further ${dollars(budget)}`;
+  }
+  if (account.partitions === null) return null;
+  if (session.unknownListings.length > 0) {
+    return `${account.exchangeCode} splits cash by shard, and listing(s) ${session.unknownListings.join(', ')} have no`
+      + ' known shard yet; the classifier records it';
+  }
+  const swept = sweptPartitions(account, session.partitions);
+  if (swept.length > 0) {
+    return `${name} rebalances its cash off shard ${swept.join(', ')}, which this session trades; give it a share of the`
+      + ' rebalancing targets';
+  }
+  for (const key of session.partitions) {
+    const partition = account.partitions[key];
+    const base = partition?.base ?? 0n;
+    const allocated = partition?.allocated ?? 0n;
+    if (allocated + budget > base) {
+      return `${name} holds ${dollars(base)} on shard ${key} with ${dollars(allocated)} allocated there, so it can't`
+        + ` take a further ${dollars(budget)}; move cash onto shard ${key}`;
+    }
   }
   return null;
 }
 
 export async function requireAllocation(
-  client: PoolClient, strategyId: number, exchangeId: number, exchangeCode: string, accountId: number, now: Date,
+  client: PoolClient, strategyId: number, exchangeId: number, exchangeCode: string, accountId: number,
+  session: SessionPartitions, now: Date,
 ): Promise<void> {
   const budget = await allocationOf(client, strategyId, exchangeId);
   if (budget === null) {
@@ -78,6 +120,6 @@ export async function requireAllocation(
       `A live session needs a MAX_COMMITTED_CAPITAL for the strategy on ${exchangeCode} (not only per listing)`);
   }
   const [account] = await accountTreasury(client, [accountId], now);
-  const problem = shortfall(account, budget);
+  const problem = shortfall(account, budget, session);
   if (problem) throw new LaunchCheckError(422, problem);
 }
