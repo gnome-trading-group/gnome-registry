@@ -62,6 +62,24 @@ describeDb('subject key aliases, against Postgres', () => {
     expect(await isDirty(game)).toBe(true);
   });
 
+  it('marks every reading on the subject as changed, so derivation re-derives all of it', async () => {
+    const game = await subject('game:nba:2026-11-11:bos-tor');
+    const [a, b] = [1, 2];
+    for (const n of [a, b]) {
+      await client.query("INSERT INTO sm.security (symbol, description, type) VALUES ($1, $1, 1)", [`s${n}`]);
+    }
+    await client.query(`INSERT INTO sm.contract_proposition (security_id, subject_id, extracted_subject_id, fields, method,
+        extractor_version, source_hash, date_modified)
+      VALUES (1, $1, $1, '{"kind":"WINNER"}', 'VENUE', 'v1', 'h1', now() - interval '1 day'),
+             (2, $1, $1, '{"kind":"WINNER"}', 'VENUE', 'v1', 'h2', now() - interval '1 day')`, [game]);
+    await client.query("UPDATE sm.proposition_subject SET derived_at = now() - interval '1 hour' WHERE subject_id = $1", [game]);
+    await patchKeyAliases(client, { subjectId: game, set: [reconcile('bos', 'celtics')] }, 'me');
+    const changed = (await client.query(`SELECT count(*)::int AS n FROM sm.contract_proposition p
+      JOIN sm.proposition_subject s ON s.subject_id = p.subject_id
+      WHERE p.subject_id = $1 AND p.date_modified > s.derived_at`, [game])).rows[0].n;
+    expect(changed).toBe(2);
+  });
+
   it('carries the flags it knows and refuses others', async () => {
     const race = await subject('us-senate-2026-texas');
     await patchKeyAliases(client, { subjectId: race, set: [reconcile('james-talarico', 'democratic', ['PARTY_NOMINEE'])] }, 'me');
@@ -92,8 +110,8 @@ describeDb('subject key aliases, against Postgres', () => {
   it('keeps a merged subject\'s aliases on the subject it was merged into, and drops a merge\'s with its unmerge', async () => {
     const kept = await subject('game:cs2:2026-11-10:isg-reda');
     const merged = await subject('game:cs2:2026-11-10:redaisg-1400');
-    await mergeSubjects(client, merged, kept, 'classifier:subject-merger');
-    const mergeLogId = (await listMerges(client, { history: 'true' }))[0].merge_log_id;
+    const { merge_log_id: mergeLogId } = await mergeSubjects(client, merged, kept, 'classifier:subject-merger');
+    expect(mergeLogId).toBe((await listMerges(client, { history: 'true' }))[0].merge_log_id);
 
     await patchKeyAliases(client, { subjectId: merged, set: [
       { kind: 'ENTITY', key: 'reda', canonicalKey: 'red-canids-academy', origin: 'MERGE', mergeLogId },

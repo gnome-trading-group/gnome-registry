@@ -5,7 +5,8 @@ import { sql } from './sql';
 // One entity or measure spelled two ways on a subject (`phi` and `philadelphia`): the classifier's derivation reads
 // `key` as `canonical_key`. Aliases are stored on the subject's canonical subject and read across its merge tree. The
 // classifier writes the ones its merge pass and key reconcile judged; a person can add or remove one. Every change marks
-// the subject for a fresh derivation. A merge's aliases are removed with it on unmerge.
+// the subject for a fresh derivation and its propositions as changed: derivation re-derives only what changed since its
+// last pass, and an alias changes how every reading on the subject compares. A merge's aliases go with it on unmerge.
 
 const KINDS = ['ENTITY', 'MEASURE'];
 const ORIGINS = ['MERGE', 'RECONCILE', 'MANUAL'];
@@ -131,16 +132,24 @@ export async function changeKeyAliases(
     throw new PropositionError(409,
       `${chained.key} -> ${chained.canonical_key}, which is itself an alias; point it at the key that stands for the entity`);
   }
+  await touchReadings(client, tree);
   await touchSubjects(client, [target]);
   return listKeyAliases(client, [target]);
 }
 
-/** Removes the aliases recorded with a merge, when the merge is undone. */
+async function touchReadings(client: PoolClient, subjectIds: number[]) {
+  await client.query(sql`UPDATE sm.contract_proposition SET date_modified = now() WHERE subject_id = ANY(${subjectIds}::int[])`);
+}
+
+/** Removes the aliases recorded with a merge, when the merge is undone, and marks the readings they applied to as
+ * changed. */
 export async function removeMergeAliases(client: PoolClient, aliasSubjectId: number, canonicalSubjectId: number) {
-  return (await client.query(sql`
+  const removed = (await client.query(sql`
     DELETE FROM sm.subject_key_alias
     WHERE merge_log_id IN (
       SELECT merge_log_id FROM sm.proposition_subject_merge_log
       WHERE action = 'MERGE' AND alias_subject_id = ${aliasSubjectId} AND canonical_subject_id = ${canonicalSubjectId})`
   )).rowCount ?? 0;
+  if (removed > 0) await touchReadings(client, await subjectTree(client, await canonicalSubject(client, canonicalSubjectId)));
+  return removed;
 }

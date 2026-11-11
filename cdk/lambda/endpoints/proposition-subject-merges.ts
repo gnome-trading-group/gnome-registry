@@ -63,11 +63,12 @@ export async function listMerges(client: PoolClient, params: Record<string, stri
 async function logMerge(
   client: PoolClient, action: 'MERGE' | 'UNMERGE', aliasSubjectId: number, canonicalSubjectId: number, actor: string,
   propositionsMoved: number,
-) {
-  await client.query(sql`
+): Promise<number> {
+  return (await client.query(sql`
     INSERT INTO sm.proposition_subject_merge_log
       (alias_subject_id, canonical_subject_id, action, actor, propositions_moved)
-    VALUES (${aliasSubjectId}, ${canonicalSubjectId}, ${action}, ${actor}, ${propositionsMoved})`);
+    VALUES (${aliasSubjectId}, ${canonicalSubjectId}, ${action}, ${actor}, ${propositionsMoved})
+    RETURNING merge_log_id`)).rows[0].merge_log_id;
 }
 
 export async function mergeSubjects(client: PoolClient, fromSubjectId: number, intoSubjectId: number, actor: string) {
@@ -93,8 +94,9 @@ export async function mergeSubjects(client: PoolClient, fromSubjectId: number, i
       UPDATE sm.contract_proposition SET subject_id = ${target}, date_modified = now()
       WHERE extracted_subject_id = ANY(${tree}::int[])`)).rowCount;
     await touchSubjects(client, [fromSubjectId, target]);
-    await logMerge(client, 'MERGE', fromSubjectId, target, actor, moved ?? 0);
-    return { ...alias, propositions_moved: moved };
+    // The merge pass records the key aliases the merge's judge mapped against this entry, so an unmerge removes them.
+    const mergeLogId = await logMerge(client, 'MERGE', fromSubjectId, target, actor, moved ?? 0);
+    return { ...alias, propositions_moved: moved, merge_log_id: mergeLogId };
   }, { actor, reason: 'proposition subject merged' });
 }
 
