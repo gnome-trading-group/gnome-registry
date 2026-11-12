@@ -151,8 +151,8 @@ synth step, so run `npm test` yourself before handing off.
     rows keyed by the venue's id (`external_ref`) before reconciling; people no longer record deposits/withdrawals on
     polled venues. Liquidity rewards and maker/taker rebates are then given to the strategies that earned them
     (`treasury.transfer_allocation`, `endpoints/treasury-allocate.ts`) from the venue's per-market breakdown, which the
-    poller reads too; a Polymarket Intl wallet's liquidity breakdown needs its CLOB API key in the optional read
-    secret. Strategy PnL counts its allocations as `rewards`; firm PnL adds the rest as `nonTrading`.
+    poller reads too; a Polymarket Intl wallet's liquidity breakdown needs its CLOB API key, which account
+    creation and credential updates copy from the trading credentials into the read secret (never the private key). Strategy PnL counts its allocations as `rewards`; firm PnL adds the rest as `nonTrading`.
   - MarkPollerStack: every minute, marks listings still held after their sessions stopped.
   - IncentiveSyncStack: every 15 min, reads the venues' incentive programs (Kalshi liquidity incentives, Polymarket
     Intl liquidity rewards) from their public APIs and posts them to `/incentive-programs`, which keeps new and changed

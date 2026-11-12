@@ -1,7 +1,7 @@
 import { generateKeyPairSync } from 'crypto';
 import {
   CreateError, credentialsFor, emergencyCancel, emergencyRegion, MARKET_DATA_EXCHANGES, needsKey, readSecretFor,
-  refuseSharedKey, tradingSecretNameFor,
+  pollerCopy, tradingSecretNameFor,
   secretStatus,
 } from '../lambda/endpoints/venue-account-create';
 
@@ -70,9 +70,9 @@ describe('venue account credentials', () => {
     expect(() => readSecretFor('POLYMARKET_INTL', { apiKey: 'k' })).toThrow(/secret/);
     expect(readSecretFor('POLYMARKET_INTL', { apiKey: 'k', secret: 's', passphrase: 'p', ethereumPrivateKey: 'x' }))
       .toEqual({ apiKey: 'k', secret: 's', passphrase: 'p' });
-    expect(() => refuseSharedKey({ apiKey: 'k' }, { apiKey: 'k' })).toThrow(/its own API key/);
-    expect(() => refuseSharedKey({ apiKey: 'k' }, { apiKey: 'other' })).not.toThrow();
-    expect(() => refuseSharedKey({ apiKey: 'k' }, null)).not.toThrow();
+    const trading = { apiKey: 'k', secret: 's', passphrase: 'p', ethereumPrivateKey: '0xkey', funderAddress: '0xf' };
+    expect(pollerCopy('POLYMARKET_INTL', trading)).toEqual({ apiKey: 'k', secret: 's', passphrase: 'p' });
+    expect(pollerCopy('KALSHI', trading)).toBeNull();
   });
 
   it('leaves an account\'s trading secret where it is when only the poller\'s key is updated', () => {

@@ -118,8 +118,9 @@ const KEYS_NOT_NEEDED: Record<string, KeyKind[]> = {
   POLYMARKET_INTL: ['marketData'],
 };
 // The poller reads a Polymarket Intl wallet's balance and payouts from the chain and the public data API without
-// credentials; only the per-market split of its liquidity rewards needs the wallet's CLOB API key, so that key is
-// optional, and never holds the wallet's private key.
+// credentials; only the per-market split of its liquidity rewards needs the wallet's CLOB API key. Every CLOB key can
+// do the same (none can place an order without the private key), so the poller reuses the trading one, copied without
+// the private key whenever the trading credentials are saved; a separate one may still be given.
 const KEYS_OPTIONAL: Record<string, KeyKind[]> = {
   POLYMARKET_INTL: ['read'],
 };
@@ -152,12 +153,10 @@ export function readSecretFor(exchangeCode: string, fields: Fields | undefined):
   return credentialsFor(exchangeCode, fields, 'readCredentials').secret;
 }
 
-// The poller's key must be its own, so revoking or rotating one never breaks the other; a Polymarket CLOB key can also
-// cancel every order and delete itself, so the trading one must never sit in the poller's secret.
-export function refuseSharedKey(trading: Record<string, string>, read: Record<string, string> | null) {
-  if (read && read.apiKey === trading.apiKey) {
-    throw new CreateError(400, 'the poller needs its own API key, not the trading one');
-  }
+// The poller's copy of a Polymarket Intl wallet's CLOB key, from its trading credentials: never the private key.
+export function pollerCopy(exchangeCode: string, trading: Record<string, string>): Record<string, string> | null {
+  if (exchangeCode !== 'POLYMARKET_INTL') return null;
+  return { apiKey: trading.apiKey, secret: trading.secret, passphrase: trading.passphrase };
 }
 
 // Where the account's trading key lives after an update: under its label when one is given, else left wherever it
@@ -223,8 +222,7 @@ export async function createAccount(body: CreateRequest, actor: string) {
     `/exchanges?exchangeId=${body.exchangeId}`, 'GET', apiKey))[0];
   if (!exchange) throw new CreateError(400, `Unknown exchange ${body.exchangeId}`);
   const { secret, venueRef } = credentialsFor(exchange.exchange_code, body.credentials, 'credentials');
-  const readSecret = readSecretFor(exchange.exchange_code, body.readCredentials);
-  refuseSharedKey(secret, readSecret);
+  const readSecret = readSecretFor(exchange.exchange_code, body.readCredentials) ?? pollerCopy(exchange.exchange_code, secret);
 
   for (let attempt = 0; attempt < LABEL_ATTEMPTS; attempt++) {
     const label = gamertag();
@@ -302,8 +300,8 @@ export async function updateCredentials(body: UpdateRequest, actor: string) {
     const changed = identityChange(account.venue_ref, venueRef);
     if (changed) throw new CreateError(409, changed);
   }
-  const readSecret = readSecretFor(account.exchange_code, body.readCredentials);
-  if (secret) refuseSharedKey(secret, readSecret);
+  const readSecret = readSecretFor(account.exchange_code, body.readCredentials)
+    ?? (secret ? pollerCopy(account.exchange_code, secret) : null);
 
   const tradingSecretName = tradingSecretNameFor(account, secret !== null);
   const readSecretName = readSecret ? `gnome/accounts/${account.label}/read` : account.read_secret_name;

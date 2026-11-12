@@ -17,10 +17,10 @@ Lifecycle: `PROVISIONING` → `ACTIVE` → `DRAINING` → `RETIRED` (a draining 
    without breaking the others: trading, the poller's (`/read`), and market data (set once per exchange, see below).
    Create Kalshi's poller key with the `read` and `write::transfer` scopes and never `write`: the poller also keeps
    the account's shard rebalancing targets set, which moves cash between its shards but can't trade. Polymarket Intl is the exception: the poller reads the
-   wallet from the chain and its market data is public, so the poller's key is optional: a CLOB API key of the wallet's
-   own, derived with a new nonce (never the gateway's, never the private key), which only lets the poller split the
-   wallet's liquidity rewards by market so its strategies get them. It can be added later with **Update credentials**,
-   leaving the trading fields empty.
+   wallet from the chain and its market data is public, so it needs no poller key of its own: the registry copies the
+   wallet's CLOB API key (never the private key) into `/read` whenever the trading credentials are saved, which lets
+   the poller split the wallet's liquidity rewards by market so its strategies get them. A wallet registered before
+   that has no copy until its trading credentials are saved again (**Update credentials**).
    The registry draws a gamer-tag label (e.g. `sleepy-otter-42`), stores the credentials in Secrets Manager as
    `gnome/accounts/<label>/trading` (and `/read`) in every trading region, derives the public identifiers (wallet
    addresses, Kalshi subaccount) from them, and registers the account as `PROVISIONING`. The credentials are never
