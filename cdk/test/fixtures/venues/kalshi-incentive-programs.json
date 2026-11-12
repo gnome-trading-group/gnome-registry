@@ -1,0 +1,55 @@
+{
+  "incentive_programs": [
+    {
+      "discount_factor_bps": 5000,
+      "end_date": "2026-11-12T05:00:00Z",
+      "id": "ff8a66d6-67cc-4ca0-ac4f-cc5adadfcbf2",
+      "incentive_description": "series_lip",
+      "incentive_type": "liquidity",
+      "market_id": "01a15591-de97-7dab-bd83-407389008426",
+      "market_ticker": "KXRT-VIO-60",
+      "paid_out": true,
+      "period_reward": 1000000,
+      "start_date": "2026-11-11T05:00:00Z",
+      "target_size_fp": "1000.00"
+    },
+    {
+      "discount_factor_bps": 5000,
+      "end_date": "2026-11-12T15:31:05Z",
+      "id": "f6ba8edb-386e-4be9-9e87-c5361010b854",
+      "incentive_description": "series_lip",
+      "incentive_type": "liquidity",
+      "market_id": "01a16938-6f0c-76b0-ad39-800467ced399",
+      "market_ticker": "KXKEVCOUNT-26NOV01-T10",
+      "paid_out": false,
+      "period_reward": 2000000,
+      "start_date": "2026-11-13T05:00:00Z",
+      "target_size_fp": "1000.00"
+    },
+    {
+      "discount_factor_bps": 5000,
+      "end_date": "2026-11-05T10:00:00Z",
+      "id": "579d7c59-73ec-439d-af8d-48ef0f98892e",
+      "incentive_description": "series_lip",
+      "incentive_type": "liquidity",
+      "market_id": "acd8c8d8-9c39-4997-99b1-a713f6bd4bcd",
+      "market_ticker": "KXVOTEGENERAL-GOVPARTYCA-26XBEC-56",
+      "paid_out": false,
+      "period_reward": 1296200,
+      "start_date": "2026-11-04T05:43:10Z",
+      "target_size_fp": "1000.00"
+    },
+    {
+      "end_date": "2026-10-28T14:27:44Z",
+      "id": "0257ddaf-fb77-4a61-9184-359dd6e43292",
+      "incentive_description": "",
+      "incentive_type": "volume",
+      "market_id": "01a17a2d-7f27-7517-9002-b2aa7e1b8138",
+      "market_ticker": "KXMARATHONUSAWIN-NYCWOMEN26-Y",
+      "paid_out": true,
+      "period_reward": 10000000,
+      "start_date": "2026-10-27T21:05:00Z"
+    }
+  ],
+  "next_cursor": ""
+}

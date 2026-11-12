@@ -1,7 +1,7 @@
 import { APIGatewayProxyEvent } from 'aws-lambda';
 import { PoolClient } from 'pg';
 import { connectLedgerDatabase, createResponse, parsePositiveInt } from './ledger-common';
-import { markPrice } from './ledger-math';
+import { markPrice, pricedMark } from './ledger-math';
 import { pickResolution } from './pnl-math';
 import { toMark } from './pnl-state';
 
@@ -31,21 +31,22 @@ export async function marks(client: PoolClient, params: Record<string, string | 
   const to = end && end < now ? end : now;
   const stepMs = pickResolution(Math.max(0, to.getTime() - from.getTime()), requested);
   const rows = (await client.query(`
-    (SELECT ts, bid, ask, last_trade FROM ledger.mark WHERE listing_id = $1 AND ts <= $2 ORDER BY ts DESC LIMIT 1)
+    (SELECT ts, bid, ask, last_trade FROM ledger.mark WHERE listing_id = $1 AND ts <= $2 AND ${pricedMark()}
+     ORDER BY ts DESC LIMIT 1)
     UNION ALL
     (SELECT DISTINCT ON (date_bin($4::interval, ts, 'epoch'::timestamptz)) ts, bid, ask, last_trade
-     FROM ledger.mark WHERE listing_id = $1 AND ts > $2 AND ts <= $3
+     FROM ledger.mark WHERE listing_id = $1 AND ts > $2 AND ts <= $3 AND ${pricedMark()}
      ORDER BY date_bin($4::interval, ts, 'epoch'::timestamptz), ts DESC)`,
   [listingId, from, to, `${stepMs} milliseconds`])).rows;
   const result = { resolutionMs: stepMs, t: [] as number[], bid: [] as string[], ask: [] as string[],
-    lastTrade: [] as string[], mark: [] as string[] };
+    lastTrade: [] as string[], mark: [] as (string | null)[] };
   for (const r of rows) {
     // The mark in force at the window's start is drawn from the start.
     result.t.push(Math.max(from.getTime(), r.ts.getTime()));
     result.bid.push(String(r.bid));
     result.ask.push(String(r.ask));
     result.lastTrade.push(String(r.last_trade));
-    result.mark.push(markPrice(toMark(r)).toString());
+    result.mark.push(markPrice(toMark(r))?.toString() ?? null);
   }
   return result;
 }

@@ -5,7 +5,12 @@ import { writeBatch } from '../lambda/endpoints/ledger-batch';
 import { attention } from '../lambda/endpoints/monitoring-attention';
 import { StrategySessionHandler } from '../lambda/endpoints/strategy-sessions';
 import { recordSnapshot, SnapshotInput } from '../lambda/endpoints/treasury';
-import { pollTargets, recordTransfer, summary, updateConfig } from '../lambda/endpoints/treasury-api';
+import { pollTargets, recordTransfer, summary, transfers, updateConfig } from '../lambda/endpoints/treasury-api';
+import { CreditInput, parseSnapshot } from '../lambda/endpoints/treasury';
+import { allocatePending } from '../lambda/endpoints/treasury-allocate';
+import { summarize } from '../lambda/endpoints/pnl-summary';
+import { payoutDay } from '../lambda/sync/venues/types';
+import { series } from '../lambda/endpoints/pnl-series';
 import { registerAccount } from '../lambda/endpoints/venue-accounts';
 
 const url = process.env.LEDGER_TEST_DB;
@@ -217,7 +222,7 @@ describeDb('treasury, against Postgres', () => {
     expect(items.find(i => i.kind === 'RECON_MISMATCH')?.accountLabel).toBe('steady-heron-01');
 
     await recordTransfer(client, JSON.stringify({
-      accountId: kalshi, kind: 'WITHDRAWAL', amount: -1 * DOLLAR, occurredAt: t0.toISOString(), reason: 'paid out',
+      accountId: kalshi, kind: 'CORRECTION', amount: -1 * DOLLAR, occurredAt: t0.toISOString(), reason: 'paid out',
     }), 'ops@example.com');
     expect((await snapshot(kalshi, 9900, new Date(t0.getTime() + 7 * MINUTE))).cashStatus).toBe('OK');
   });
@@ -318,7 +323,7 @@ describeDb('treasury, against Postgres', () => {
   it('refuses a transfer whose sign contradicts its kind', async () => {
     const kalshi = await account(1, 'steady-heron-01');
     await expect(recordTransfer(client, JSON.stringify({
-      accountId: kalshi, kind: 'WITHDRAWAL', amount: DOLLAR, reason: 'oops',
+      accountId: kalshi, kind: 'INTEREST', amount: -DOLLAR, reason: 'oops',
     }), 'ops@example.com')).rejects.toThrow(/wrong sign/);
   });
 
@@ -506,5 +511,351 @@ describeDb('treasury, against Postgres', () => {
     await snapshot(falcon, 0, new Date());
     const items = await attention(client, 'live', new Date());
     expect(items.find(i => i.kind === 'ACCOUNT_READY_TO_RETIRE')?.accountId).toBe(falcon);
+  });
+  describe('venue credits', () => {
+    const credit = (externalRef: string, cents: number, at: Date, fields: Partial<CreditInput> = {}): CreditInput => ({
+      externalRef, kind: 'REWARD', program: 'LIQUIDITY', amount: String(Math.round(cents * CENT)), occurredAt: at.toISOString(),
+      venueMarket: null, venueType: 'REWARD', reverses: null, ...fields,
+    });
+
+    it('books each credit once, before reconciling, so the cash it added is explained in the same run', async () => {
+      const heron = await account(1, 'steady-heron-01');
+      await open(heron, 100);
+      const paid = new Date(Date.now() - 2 * MINUTE);
+      const credits = [credit('kalshi:credit:1', 250, paid), credit('kalshi:credit:2', 75, paid, { kind: 'INTEREST', program: 'INTEREST' })];
+      const first = await snapshot(heron, 10_325, new Date(), { credits });
+      expect(first).toMatchObject({ cashStatus: 'OK', creditsBooked: 2 });
+      const again = await snapshot(heron, 10_325, new Date(), { credits });
+      expect(again).toMatchObject({ cashStatus: 'OK', creditsBooked: 0 });
+      const rows = await transfers(client, { accountId: heron });
+      expect(rows.filter(r => r.actor === 'venue-poller').map(r => [r.external_ref, r.kind, r.program, r.allocation_state]))
+        .toEqual(expect.arrayContaining([
+          // A Kalshi liquidity credit naming no market can't be given to a strategy.
+          ['kalshi:credit:1', 'REWARD', 'LIQUIDITY', 'FAILED'],
+          ['kalshi:credit:2', 'INTEREST', 'INTEREST', null],
+        ]));
+    });
+
+    it('leaves out credits from before reconciliation started, and a reversal of something never booked', async () => {
+      const heron = await account(1, 'steady-heron-01');
+      await open(heron, 100);
+      const before = new Date(opened.getTime() - MINUTE);
+      const after = new Date(opened.getTime() + MINUTE);
+      const booked = await snapshot(heron, 10_000, new Date(), {
+        credits: [
+          credit('kalshi:dep:old', 500, before, { kind: 'DEPOSIT', program: null }),
+          credit('kalshi:wd:x:reversal', 40, after, { kind: 'CORRECTION', program: null, reverses: 'kalshi:wd:x' }),
+          credit('kalshi:wd:y', -40, after, { kind: 'WITHDRAWAL', program: null }),
+          credit('kalshi:wd:y:reversal', 40, after, { kind: 'CORRECTION', program: null, reverses: 'kalshi:wd:y' }),
+        ],
+      });
+      expect(booked).toMatchObject({ creditsBooked: 2, cashStatus: 'OK' });
+    });
+
+    it('starts reading from reconciliation, then from a little before the newest credit booked', async () => {
+      const heron = await account(1, 'steady-heron-01');
+      let [target] = await pollTargets(client);
+      expect(target.credits_since).toBeNull();
+      await open(heron, 100);
+      [target] = await pollTargets(client);
+      expect(new Date(target.credits_since).getTime()).toBe(opened.getTime());
+      const since = new Date(Date.now() - 10 * 86_400_000);
+      await updateConfig(client, JSON.stringify({ accountId: heron, reconSince: since.toISOString() }), 'ops@example.com');
+      const paid = new Date(Date.now() - 2 * 86_400_000);
+      await snapshot(heron, 10_100, new Date(), { credits: [credit('kalshi:credit:9', 100, paid)] });
+      [target] = await pollTargets(client);
+      expect(new Date(target.credits_since).getTime()).toBe(paid.getTime() - 3 * 86_400_000);
+      // A credit dated in the future is a bad date: booking it would move every later read past what follows it.
+      const future = new Date(Date.now() + 5 * 86_400_000);
+      expect(await snapshot(heron, 10_100, new Date(), { credits: [credit('kalshi:credit:10', 100, future)] }))
+        .toMatchObject({ creditsBooked: 0 });
+      [target] = await pollTargets(client);
+      expect(new Date(target.credits_since).getTime()).toBe(paid.getTime() - 3 * 86_400_000);
+    });
+
+    it('takes credits only from the venue poller', async () => {
+      const heron = await account(1, 'steady-heron-01');
+      await open(heron, 100);
+      expect(() => parseSnapshot(JSON.stringify({
+        accountId: heron, status: 'OK', cashTotal: '1', credits: [credit('kalshi:dep:x', 100, new Date(), { kind: 'DEPOSIT', program: null })],
+      }), 'MANUAL', 'ops@example.com')).toThrow(/only the venue poller/);
+    });
+
+    it('leaves deposits and withdrawals on polled venues to the poller, and filters the list', async () => {
+      const heron = await account(1, 'steady-heron-01');
+      await open(heron, 100);
+      const record = (fields: Record<string, unknown>) => recordTransfer(client, JSON.stringify({
+        accountId: heron, amount: 5 * DOLLAR, reason: 'test', ...fields,
+      }), 'ops@example.com');
+      await expect(record({ kind: 'DEPOSIT' })).rejects.toThrow(/poller books KALSHI deposits/);
+      await expect(record({ kind: 'CORRECTION', program: 'LIQUIDITY' })).rejects.toThrow(/only a REWARD or INTEREST/);
+      await record({ kind: 'CORRECTION' });
+      await record({ kind: 'REWARD', program: 'REFERRAL' });
+      expect((await transfers(client, { accountId: heron, program: 'REFERRAL' })).map(r => r.kind)).toEqual(['REWARD']);
+      expect((await transfers(client, { accountId: null, kind: 'OPENING' }))).toHaveLength(1);
+    });
+  });
+  describe('reward allocation', () => {
+    const HOUR = 60 * MINUTE;
+    const reward = (externalRef: string, cents: number, at: Date, program: string, venueMarket: string | null = null) => ({
+      externalRef, kind: 'REWARD', program, amount: String(Math.round(cents * CENT)), occurredAt: at.toISOString(),
+      venueMarket, venueType: program, reverses: null,
+    });
+
+    let fills = 1000;
+    async function fill(sessionId: string, listingId: number, qty: number, cents: number, liquidity: 'MAKER' | 'TAKER',
+      feeCents = 0, at = new Date()) {
+      fills++;
+      await withTransaction(client, (c) => writeBatch(c, sessionId, JSON.stringify({
+        sessionId,
+        fills: [{
+          source: 'VENUE', listingId, clientOidCounter: fills, cumQtyAfter: qty * UNIT, side: 0, fillQty: qty * UNIT,
+          fillPrice: Math.round(cents * CENT), fee: Math.round(feeCents * CENT), eventTimeNs: at.getTime() * 1_000_000,
+          netQuantityAfter: qty * UNIT,
+          totalCostAfter: Math.round(qty * cents * CENT), realizedPnlAfter: 0, feesAfter: Math.round(feeCents * CENT),
+          positionVersion: fills, liquidity,
+        }],
+      })));
+    }
+
+    async function resting(sessionId: string, strategyId: number, listingId: number, accountId: number, size: number,
+      from: Date, to: Date) {
+      fills++;
+      await client.query(
+        `INSERT INTO ledger.order (session_id, client_oid_counter, strategy_id, listing_id, exchange_id, mode, side, price,
+           size, status, opened_at, acked_at, closed_at, account_id)
+         SELECT $1, $2, $3, $4, exchange_id, 'live', 0, $5, $6, 'CLOSED', $7, $7, $8, $9 FROM sm.listing WHERE listing_id = $4`,
+        [sessionId, fills, strategyId, listingId, 40 * CENT, size * UNIT, from, to, accountId]);
+    }
+
+    // Two strategies with $10 budgets each, on an account holding enough for both.
+    async function launchBoth(accountId: number, exchangeId: number, first: number, second: number) {
+      await requiredPolicies(10, exchangeId, 1);
+      await requiredPolicies(10, exchangeId, 2);
+      await snapshot(accountId, 10_000, new Date(Date.now() - MINUTE));
+      expect((await live('a', [first], 1, false)).statusCode).toBe(200);
+      expect((await live('b', [second], 2, false)).statusCode).toBe(200);
+    }
+
+    const allocations = async () => (await client.query(
+      `SELECT t.external_ref, al.strategy_id, al.listing_id, al.venue_market, al.amount::text, al.basis
+       FROM treasury.transfer_allocation al JOIN treasury.transfer t USING (transfer_id) ORDER BY al.allocation_id`)).rows;
+    const state = async (ref: string) => (await client.query(
+      'SELECT allocation_state FROM treasury.transfer WHERE external_ref = $1', [ref])).rows[0]?.allocation_state;
+
+    it('gives a Polymarket maker rebate to the strategies whose maker fills earned it, market by market', async () => {
+      const falcon = await account(2, 'quiet-falcon-01');
+      await open(falcon, 100);
+      await launchBoth(falcon, 2, 600, 601);
+      // Paid now for the UTC day it covers; the fills happened on that day, on the venue.
+      const now = new Date();
+      const paid = now;
+      const day = payoutDay(paid);
+      const dayEnd = new Date(day.getTime() + 24 * HOUR);
+      await fill('a', 600, 10, 40, 'MAKER', 0, new Date(day.getTime() + HOUR));
+      await fill('b', 601, 30, 40, 'MAKER', 0, new Date(day.getTime() + HOUR));
+      const ref = 'pm:MAKER_REBATE:0xabc:4000000000:0';
+      const result = await snapshot(falcon, 8_800, now, {
+        credits: [reward(ref, 400, paid, 'MAKER_REBATE')],
+        breakdowns: [{
+          externalRef: ref,
+          markets: [
+            { venueMarket: '0xc1', amount: String(300 * CENT), from: day.toISOString(), to: dayEnd.toISOString(),
+              periodStart: day.toISOString(), periodEnd: dayEnd.toISOString() },
+            { venueMarket: '0xc2', amount: String(100 * CENT), from: day.toISOString(), to: dayEnd.toISOString(),
+              periodStart: day.toISOString(), periodEnd: dayEnd.toISOString() },
+          ],
+        }],
+      });
+      expect(result).toMatchObject({ creditsBooked: 1, rewardsAllocated: 1, cashStatus: 'OK' });
+      expect(await allocations()).toEqual([
+        { external_ref: ref, strategy_id: 1, listing_id: 600, venue_market: '0xc1', amount: String(75 * CENT), basis: 'MAKER_FILLS' },
+        { external_ref: ref, strategy_id: 2, listing_id: 601, venue_market: '0xc1', amount: String(225 * CENT), basis: 'MAKER_FILLS' },
+      ]);
+      // No strategy of ours made on 0xc2: its part stays the firm's, listed with why.
+      expect(await state(ref)).toBe('PARTIAL');
+      const kept = (await client.query(
+        `SELECT t.unallocated, al.period_start, al.period_end, al.strategies FROM treasury.transfer t
+         JOIN treasury.transfer_allocation al USING (transfer_id) WHERE t.external_ref = $1`, [ref])).rows;
+      expect(kept[0].unallocated).toEqual([expect.objectContaining({ venueMarket: '0xc2', amount: String(100 * CENT) })]);
+      expect(kept.map(r => [r.period_start.getTime(), r.period_end.getTime(), r.strategies]))
+        .toEqual([[day.getTime(), dayEnd.getTime(), 2], [day.getTime(), dayEnd.getTime(), 2]]);
+      const [row] = await transfers(client, { accountId: null, strategyId: 2 });
+      expect(row.allocations).toEqual([
+        expect.objectContaining({ strategyId: 1, amount: String(75 * CENT) }),
+        expect.objectContaining({ strategyId: 2, amount: String(225 * CENT) }),
+      ]);
+    });
+
+    it('splits a liquidity reward between strategies by how long their quotes rested on the market', async () => {
+      const heron = await account(1, 'steady-heron-01');
+      await open(heron, 100);
+      await launchBoth(heron, 1, 500, 501);
+      const now = new Date();
+      await resting('a', 1, 500, heron, 100, new Date(now.getTime() - 10 * HOUR), new Date(now.getTime() - 8 * HOUR));
+      await resting('b', 2, 501, heron, 100, new Date(now.getTime() - 9 * HOUR), new Date(now.getTime() - 3 * HOUR));
+      await resting('b', 2, 501, heron, 100, new Date(now.getTime() - 60 * HOUR), new Date(now.getTime() - 50 * HOUR));
+      await snapshot(heron, 10_100, now, { credits: [reward('kalshi:credit:lip', 100, now, 'LIQUIDITY', 'T')] });
+      expect(await allocations()).toEqual([
+        { external_ref: 'kalshi:credit:lip', strategy_id: 1, listing_id: 500, venue_market: 'T', amount: String(25 * CENT), basis: 'RESTING_TIME' },
+        { external_ref: 'kalshi:credit:lip', strategy_id: 2, listing_id: 501, venue_market: 'T', amount: String(75 * CENT), basis: 'RESTING_TIME' },
+      ]);
+    });
+
+    it('gives a taker rebate by taker fees paid, and leaves it to the firm when none were', async () => {
+      const heron = await account(1, 'steady-heron-01');
+      await open(heron, 100);
+      await snapshot(heron, 10_003, new Date(), { credits: [reward('pmus:early', 3, new Date(), 'TAKER_REBATE')] });
+      expect(await state('pmus:early')).toBe('FAILED');
+      await launchBoth(heron, 1, 500, 501);
+      await fill('a', 500, 1, 40, 'TAKER', 3);
+      await fill('b', 501, 1, 40, 'TAKER', 1);
+      await snapshot(heron, 10_003 - 80 - 4 + 8, new Date(), { credits: [reward('pmus:week', 8, new Date(), 'TAKER_REBATE')] });
+      expect(await allocations()).toEqual([
+        { external_ref: 'pmus:week', strategy_id: 1, listing_id: null, venue_market: null, amount: String(6 * CENT), basis: 'TAKER_FEES' },
+        { external_ref: 'pmus:week', strategy_id: 2, listing_id: null, venue_market: null, amount: String(2 * CENT), basis: 'TAKER_FEES' },
+      ]);
+    });
+
+    it('waits for a breakdown that adds up to the payout, then leaves it to the firm and flags it', async () => {
+      const falcon = await account(2, 'quiet-falcon-01');
+      await open(falcon, 100);
+      const now = new Date();
+      const ref = 'pm:REWARD:0xdef:5000000000:0';
+      const wrong = [{ externalRef: ref, markets: [
+        { venueMarket: '0xc1', amount: String(300 * CENT), from: now.toISOString(), to: now.toISOString() },
+      ] }];
+      await snapshot(falcon, 10_500, now, { credits: [reward(ref, 500, now, 'LIQUIDITY')], breakdowns: wrong });
+      expect(await state(ref)).toBe('PENDING');
+      const [target] = (await pollTargets(client)).filter(t => t.account_id === falcon);
+      expect(target.pending_credits).toEqual([expect.objectContaining({ external_ref: ref, program: 'LIQUIDITY' })]);
+      const later = new Date(now.getTime() + 11 * 24 * HOUR);
+      await snapshot(falcon, 10_500, later);
+      expect(await state(ref)).toBe('FAILED');
+      expect((await attention(client, 'live', later)).filter(i => i.kind === 'REWARD_UNALLOCATED').map(i => i.accountId))
+        .toEqual([falcon]);
+    });
+
+    it('counts a strategy\'s rewards in its PnL outside sessions, and the rest in the firm\'s non-trading PnL', async () => {
+      const heron = await account(1, 'steady-heron-01');
+      await open(heron, 100);
+      await launchBoth(heron, 1, 500, 501);
+      const now = new Date();
+      await resting('a', 1, 500, heron, 100, new Date(now.getTime() - 4 * HOUR), new Date(now.getTime() - 2 * HOUR));
+      await snapshot(heron, 10_350, now, { credits: [
+        reward('kalshi:credit:lip', 100, now, 'LIQUIDITY', 'T'),
+        { ...reward('kalshi:credit:apy', 250, now, 'INTEREST'), kind: 'INTEREST' },
+      ] });
+      const later = new Date(now.getTime() + MINUTE);
+      const strategy = await summarize(client, { strategyId: '1', mode: 'live' }, later) as any;
+      expect(strategy.totals).toMatchObject({
+        lifetime: String(100 * CENT), today: String(100 * CENT), rewards: String(100 * CENT),
+        outsideSessions: expect.objectContaining({ rewards: String(100 * CENT), carry: '0' }),
+      });
+      const firm = await summarize(client, { mode: 'live' }, later) as any;
+      expect(firm.totals).toMatchObject({ lifetime: String(350 * CENT), rewards: String(100 * CENT), nonTrading: String(250 * CENT) });
+      expect(firm.nonTrading.byProgram).toEqual({ INTEREST: { lifetime: String(250 * CENT), today: String(250 * CENT) } });
+      expect(firm.strategies.find((x: any) => x.strategyId === 1)).toMatchObject({ lifetime: String(100 * CENT) });
+      expect((await summarize(client, { mode: 'paper' }, later) as any).totals.nonTrading).toBe('0');
+      const chart = await series(client, { mode: 'live', start: new Date(now.getTime() - HOUR).toISOString() }, later) as any;
+      expect(chart.total.at(-1)).toBe(String(350 * CENT));
+      expect(chart.strategies.find((x: any) => x.strategyId === 1).total.at(-1)).toBe(String(100 * CENT));
+      expect(chart.events.map((e: any) => e.kind).sort()).toEqual(['NON_TRADING', 'REWARD']);
+      // A listing's own line is its trading PnL, as its summary row is.
+      const listingChart = await series(client, {
+        strategyId: '1', mode: 'live', listingId: '500', start: new Date(now.getTime() - HOUR).toISOString(),
+      }, later) as any;
+      expect(listingChart.total.at(-1)).toBe('0');
+      const strategyChart = await series(client, { strategyId: '1', mode: 'live', start: new Date(now.getTime() - HOUR).toISOString() }, later) as any;
+      expect(strategyChart.total.at(-1)).toBe(String(100 * CENT));
+    });
+
+    it('allocates a reward once when two readings of the account race', async () => {
+      const heron = await account(1, 'steady-heron-01');
+      await open(heron, 100);
+      await launchBoth(heron, 1, 500, 501);
+      await fill('a', 500, 1, 40, 'TAKER', 3);
+      // Booked by one reading, allocated by two at once: the second waits on the first's row lock, then finds it done.
+      const now = new Date();
+      await withTransaction(client, (c) => c.query(
+        `INSERT INTO treasury.transfer (account_id, kind, amount, occurred_at, external_ref, reason, actor, program,
+           allocation_state) VALUES ($1, 'REWARD', $2, $3, 'pmus:race', 'test', 'venue-poller', 'TAKER_REBATE', 'PENDING')`,
+        [heron, 3 * CENT, now]));
+      const other = await pool.connect();
+      try {
+        const accountRow = { account_id: heron, exchange_code: 'KALSHI' };
+        const settled = await Promise.all([
+          withTransaction(client, (c) => allocatePending(c, accountRow, [], now)),
+          withTransaction(other, (c) => allocatePending(c, accountRow, [], now)),
+        ]);
+        expect(settled.sort()).toEqual([0, 1]);
+      } finally {
+        other.release();
+      }
+      expect((await allocations()).filter(a => a.external_ref === 'pmus:race')).toHaveLength(1);
+    });
+
+    it('finds the markets of a Kalshi event a credit names by its event ticker', async () => {
+      const heron = await account(1, 'steady-heron-01');
+      await open(heron, 100);
+      await client.query(`UPDATE sm.listing SET exchange_security_id = 'KXRT-26NOV14-EBEN-75:yes' WHERE listing_id = 500`);
+      await launchBoth(heron, 1, 500, 501);
+      const now = new Date();
+      await resting('a', 1, 500, heron, 100, new Date(now.getTime() - 4 * HOUR), new Date(now.getTime() - 2 * HOUR));
+      await snapshot(heron, 10_100, now, { credits: [reward('kalshi:credit:ev', 100, now, 'LIQUIDITY', 'KXRT-26NOV14-EBEN')] });
+      expect((await allocations()).map(a => [a.strategy_id, a.listing_id, a.amount])).toEqual([[1, 500, String(100 * CENT)]]);
+      expect(await state('kalshi:credit:ev')).toBe('DONE');
+    });
+
+    it('pays a Polymarket US liquidity payout in arrears from its oldest unpaid days, never a day twice', async () => {
+      await client.query(`INSERT INTO sm.exchange (exchange_id, exchange_name, region, exchange_code)
+        VALUES (3, 'Polymarket US', 'us-east-1', 'POLYMARKET_US')`);
+      await client.query(`INSERT INTO sm.security (security_id, symbol, type, contract_type) VALUES (5, 'S', 4, 7)`);
+      await client.query(`INSERT INTO sm.listing (listing_id, exchange_id, security_id, exchange_security_id)
+        VALUES (700, 3, 5, 'slug-a:long')`);
+      const otter = await account(3, 'brisk-badger-01');
+      await open(otter, 100);
+      await requiredPolicies(10, 3, 1);
+      await snapshot(otter, 10_000, new Date(Date.now() - MINUTE));
+      expect((await live('a', [700], 1, false)).statusCode).toBe(200);
+      const now = new Date();
+      await resting('a', 1, 700, otter, 100, new Date(now.getTime() - 3 * 24 * HOUR), now);
+      const day = (daysAgo: number, dollars: number) => {
+        const from = new Date(now.getTime() - daysAgo * 24 * HOUR);
+        const to = new Date(from.getTime() + 20 * HOUR);
+        return { venueMarket: 'slug-a', amount: String(dollars * 100 * Number(CENT)), from: from.toISOString(), to: to.toISOString(),
+          periodStart: from.toISOString(), periodEnd: to.toISOString() };
+      };
+      const earned = [day(3, 1), day(2, 2), day(1, 4)];
+      await snapshot(otter, 10_300, now, {
+        credits: [reward('pmus:L1', 300, now, 'LIQUIDITY')], breakdowns: [{ externalRef: 'pmus:L1', markets: earned, inArrears: true }],
+      });
+      // The next payout is the days left, though the venue lists the paid ones again.
+      await snapshot(otter, 10_700, now, {
+        credits: [reward('pmus:L2', 400, now, 'LIQUIDITY')], breakdowns: [{ externalRef: 'pmus:L2', markets: earned, inArrears: true }],
+      });
+      expect((await allocations()).map(a => [a.external_ref, a.amount])).toEqual([
+        ['pmus:L1', String(100 * CENT)], ['pmus:L1', String(200 * CENT)], ['pmus:L2', String(400 * CENT)],
+      ]);
+    });
+
+    it('never gives out more of a transfer than was paid', async () => {
+      const heron = await account(1, 'steady-heron-01');
+      await open(heron, 100);
+      await snapshot(heron, 10_001, new Date(), { credits: [reward('k:1', 1, new Date(), 'VOLUME')] });
+      const { transfer_id } = (await client.query(`SELECT transfer_id FROM treasury.transfer WHERE external_ref = 'k:1'`)).rows[0];
+      await expect(withTransaction(client, (c) => c.query(
+        `INSERT INTO treasury.transfer_allocation (transfer_id, strategy_id, amount, earned_from, earned_to, basis, strategies)
+         VALUES ($1, 1, $2, NOW() - INTERVAL '1 day', NOW(), 'RESTING_TIME', 1)`,
+        [transfer_id, 2 * CENT]))).rejects.toThrow(/allocates/);
+    });
+
+    it('flags a credit booked under a type the poller doesn\'t know', async () => {
+      const heron = await account(1, 'steady-heron-01');
+      await open(heron, 100);
+      await snapshot(heron, 10_200, new Date(), { credits: [reward('kalshi:credit:x', 200, new Date(), 'UNCLASSIFIED')] });
+      const items = (await attention(client, 'live', new Date())).filter(i => i.kind === 'VENUE_CREDIT_UNCLASSIFIED');
+      expect(items.map(i => i.title)).toEqual(['steady-heron-01 was paid $2.00 under a type the poller doesn\'t know']);
+    });
   });
 });

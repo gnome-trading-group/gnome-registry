@@ -17,11 +17,11 @@ Something traded or moved money that the ledger didn't record (or recorded wrong
 
 ## Diagnose
 
-Treasury shows the expected and venue figures. Look for unrecorded transfers, fills missed by a fenced or failing ledger, manual trades on the venue, or settlement payouts ([accounts](../procedures/accounts.md)).
+Treasury shows the expected and venue figures. Look for money the venue poller didn't book (the snapshot's raw `creditsErrors` says when it couldn't read the venue's credits; money taken out under a type it doesn't know is deliberately left for this alert), fills missed by a fenced or failing ledger, manual trades on the venue, or settlement payouts ([accounts](../procedures/accounts.md)).
 
 ## Resolve
 
-Record the missing transfer, or adjust the ledger once you know what happened.
+Once you know what happened: if the poller couldn't read credits, fix that and it books them on its next run; otherwise record a `CORRECTION` (deposits and withdrawals on polled venues are the poller's to book), or adjust the ledger.
 
 ## Escalate
 

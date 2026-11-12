@@ -30,7 +30,8 @@ export class VenuePollerStack extends cdk.Stack {
     this.pollerLambda = new lambda.NodejsFunction(this, 'venue-poller-lambda', {
       entry: join(__dirname, '..', '..', 'lambda', 'sync', 'venue-poller.ts'),
       runtime: Runtime.NODEJS_20_X,
-      timeout: cdk.Duration.seconds(120),
+      // Each account also reads its credits and reward breakdowns; well inside the 5-minute schedule.
+      timeout: cdk.Duration.seconds(240),
       memorySize: 512,
       environment: {
         REGISTRY_API_URL: `https://${props.api.restApiId}.execute-api.${this.region}.${this.urlSuffix}/${ApiStack.STAGE_NAME}/`,

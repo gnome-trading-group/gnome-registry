@@ -1,6 +1,6 @@
 import { APIGatewayProxyEvent } from 'aws-lambda';
 import { connectLedgerDatabase, createResponse, isSessionId } from './ledger-common';
-import { markPrice, notional, toBigInt } from './ledger-math';
+import { markPrice, notional, pricedMark, toBigInt } from './ledger-math';
 import { listingColumns, pageFilters, pageOrder } from './ledger-page';
 import { toMark } from './pnl-state';
 
@@ -21,7 +21,7 @@ const SELECT_FILLS = `
   ${listingColumns('f')}
   LEFT JOIN LATERAL (
     SELECT bid, ask, last_trade FROM ledger.mark m
-    WHERE m.listing_id = f.listing_id AND f.fill_price IS NOT NULL
+    WHERE m.listing_id = f.listing_id AND f.fill_price IS NOT NULL AND ${pricedMark('m')}
       AND m.ts <= CASE WHEN f.event_time_ns >= ${MIN_EPOCH_NS}
         THEN to_timestamp(f.event_time_ns::numeric / 1e9) ELSE f.recorded_at END
     ORDER BY m.ts DESC LIMIT 1
@@ -62,12 +62,12 @@ export function withSlippage<T extends Record<string, unknown>>(row: T) {
   const mark = markPrice(toMark({ bid: row.mark_bid, ask: row.mark_ask, last_trade: row.mark_last_trade }));
   let slippage: string | null = null;
   // A settlement trades at the market's result, not against its book, so it has no slippage.
-  if (mark !== 0n && row.fill_price !== null && row.fill_qty !== null && row.source !== 'SETTLEMENT') {
+  if (mark !== null && row.fill_price !== null && row.fill_qty !== null && row.source !== 'SETTLEMENT') {
     const price = toBigInt(row.fill_price);
     const better = row.side === 0 ? mark - price : price - mark;
     slippage = notional(better, toBigInt(row.fill_qty)).toString();
   }
-  return { ...row, mark_price: mark === 0n ? null : mark.toString(), slippage };
+  return { ...row, mark_price: mark?.toString() ?? null, slippage };
 }
 
 export const handler = async (event: APIGatewayProxyEvent) => {

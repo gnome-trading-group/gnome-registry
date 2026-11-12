@@ -1,0 +1,200 @@
+{
+ "activities": [
+  {
+   "type": "ACTIVITY_TYPE_TRANSFER",
+   "accountBalanceChange": {
+    "transactionId": "D4CF2F5GE010",
+    "status": "ACCOUNT_BALANCE_CHANGE_STATUS_COMPLETED",
+    "amount": {
+     "value": "0.03",
+     "currency": "USD"
+    },
+    "updateTime": "2026-10-16T16:34:40.093304355Z",
+    "paymentMethod": null,
+    "createTime": "2026-10-16T16:34:40.093304355Z",
+    "transactions": [
+     {
+      "transactionId": "D4CF2F5GE010",
+      "status": "ACCOUNT_BALANCE_CHANGE_STATUS_COMPLETED",
+      "amount": {
+       "value": "0.03",
+       "currency": "USD"
+      },
+      "updateTime": "2026-10-16T16:34:40.093304355Z",
+      "paymentMethod": null,
+      "createTime": "2026-10-16T16:34:40.093304355Z",
+      "externalId": "",
+      "description": "",
+      "metadata": {},
+      "failureReason": "",
+      "failureCode": "",
+      "failureAction": null,
+      "paypal": null,
+      "reviewStatus": "TRANSACTION_REVIEW_STATUS_SKIPPED",
+      "cancelable": false,
+      "advancedAmount": null,
+      "transferReason": "TRANSFER_REASON_UNSPECIFIED",
+      "promoCode": ""
+     }
+    ],
+    "externalId": "",
+    "description": "",
+    "metadata": {},
+    "failureReason": "",
+    "failureCode": "",
+    "failureAction": null,
+    "transferReason": "TRANSFER_REASON_UNSPECIFIED",
+    "promoCode": ""
+   }
+  },
+  {
+   "type": "ACTIVITY_TYPE_ACCOUNT_DEPOSIT",
+   "accountBalanceChange": {
+    "transactionId": "D2WC1C548010",
+    "status": "ACCOUNT_BALANCE_CHANGE_STATUS_COMPLETED",
+    "amount": {
+     "value": "10",
+     "currency": "USD"
+    },
+    "updateTime": "2026-10-16T15:39:17.752841456Z",
+    "paymentMethod": null,
+    "createTime": "2026-10-14T01:24:12.196039664Z",
+    "transactions": [
+     {
+      "transactionId": "D2WC1C548010",
+      "status": "ACCOUNT_BALANCE_CHANGE_STATUS_COMPLETED",
+      "amount": {
+       "value": "10",
+       "currency": "USD"
+      },
+      "updateTime": "2026-10-16T15:39:17.752841456Z",
+      "paymentMethod": null,
+      "createTime": "2026-10-14T01:24:12.196039664Z",
+      "externalId": "",
+      "description": "",
+      "metadata": {},
+      "failureReason": "",
+      "failureCode": "",
+      "failureAction": null,
+      "paypal": null,
+      "reviewStatus": "TRANSACTION_REVIEW_STATUS_SKIPPED",
+      "cancelable": false,
+      "advancedAmount": {
+       "value": "10",
+       "currency": "USD"
+      },
+      "transferReason": "TRANSFER_REASON_UNSPECIFIED",
+      "promoCode": ""
+     }
+    ],
+    "externalId": "",
+    "description": "",
+    "metadata": {},
+    "failureReason": "",
+    "failureCode": "",
+    "failureAction": null,
+    "transferReason": "TRANSFER_REASON_UNSPECIFIED",
+    "promoCode": ""
+   }
+  },
+  {
+   "type": "ACTIVITY_TYPE_TRANSFER",
+   "accountBalanceChange": {
+    "transactionId": "CZVHM2VP4010",
+    "status": "ACCOUNT_BALANCE_CHANGE_STATUS_COMPLETED",
+    "amount": {
+     "value": "0.01",
+     "currency": "USD"
+    },
+    "updateTime": "2026-10-09T16:32:35.653584054Z",
+    "paymentMethod": null,
+    "createTime": "2026-10-09T16:32:35.653584054Z",
+    "transactions": [
+     {
+      "transactionId": "CZVHM2VP4010",
+      "status": "ACCOUNT_BALANCE_CHANGE_STATUS_COMPLETED",
+      "amount": {
+       "value": "0.01",
+       "currency": "USD"
+      },
+      "updateTime": "2026-10-09T16:32:35.653584054Z",
+      "paymentMethod": null,
+      "createTime": "2026-10-09T16:32:35.653584054Z",
+      "externalId": "",
+      "description": "",
+      "metadata": {},
+      "failureReason": "",
+      "failureCode": "",
+      "failureAction": null,
+      "paypal": null,
+      "reviewStatus": "TRANSACTION_REVIEW_STATUS_SKIPPED",
+      "cancelable": false,
+      "advancedAmount": null,
+      "transferReason": "TRANSFER_REASON_UNSPECIFIED",
+      "promoCode": ""
+     }
+    ],
+    "externalId": "",
+    "description": "",
+    "metadata": {},
+    "failureReason": "",
+    "failureCode": "",
+    "failureAction": null,
+    "transferReason": "TRANSFER_REASON_UNSPECIFIED",
+    "promoCode": ""
+   }
+  },
+  {
+   "type": "ACTIVITY_TYPE_ACCOUNT_DEPOSIT",
+   "accountBalanceChange": {
+    "transactionId": "CZ4JRQWME010",
+    "status": "ACCOUNT_BALANCE_CHANGE_STATUS_COMPLETED",
+    "amount": {
+     "value": "20",
+     "currency": "USD"
+    },
+    "updateTime": "2026-10-13T13:53:57.060332809Z",
+    "paymentMethod": null,
+    "createTime": "2026-10-08T14:02:05.625708761Z",
+    "transactions": [
+     {
+      "transactionId": "CZ4JRQWME010",
+      "status": "ACCOUNT_BALANCE_CHANGE_STATUS_COMPLETED",
+      "amount": {
+       "value": "20",
+       "currency": "USD"
+      },
+      "updateTime": "2026-10-13T13:53:57.060332809Z",
+      "paymentMethod": null,
+      "createTime": "2026-10-08T14:02:05.625708761Z",
+      "externalId": "",
+      "description": "",
+      "metadata": {},
+      "failureReason": "",
+      "failureCode": "",
+      "failureAction": null,
+      "paypal": null,
+      "reviewStatus": "TRANSACTION_REVIEW_STATUS_SKIPPED",
+      "cancelable": false,
+      "advancedAmount": {
+       "value": "20",
+       "currency": "USD"
+      },
+      "transferReason": "TRANSFER_REASON_UNSPECIFIED",
+      "promoCode": ""
+     }
+    ],
+    "externalId": "",
+    "description": "",
+    "metadata": {},
+    "failureReason": "",
+    "failureCode": "",
+    "failureAction": null,
+    "transferReason": "TRANSFER_REASON_UNSPECIFIED",
+    "promoCode": ""
+   }
+  }
+ ],
+ "nextCursor": "",
+ "eof": true
+}

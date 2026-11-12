@@ -3,13 +3,19 @@ import { PoolClient } from 'pg';
 import { getActor, isService, withTransaction } from './base';
 import { connectLedgerDatabase, createResponse, isPositiveInt } from './ledger-common';
 import { PollerMarksError, recordPollerMarks } from './ledger-poller-marks';
-import { accountTreasury, parseSnapshot, recordSnapshot, TreasuryError } from './treasury';
+import { accountTreasury, CREDIT_PROGRAMS, parseSnapshot, recordSnapshot, TreasuryError } from './treasury';
 
 // The treasury's routes. The venue poller posts snapshots and reads which accounts to poll with the API key; an
 // operator's manual snapshot, transfers and account settings are Cognito only, so each is attributed to a person. The
 // mark poller's route (ledger-poller-marks.ts) is served here too.
 
 const TRANSFER_KINDS = ['OPENING', 'DEPOSIT', 'WITHDRAWAL', 'INTEREST', 'REWARD', 'FEE_ADJUSTMENT', 'CORRECTION'];
+// The venue poller books these exchanges' deposits and withdrawals itself, so a person recording one too would count
+// it twice; one the poller can't see is recorded as a CORRECTION.
+const POLLED_MOVES = ['KALSHI', 'POLYMARKET_INTL', 'POLYMARKET_US'];
+// Credits are read again from a little before the newest one booked, in case the venue lists one late; the venue id
+// on each keeps a second reading from booking it twice.
+const CREDIT_OVERLAP = '3 days';
 const CONFIG_MONEY = ['minBuffer', 'lowBalanceThreshold', 'cashTolerance', 'dustThreshold'] as const;
 const CONFIG_COLUMNS: Record<string, string> = {
   minBuffer: 'min_buffer', lowBalanceThreshold: 'low_balance_threshold', cashTolerance: 'cash_tolerance',
@@ -27,10 +33,17 @@ function strings(value: unknown): unknown {
 export async function pollTargets(client: PoolClient) {
   return (await client.query(
     `SELECT a.account_id, a.exchange_id, e.exchange_code, a.label, a.venue_ref, a.read_secret_name,
-       c.partition_targets, COALESCE(c.rebalance_reservation, 'sum') AS rebalance_reservation
+       c.partition_targets, COALESCE(c.rebalance_reservation, 'sum') AS rebalance_reservation,
+       CASE WHEN c.recon_since IS NOT NULL THEN LEAST(NOW(), GREATEST(c.recon_since,
+         (SELECT MAX(t.occurred_at) FROM treasury.transfer t WHERE t.account_id = a.account_id AND t.actor = 'venue-poller')
+           - $1::interval)) END AS credits_since,
+       COALESCE((SELECT json_agg(json_build_object('external_ref', t.external_ref, 'program', t.program,
+                   'occurred_at', t.occurred_at, 'amount', t.amount::text) ORDER BY t.occurred_at)
+                 FROM treasury.transfer t WHERE t.account_id = a.account_id AND t.allocation_state = 'PENDING'),
+                '[]') AS pending_credits
      FROM account_master.venue_account a JOIN sm.exchange e USING (exchange_id)
      LEFT JOIN treasury.account_config c USING (account_id)
-     WHERE a.status IN ('PROVISIONING', 'ACTIVE', 'DRAINING') ORDER BY a.account_id`)).rows;
+     WHERE a.status IN ('PROVISIONING', 'ACTIVE', 'DRAINING') ORDER BY a.account_id`, [CREDIT_OVERLAP])).rows;
 }
 
 export async function summary(client: PoolClient, now: Date) {
@@ -57,6 +70,7 @@ export async function summary(client: PoolClient, now: Date) {
 export async function recordTransfer(client: PoolClient, body: string, actor: string) {
   const t = JSON.parse(body) as {
     accountId?: number; kind?: string; amount?: string | number; occurredAt?: string; externalRef?: string; reason?: string;
+    program?: string | null;
   };
   if (!isPositiveInt(t.accountId)) throw new TreasuryError(400, 'accountId must be a positive integer');
   if (typeof t.kind !== 'string' || !TRANSFER_KINDS.includes(t.kind)) {
@@ -68,11 +82,27 @@ export async function recordTransfer(client: PoolClient, body: string, actor: st
   const occurredAt = t.occurredAt ? new Date(t.occurredAt) : new Date();
   if (Number.isNaN(occurredAt.getTime())) throw new TreasuryError(400, 'occurredAt must be a timestamp');
   if (typeof t.reason !== 'string' || t.reason.trim().length === 0) throw new TreasuryError(400, 'reason is required');
+  const program = t.program ?? null;
+  if (program !== null && !CREDIT_PROGRAMS.includes(program)) {
+    throw new TreasuryError(400, `program must be one of ${CREDIT_PROGRAMS.join(', ')}`);
+  }
+  if (program !== null && t.kind !== 'REWARD' && t.kind !== 'INTEREST') {
+    throw new TreasuryError(400, 'only a REWARD or INTEREST names a program');
+  }
+  if (t.kind === 'DEPOSIT' || t.kind === 'WITHDRAWAL') {
+    const exchange = (await client.query(
+      `SELECT e.exchange_code FROM account_master.venue_account a JOIN sm.exchange e USING (exchange_id)
+       WHERE a.account_id = $1`, [t.accountId])).rows[0];
+    if (exchange && POLLED_MOVES.includes(exchange.exchange_code)) {
+      throw new TreasuryError(400, `the venue poller books ${exchange.exchange_code} deposits and withdrawals; `
+        + 'record one it can\'t see as a CORRECTION');
+    }
+  }
   try {
     const row = (await client.query(
-      `INSERT INTO treasury.transfer (account_id, kind, amount, occurred_at, external_ref, reason, actor)
-       VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING *`,
-      [t.accountId, t.kind, String(t.amount), occurredAt, t.externalRef ?? null, t.reason, actor])).rows[0];
+      `INSERT INTO treasury.transfer (account_id, kind, amount, occurred_at, external_ref, reason, actor, program)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING *`,
+      [t.accountId, t.kind, String(t.amount), occurredAt, t.externalRef ?? null, t.reason, actor, program])).rows[0];
     // An account's first OPENING is where its reconciliation starts.
     if (t.kind === 'OPENING') {
       await client.query(
@@ -83,6 +113,7 @@ export async function recordTransfer(client: PoolClient, body: string, actor: st
   } catch (error) {
     const code = (error as { code?: string })?.code;
     if (code === '23514') throw new TreasuryError(400, `a ${t.kind} amount has the wrong sign`);
+    if (code === '23505') throw new TreasuryError(409, `account ${t.accountId} already has a transfer ${t.externalRef}`);
     if (code === '23503') throw new TreasuryError(400, `Unknown account ${t.accountId}`);
     throw error;
   }
@@ -165,11 +196,58 @@ export async function reconDetail(client: PoolClient, accountId: number) {
   return { accountId, positions: checks, runs };
 }
 
-export async function transfers(client: PoolClient, accountId: number | null) {
+export interface TransferFilters {
+  accountId: number | null;
+  kind?: string;
+  program?: string;
+  since?: Date;
+  strategyId?: number;
+}
+
+export function parseTransferFilters(params: Record<string, string | undefined>, accountId: number | null): TransferFilters {
+  const filters: TransferFilters = { accountId };
+  if (params.kind) {
+    if (!TRANSFER_KINDS.includes(params.kind)) throw new TreasuryError(400, `kind must be one of ${TRANSFER_KINDS.join(', ')}`);
+    filters.kind = params.kind;
+  }
+  if (params.program) {
+    if (!CREDIT_PROGRAMS.includes(params.program)) {
+      throw new TreasuryError(400, `program must be one of ${CREDIT_PROGRAMS.join(', ')}`);
+    }
+    filters.program = params.program;
+  }
+  if (params.since) {
+    const since = new Date(params.since);
+    if (Number.isNaN(since.getTime())) throw new TreasuryError(400, 'since must be a timestamp');
+    filters.since = since;
+  }
+  if (params.strategyId) {
+    const strategyId = Number(params.strategyId);
+    if (!isPositiveInt(strategyId)) throw new TreasuryError(400, 'strategyId must be a positive integer');
+    filters.strategyId = strategyId;
+  }
+  return filters;
+}
+
+// Newest first, each with the parts of it given to strategies. A strategy filter keeps the transfers it was given part of.
+export async function transfers(client: PoolClient, f: TransferFilters) {
   return (await client.query(
-    `SELECT t.*, a.label FROM treasury.transfer t JOIN account_master.venue_account a USING (account_id)
-     WHERE ($1::int IS NULL OR t.account_id = $1) ORDER BY t.occurred_at DESC, t.transfer_id DESC LIMIT 500`,
-    [accountId])).rows;
+    `SELECT t.*, a.label, e.exchange_code,
+       COALESCE((SELECT json_agg(json_build_object('allocationId', al.allocation_id, 'strategyId', al.strategy_id,
+                   'listingId', al.listing_id, 'venueMarket', al.venue_market, 'amount', al.amount::text,
+                   'basis', al.basis, 'strategies', al.strategies, 'periodStart', al.period_start,
+                   'periodEnd', al.period_end, 'earnedFrom', al.earned_from, 'earnedTo', al.earned_to)
+                   ORDER BY al.allocation_id)
+                 FROM treasury.transfer_allocation al WHERE al.transfer_id = t.transfer_id), '[]') AS allocations
+     FROM treasury.transfer t
+     JOIN account_master.venue_account a USING (account_id)
+     JOIN sm.exchange e ON e.exchange_id = a.exchange_id
+     WHERE ($1::int IS NULL OR t.account_id = $1) AND ($2::text IS NULL OR t.kind = $2)
+       AND ($3::text IS NULL OR t.program = $3) AND ($4::timestamptz IS NULL OR t.occurred_at >= $4)
+       AND ($5::int IS NULL OR EXISTS (SELECT 1 FROM treasury.transfer_allocation al
+                                       WHERE al.transfer_id = t.transfer_id AND al.strategy_id = $5))
+     ORDER BY t.occurred_at DESC, t.transfer_id DESC LIMIT 500`,
+    [f.accountId, f.kind ?? null, f.program ?? null, f.since ?? null, f.strategyId ?? null])).rows;
 }
 
 export const handler = async (event: APIGatewayProxyEvent) => {
@@ -195,7 +273,7 @@ export const handler = async (event: APIGatewayProxyEvent) => {
       case 'GET /treasury/summary':
         return createResponse(200, await summary(client, now));
       case 'GET /treasury/transfers':
-        return createResponse(200, await transfers(client, accountId));
+        return createResponse(200, await transfers(client, parseTransferFilters(event.queryStringParameters ?? {}, accountId)));
       case 'POST /treasury/transfers':
         return createResponse(200, await withTransaction(client, (c) => recordTransfer(c, event.body ?? '', getActor(event))));
       case 'PUT /treasury/account-config':

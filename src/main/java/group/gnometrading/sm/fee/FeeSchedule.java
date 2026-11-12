@@ -23,8 +23,24 @@ public final class FeeSchedule {
     private final String currency;
     private final FeeComponent[] components;
     private final FeeRounding rounding;
+    private final double makerRebateShare;
 
     public FeeSchedule(final String currency, final FeeComponent[] components, final FeeRounding rounding) {
+        this(currency, components, rounding, 0);
+    }
+
+    /**
+     * {@code makerRebateShare} is the part of the taker fee a maker fill earns back later, as a reward paid apart from
+     * the fill (Polymarket International's maker rebate); it never changes {@link #fee}. Zero when there is none.
+     */
+    public FeeSchedule(
+            final String currency,
+            final FeeComponent[] components,
+            final FeeRounding rounding,
+            final double makerRebateShare) {
+        if (makerRebateShare < 0 || makerRebateShare > 1) {
+            throw new IllegalArgumentException("A maker rebate share must be in [0, 1]: " + makerRebateShare);
+        }
         if (rounding.scope() == FeeRounding.Scope.ORDER_ACCUMULATOR && rounding.mode() != FeeRounding.Mode.CEIL) {
             throw new IllegalArgumentException("ORDER_ACCUMULATOR rounding must be CEIL");
         }
@@ -34,6 +50,11 @@ public final class FeeSchedule {
         this.currency = currency;
         this.components = components.clone();
         this.rounding = rounding;
+        this.makerRebateShare = makerRebateShare;
+    }
+
+    public double makerRebateShare() {
+        return this.makerRebateShare;
     }
 
     public String currency() {

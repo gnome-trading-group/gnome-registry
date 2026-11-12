@@ -48,7 +48,7 @@ interface Held {
   lotSize: string | null;
   netQuantity: string;
   avgEntryPrice: string;
-  markPrice: string;
+  markPrice: string | null;
   unrealized: string;
   total: string;
 }
@@ -117,7 +117,7 @@ function heldRow(holding: Holding, info: ListingInfo | undefined): Held {
     lotSize: info?.lotSize ?? null,
     netQuantity: net.toString(),
     avgEntryPrice: avgEntryPrice(holding.position).toString(),
-    markPrice: markPrice(holding.mark).toString(),
+    markPrice: markPrice(holding.mark)?.toString() ?? null,
     unrealized: money(unrealized),
     total: money(holding.total()),
   };

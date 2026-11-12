@@ -18,6 +18,7 @@ Alarms named `Registry-…`:
 | ExchangeSync fault | the security-master sync (every 15 minutes) failed |
 | SettlementSweeper fault | the 5-minute sweeper failed to book a settled position (it fails on purpose when a booking fails) |
 | VenuePoller fault | the 5-minute balance poller crashed (a failed account read is an ERROR snapshot instead, seen as RECON_STALE) |
+| IncentiveSync fault | the 15-minute incentive program sync couldn't read a venue or post to the registry (paper and backtest reward estimates then see no new or changed programs) |
 | StrategySessionMonitor fault | session status updates from EC2 events failed |
 
 ## Impact

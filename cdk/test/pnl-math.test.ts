@@ -33,6 +33,15 @@ describe('session PnL', () => {
     });
     expect([p.openingMarkMissing, p.carry]).toEqual([true, 0n]);
   });
+
+  it('carries an inherited leg down to a one-sided book at its result', () => {
+    // 10 inherited at a 20c mark; the match is lost and only an ask at 1c is left.
+    const p = sessionPnl({
+      opening: position(10_000_000n, 4_000_000_000n), openingMark: mark(200_000_000n),
+      current: position(10_000_000n, 4_000_000_000n), mark: { bid: 0n, ask: 10_000_000n, lastTrade: 0n },
+    });
+    expect([p.openingMarkMissing, p.carry, p.total]).toEqual([false, -1_900_000_000n, -1_900_000_000n]);
+  });
 });
 
 describe('impact of a fill outside any session', () => {

@@ -114,8 +114,14 @@ export function credentialsFor(exchangeCode: string, fields: Fields, what: strin
 // here; anything not listed is required.
 export type KeyKind = 'read' | 'marketData';
 const KEYS_NOT_NEEDED: Record<string, KeyKind[]> = {
-  // The poller reads the wallet from the chain, and the market channel is public.
-  POLYMARKET_INTL: ['read', 'marketData'],
+  // The market channel is public.
+  POLYMARKET_INTL: ['marketData'],
+};
+// The poller reads a Polymarket Intl wallet's balance and payouts from the chain and the public data API without
+// credentials; only the per-market split of its liquidity rewards needs the wallet's CLOB API key, so that key is
+// optional, and never holds the wallet's private key.
+const KEYS_OPTIONAL: Record<string, KeyKind[]> = {
+  POLYMARKET_INTL: ['read'],
 };
 export const VENUES = ['KALSHI', 'POLYMARKET_INTL', 'POLYMARKET_US'];
 
@@ -123,19 +129,41 @@ export function needsKey(exchangeCode: string, kind: KeyKind): boolean {
   return !(KEYS_NOT_NEEDED[exchangeCode] ?? []).includes(kind);
 }
 
+export function keyOptional(exchangeCode: string, kind: KeyKind): boolean {
+  return (KEYS_OPTIONAL[exchangeCode] ?? []).includes(kind);
+}
+
 // A venue's poller key must be its own: Kalshi's is read-scoped, but Polymarket US keys can all trade, so there it
 // only makes the poller's key revocable alone.
 export function readSecretFor(exchangeCode: string, fields: Fields | undefined): Record<string, string> | null {
+  const given = fields !== undefined && fields !== null;
   if (!needsKey(exchangeCode, 'read')) {
-    if (fields !== undefined && fields !== null) {
-      throw new CreateError(400, `${exchangeCode} accounts are read without credentials`);
-    }
+    if (given) throw new CreateError(400, `${exchangeCode} accounts are read without credentials`);
     return null;
   }
-  if (fields === undefined || fields === null) {
+  if (!given) {
+    if (keyOptional(exchangeCode, 'read')) return null;
     throw new CreateError(400, `${exchangeCode} accounts need a separate key for the poller`);
   }
+  if (exchangeCode === 'POLYMARKET_INTL') {
+    const what = 'readCredentials';
+    return { apiKey: text(fields, 'apiKey', what), secret: text(fields, 'secret', what), passphrase: text(fields, 'passphrase', what) };
+  }
   return credentialsFor(exchangeCode, fields, 'readCredentials').secret;
+}
+
+// The poller's key must be its own, so revoking or rotating one never breaks the other; a Polymarket CLOB key can also
+// cancel every order and delete itself, so the trading one must never sit in the poller's secret.
+export function refuseSharedKey(trading: Record<string, string>, read: Record<string, string> | null) {
+  if (read && read.apiKey === trading.apiKey) {
+    throw new CreateError(400, 'the poller needs its own API key, not the trading one');
+  }
+}
+
+// Where the account's trading key lives after an update: under its label when one is given, else left wherever it
+// already is (an account seeded from an old shared secret keeps that one).
+export function tradingSecretNameFor(account: { label: string; trading_secret_name: string }, given: boolean): string {
+  return given ? `gnome/accounts/${account.label}/trading` : account.trading_secret_name;
 }
 
 const ACCOUNT_DESCRIPTION = 'Venue account credentials, registered from the controller';
@@ -196,6 +224,7 @@ export async function createAccount(body: CreateRequest, actor: string) {
   if (!exchange) throw new CreateError(400, `Unknown exchange ${body.exchangeId}`);
   const { secret, venueRef } = credentialsFor(exchange.exchange_code, body.credentials, 'credentials');
   const readSecret = readSecretFor(exchange.exchange_code, body.readCredentials);
+  refuseSharedKey(secret, readSecret);
 
   for (let attempt = 0; attempt < LABEL_ATTEMPTS; attempt++) {
     const label = gamertag();
@@ -249,10 +278,15 @@ interface UpdateRequest {
 }
 
 // Gives an existing account new credentials under its own label's secrets, for keys a venue rotated, or for the
-// accounts seeded from the old per-exchange secrets, which had no read-only key or wallet address.
+// accounts seeded from the old per-exchange secrets, which had no read-only key or wallet address. The poller's key
+// alone may be given, leaving the trading key as it is (a Polymarket Intl wallet's optional CLOB key).
 export async function updateCredentials(body: UpdateRequest, actor: string) {
   if (!isPositiveInt(body.accountId)) throw new CreateError(400, 'accountId must be a positive integer');
-  if (body.credentials === null || typeof body.credentials !== 'object') throw new CreateError(400, 'credentials are required');
+  const trading = body.credentials !== undefined && body.credentials !== null;
+  if (trading && typeof body.credentials !== 'object') throw new CreateError(400, 'credentials must be an object');
+  if (!trading && (body.readCredentials === undefined || body.readCredentials === null)) {
+    throw new CreateError(400, 'credentials are required');
+  }
   const apiKey = await resolveApiKey();
   let account: AccountSecrets;
   try {
@@ -261,22 +295,27 @@ export async function updateCredentials(body: UpdateRequest, actor: string) {
     throw registryRefusal(error) ?? error;
   }
   if (account.status === 'RETIRED') throw new CreateError(409, `${account.label} is retired`);
-  const { secret, venueRef } = credentialsFor(account.exchange_code, body.credentials, 'credentials');
-  const changed = identityChange(account.venue_ref, venueRef);
-  if (changed) throw new CreateError(409, changed);
+  let secret: Record<string, string> | null = null;
+  let venueRef = account.venue_ref;
+  if (trading) {
+    ({ secret, venueRef } = credentialsFor(account.exchange_code, body.credentials as Fields, 'credentials'));
+    const changed = identityChange(account.venue_ref, venueRef);
+    if (changed) throw new CreateError(409, changed);
+  }
   const readSecret = readSecretFor(account.exchange_code, body.readCredentials);
+  if (secret) refuseSharedKey(secret, readSecret);
 
-  const tradingSecretName = `gnome/accounts/${account.label}/trading`;
+  const tradingSecretName = tradingSecretNameFor(account, secret !== null);
   const readSecretName = readSecret ? `gnome/accounts/${account.label}/read` : account.read_secret_name;
   const created: string[] = [];
   try {
-    if (await writeSecret(tradingSecretName, secret)) created.push(tradingSecretName);
+    if (secret && await writeSecret(tradingSecretName, secret)) created.push(tradingSecretName);
     if (readSecret && readSecretName && await writeSecret(readSecretName, readSecret)) created.push(readSecretName);
     const updated = await registryFetch<Record<string, unknown>>('/venue-accounts/secrets', 'PUT', apiKey, {
       accountId: account.account_id, tradingSecretName, readSecretName, venueRef, actor,
     });
     console.log(`Replaced the credentials of ${account.exchange_code} account ${account.label} for ${actor}`);
-    const written = [tradingSecretName, ...(readSecret && readSecretName ? [readSecretName] : [])];
+    const written = [...(secret ? [tradingSecretName] : []), ...(readSecret && readSecretName ? [readSecretName] : [])];
     return {
       account: updated,
       secrets: written.map(name => ({ name, regions: [PRIMARY_REGION, ...REPLICA_REGIONS] })),

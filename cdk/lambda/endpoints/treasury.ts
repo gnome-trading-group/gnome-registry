@@ -1,6 +1,7 @@
 import { PoolClient } from 'pg';
 import { abs, committedCapital, notional, PRICE_SCALE, toBigInt } from './ledger-math';
 import { RebalanceReading } from '../sync/venues/types';
+import { allocatePending, BreakdownInput } from './treasury-allocate';
 
 // Reconciles each venue account against the ledger. Money is in price units (1e9 per dollar), quantities in size
 // units (1e6 per unit).
@@ -29,6 +30,25 @@ export interface VenuePositionInput {
   value?: string | number | null;
 }
 
+const CREDIT_KINDS = ['DEPOSIT', 'WITHDRAWAL', 'INTEREST', 'REWARD', 'FEE_ADJUSTMENT', 'CORRECTION'];
+export const CREDIT_PROGRAMS = ['LIQUIDITY', 'MAKER_REBATE', 'TAKER_REBATE', 'HOLDING', 'REFERRAL', 'VOLUME', 'INTEREST',
+  'UNCLASSIFIED'];
+// Rewards these programs pay are given to the strategies that earned them; the rest stay the firm's.
+export const ALLOCATED_PROGRAMS = ['LIQUIDITY', 'MAKER_REBATE', 'TAKER_REBATE'];
+
+// Money the venue moved on the account outside trading, as the poller read it (see sync/venues/types.ts VenueCredit).
+export interface CreditInput {
+  externalRef: string;
+  kind: string;
+  program: string | null;
+  amount: string;
+  occurredAt: string;
+  venueMarket: string | null;
+  venueType: string;
+  reverses: string | null;
+  raw?: unknown;
+}
+
 export interface SnapshotInput {
   accountId: number;
   source: 'POLLER' | 'MANUAL';
@@ -42,6 +62,9 @@ export interface SnapshotInput {
   rebalanceTargets?: RebalanceReading | null;
   // Null when the venue can't list positions: then only cash is reconciled.
   positions?: VenuePositionInput[] | null;
+  credits?: CreditInput[] | null;
+  // What the venue says rewards were for, market by market: of those just sent and those still PENDING.
+  breakdowns?: BreakdownInput[] | null;
   raw?: unknown;
   actor?: string | null;
 }
@@ -74,6 +97,34 @@ export function parseSnapshot(body: string, source: 'POLLER' | 'MANUAL', actor: 
     if (typeof p.venueKey !== 'string' || p.venueKey.length === 0) throw new TreasuryError(400, 'positions need a venueKey');
     scaled('quantity', p.quantity);
     scaled('value', p.value);
+  }
+  for (const c of s.credits ?? []) {
+    if (typeof c.externalRef !== 'string' || c.externalRef.length === 0) throw new TreasuryError(400, 'credits need an externalRef');
+    if (!CREDIT_KINDS.includes(c.kind)) throw new TreasuryError(400, `credit ${c.externalRef} has an unknown kind ${c.kind}`);
+    if (c.program !== null && !CREDIT_PROGRAMS.includes(c.program)) {
+      throw new TreasuryError(400, `credit ${c.externalRef} has an unknown program ${c.program}`);
+    }
+    scaled(`credit ${c.externalRef} amount`, c.amount);
+    if (Number.isNaN(new Date(c.occurredAt).getTime())) throw new TreasuryError(400, `credit ${c.externalRef} needs an occurredAt`);
+  }
+  if (source === 'MANUAL' && ((s.credits?.length ?? 0) > 0 || (s.breakdowns?.length ?? 0) > 0)) {
+    throw new TreasuryError(400, 'only the venue poller sends credits; record a transfer instead');
+  }
+  for (const b of s.breakdowns ?? []) {
+    if (typeof b.externalRef !== 'string' || !Array.isArray(b.markets)
+      || (b.alternatives !== undefined && !Array.isArray(b.alternatives))) {
+      throw new TreasuryError(400, 'breakdowns need an externalRef and markets');
+    }
+    for (const m of [...b.markets, ...(b.alternatives ?? []).flat()]) {
+      if (typeof m.venueMarket !== 'string' || m.venueMarket.length === 0) {
+        throw new TreasuryError(400, `breakdown ${b.externalRef} has a market with no venueMarket`);
+      }
+      scaled(`breakdown ${b.externalRef} amount`, m.amount);
+      const times = [m.from, m.to, ...(m.periodStart ? [m.periodStart, m.periodEnd] : [])];
+      if (times.some(t => t == null || Number.isNaN(new Date(t).getTime())) || new Date(m.from) >= new Date(m.to)) {
+        throw new TreasuryError(400, `breakdown ${b.externalRef} needs from before to, and a whole period if any`);
+      }
+    }
   }
   return { ...s, source, actor };
 }
@@ -333,6 +384,41 @@ async function checkPositions(
   return { checked, breaks };
 }
 
+// A venue's clock can be a little ahead of ours; a credit further in the future is a bad date, and booking it would
+// move the poller's next read past everything after it.
+const CREDIT_CLOCK_SKEW_MS = 10 * 60_000;
+
+// Books the venue's credits as transfers, each once under its venue id. What happened before reconciliation started is
+// inside the account's OPENING; a reversal is booked only if what it undoes was. A reward a program gives to
+// strategies starts PENDING allocation.
+async function bookCredits(client: PoolClient, account: AccountRow, credits: CreditInput[], now: Date): Promise<number> {
+  if (account.recon_since === null) return 0;
+  let booked = 0;
+  for (const c of credits) {
+    const occurredAt = new Date(c.occurredAt);
+    if (occurredAt < account.recon_since) continue;
+    if (occurredAt.getTime() > now.getTime() + CREDIT_CLOCK_SKEW_MS) {
+      console.error(`Skipped ${account.label} credit ${c.externalRef} dated ${c.occurredAt}, in the future`);
+      continue;
+    }
+    if (c.reverses) {
+      const original = await client.query(
+        'SELECT 1 FROM treasury.transfer WHERE account_id = $1 AND external_ref = $2', [account.account_id, c.reverses]);
+      if (original.rowCount === 0) continue;
+    }
+    const allocation = c.kind === 'REWARD' && c.program !== null && ALLOCATED_PROGRAMS.includes(c.program) ? 'PENDING' : null;
+    const inserted = await client.query(
+      `INSERT INTO treasury.transfer (account_id, kind, amount, occurred_at, external_ref, reason, actor, program,
+         venue_market, raw, allocation_state)
+       VALUES ($1, $2, $3, $4, $5, $6, 'venue-poller', $7, $8, $9, $10)
+       ON CONFLICT (account_id, external_ref) WHERE external_ref IS NOT NULL DO NOTHING`,
+      [account.account_id, c.kind, c.amount, occurredAt, c.externalRef, c.venueType, c.program, c.venueMarket,
+        c.raw === undefined ? null : JSON.stringify(c.raw), allocation]);
+    booked += inserted.rowCount ?? 0;
+  }
+  return booked;
+}
+
 // Records one reading of an account and reconciles it, in the caller's transaction.
 export async function recordSnapshot(client: PoolClient, input: SnapshotInput, now: Date) {
   const account = await loadAccount(client, input.accountId);
@@ -353,6 +439,8 @@ export async function recordSnapshot(client: PoolClient, input: SnapshotInput, n
       [input.accountId, snapshot.snapshot_id, now]);
     return { snapshotId: snapshot.snapshot_id, cashStatus: 'ERROR', positionsChecked: 0, positionBreaks: 0 };
   }
+  const creditsBooked = await bookCredits(client, account, input.credits ?? [], now);
+  const rewardsAllocated = await allocatePending(client, account, input.breakdowns ?? [], now);
   for (const p of input.positions ?? []) {
     await client.query(
       `INSERT INTO treasury.venue_position (snapshot_id, venue_key, quantity, redeemable, value) VALUES ($1, $2, $3, $4, $5)`,
@@ -372,7 +460,7 @@ export async function recordSnapshot(client: PoolClient, input: SnapshotInput, n
       cash.diff?.toString() ?? null, cash.status, fp, positions.checked, positions.breaks]);
   return {
     snapshotId: snapshot.snapshot_id, cashStatus: cash.status, cashDiff: cash.diff?.toString() ?? null,
-    positionsChecked: positions.checked, positionBreaks: positions.breaks,
+    positionsChecked: positions.checked, positionBreaks: positions.breaks, creditsBooked, rewardsAllocated,
   };
 }
 

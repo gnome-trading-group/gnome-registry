@@ -1,6 +1,7 @@
 import { generateKeyPairSync } from 'crypto';
 import {
   CreateError, credentialsFor, emergencyCancel, emergencyRegion, MARKET_DATA_EXCHANGES, needsKey, readSecretFor,
+  refuseSharedKey, tradingSecretNameFor,
   secretStatus,
 } from '../lambda/endpoints/venue-account-create';
 
@@ -66,7 +67,18 @@ describe('venue account credentials', () => {
     const us = { apiKey: 'ro', secret: Buffer.alloc(32, 1).toString('base64') };
     expect(readSecretFor('POLYMARKET_US', us)).toEqual(us);
     expect(readSecretFor('POLYMARKET_INTL', undefined)).toBeNull();
-    expect(() => readSecretFor('POLYMARKET_INTL', { apiKey: 'k' })).toThrow(/without credentials/);
+    expect(() => readSecretFor('POLYMARKET_INTL', { apiKey: 'k' })).toThrow(/secret/);
+    expect(readSecretFor('POLYMARKET_INTL', { apiKey: 'k', secret: 's', passphrase: 'p', ethereumPrivateKey: 'x' }))
+      .toEqual({ apiKey: 'k', secret: 's', passphrase: 'p' });
+    expect(() => refuseSharedKey({ apiKey: 'k' }, { apiKey: 'k' })).toThrow(/its own API key/);
+    expect(() => refuseSharedKey({ apiKey: 'k' }, { apiKey: 'other' })).not.toThrow();
+    expect(() => refuseSharedKey({ apiKey: 'k' }, null)).not.toThrow();
+  });
+
+  it('leaves an account\'s trading secret where it is when only the poller\'s key is updated', () => {
+    const seeded = { label: 'steady-heron-01', trading_secret_name: 'gnome/exchange-credentials/kalshi' };
+    expect(tradingSecretNameFor(seeded, false)).toBe('gnome/exchange-credentials/kalshi');
+    expect(tradingSecretNameFor(seeded, true)).toBe('gnome/accounts/steady-heron-01/trading');
   });
 
   it('keeps a market-data secret path for every venue whose market data is signed', () => {

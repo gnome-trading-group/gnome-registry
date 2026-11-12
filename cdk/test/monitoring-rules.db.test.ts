@@ -217,14 +217,14 @@ describeDb('monitoring rules against Postgres', () => {
       'REBALANCE_DRIFT', 'ALLOCATION_EXCEEDS_BALANCE',
       'DRAINING_EXPOSURE', 'ACCOUNT_DUE_FOR_ROTATION', 'ACCOUNT_READY_TO_RETIRE', 'FEE_MISMATCH',
       'FEE_SCHEDULE_MISSING', 'FEE_SCHEDULE_CHANGED', 'FEE_TYPE_UNSUPPORTED', 'HOST_CPU_HIGH', 'HOST_MEMORY_LOW',
-      'DISK_LOW', 'JOURNAL_BACKLOG'];
+      'DISK_LOW', 'JOURNAL_BACKLOG', 'VENUE_CREDIT_UNCLASSIFIED', 'REWARD_UNALLOCATED'];
     const rulesDir = path.join(__dirname, '..', 'lambda', 'monitoring', 'rules');
     const source = fs.readdirSync(rulesDir).filter(f => f.endsWith('.ts'))
       .map(f => fs.readFileSync(path.join(rulesDir, f), 'utf8')).join('\n');
     const produced = new Set([...source.matchAll(/'([A-Z][A-Z_]+[A-Z])'/g)].map(m => m[1])
       .filter(k => !['SUBMITTED', 'STARTING', 'RUNNING', 'STOPPING', 'FAILED_', 'KILL_SWITCH', 'DRAINING', 'ACTIVE',
         'RETIRED', 'BREAK', 'UNKNOWN_VENUE_POSITION', 'ERROR', 'OPEN', 'KALSHI', 'POLYMARKET_US', 'VENUE', 'MAKER',
-        'TAKER', 'VENUE_API', 'INSUFFICIENT_FUNDS', 'REJECTED'].includes(k)));
+        'TAKER', 'VENUE_API', 'INSUFFICIENT_FUNDS', 'REJECTED', 'UNCLASSIFIED'].includes(k)));
     for (const kind of produced) expect(kinds).toContain(kind);
     for (const kind of kinds) expect(ALERT_TYPES[kind]).toBeDefined();
   });

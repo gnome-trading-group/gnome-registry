@@ -26,10 +26,17 @@ export interface IFeeRounding {
   scope?: 'FILL' | 'ORDER_ACCUMULATOR';
 }
 
+// A maker rebate paid apart from the fill (Polymarket International's, from the market's taker fees): a MAKER fill
+// earns share × the taker fee the same fill would have paid, booked later as a reward. It never changes a fill's fee.
+export interface IMakerRebate {
+  share: number;
+}
+
 export interface IFeeDefinition {
   currency: string;
   components: IFeeComponent[];
   rounding: IFeeRounding;
+  makerRebate?: IMakerRebate;
 }
 
 function finite(name: string, value: unknown): number {
@@ -48,7 +55,7 @@ export function validateDefinition(value: unknown): IFeeDefinition {
     throw new ValidationError('definition must be an object, or null to clear the scope');
   }
   const d = value as IFeeDefinition;
-  exactKeys('definition', d, ['currency', 'components', 'rounding']);
+  exactKeys('definition', d, ['currency', 'components', 'rounding', 'makerRebate']);
   if (typeof d.currency !== 'string' || !CURRENCY_PATTERN.test(d.currency)) {
     throw new ValidationError('definition.currency must be a currency code like USD');
   }
@@ -68,6 +75,13 @@ export function validateDefinition(value: unknown): IFeeDefinition {
     }
     if (c.side !== undefined && !SIDES.has(c.side)) throw new ValidationError(`${name}.side must be BUY or SELL`);
   });
+  if (d.makerRebate !== undefined) {
+    const m = d.makerRebate;
+    if (m == null || typeof m !== 'object') throw new ValidationError('definition.makerRebate must be an object');
+    exactKeys('definition.makerRebate', m, ['share']);
+    const share = finite('definition.makerRebate.share', m.share);
+    if (share <= 0 || share > 1) throw new ValidationError('definition.makerRebate.share must be in (0, 1]');
+  }
   const r = d.rounding;
   if (r == null || typeof r !== 'object') throw new ValidationError('definition.rounding must be an object');
   exactKeys('definition.rounding', r, ['mode', 'increment', 'scope']);

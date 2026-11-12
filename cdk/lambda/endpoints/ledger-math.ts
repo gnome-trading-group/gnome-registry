@@ -17,17 +17,30 @@ export interface PositionState {
 }
 
 export interface Pnl {
-  markPrice: bigint;
+  markPrice: bigint | null;
   avgEntryPrice: bigint;
   unrealizedPnl: bigint;
   totalPnl: bigint;
 }
 
-// SharedPriceBuffer.markPrice: the mid of a two-sided book, else the last trade; 0 means unknown.
-export function markPrice(mark: MarkInputs | null): bigint {
-  if (!mark) return 0n;
-  if (mark.bid > 0n && mark.ask > 0n) return mark.bid + (mark.ask - mark.bid) / 2n;
-  return mark.lastTrade;
+// SharedPriceBuffer.markPrice: the mid of a two-sided book; with one side quoted, the last trade when it is no better
+// than that side (at or under the ask, at or over the bid), else the quoted price; with neither, the last trade. null
+// means no price is known. A binary market's loser is left with only an ask near zero when its match ends, and that
+// near-zero price is its value, not a missing one.
+export function markPrice(mark: MarkInputs | null): bigint | null {
+  if (!mark) return null;
+  const { bid, ask, lastTrade } = mark;
+  if (bid > 0n && ask > 0n) return bid + (ask - bid) / 2n;
+  if (ask > 0n) return lastTrade > 0n && lastTrade <= ask ? lastTrade : ask;
+  if (bid > 0n) return lastTrade >= bid ? lastTrade : bid;
+  return lastTrade > 0n ? lastTrade : null;
+}
+
+// SQL: a ledger.mark row `markPrice` can price. A book that emptied for a moment (a market's makers all pulling at a
+// result) leaves a row with no bid, no ask and no trade; reads as of a time skip it, so the last price holds.
+export function pricedMark(alias?: string): string {
+  const p = alias ? `${alias}.` : '';
+  return `(${p}bid > 0 OR ${p}ask > 0 OR ${p}last_trade > 0)`;
 }
 
 export function abs(value: bigint): bigint {
@@ -46,7 +59,7 @@ export function avgEntryPrice(position: PositionState): bigint {
 export function pnl(position: PositionState, mark: MarkInputs | null): Pnl {
   const price = markPrice(mark);
   const entry = avgEntryPrice(position);
-  const unrealized = price === 0n || position.netQuantity === 0n ? 0n : notional(price - entry, position.netQuantity);
+  const unrealized = price === null || position.netQuantity === 0n ? 0n : notional(price - entry, position.netQuantity);
   return {
     markPrice: price,
     avgEntryPrice: entry,

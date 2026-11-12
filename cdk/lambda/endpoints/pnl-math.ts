@@ -36,7 +36,7 @@ export function sessionPnl(inputs: SessionPnlInputs): SessionPnl {
   const total = inputs.current.realizedPnl + now.unrealizedPnl - inputs.current.totalFees - openingUnrealized;
   const startPrice = markPrice(inputs.openingMark);
   const nowPrice = markPrice(inputs.mark);
-  const carry = startPrice === 0n || nowPrice === 0n ? 0n : notional(nowPrice - startPrice, inputs.opening.netQuantity);
+  const carry = startPrice === null || nowPrice === null ? 0n : notional(nowPrice - startPrice, inputs.opening.netQuantity);
   return {
     total,
     realized: inputs.current.realizedPnl,
@@ -45,7 +45,7 @@ export function sessionPnl(inputs: SessionPnlInputs): SessionPnl {
     carry,
     trading: total - carry,
     openingUnrealized,
-    openingMarkMissing: inputs.opening.netQuantity !== 0n && startPrice === 0n,
+    openingMarkMissing: inputs.opening.netQuantity !== 0n && startPrice === null,
   };
 }
 

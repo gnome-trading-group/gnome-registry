@@ -10,6 +10,7 @@ import { StrategySessionMonitorStack } from "./stacks/strategy-session-monitor-s
 import { SettlementSweeperStack } from "./stacks/settlement-sweeper-stack";
 import { VenuePollerStack } from "./stacks/venue-poller-stack";
 import { MarkPollerStack } from "./stacks/mark-poller-stack";
+import { IncentiveSyncStack } from "./stacks/incentive-sync-stack";
 import { MonitoringStack } from "./stacks/monitoring-stack";
 import { AlertingStack } from "./stacks/alerting-stack";
 import { GITHUB_REPO, GITHUB_BRANCH, CONFIGS, RegistryConfig } from "./config";
@@ -59,12 +60,18 @@ class AppStage extends cdk.Stage {
       apiKey: apiStack.apiKey,
     });
 
+    const incentiveSyncStack = new IncentiveSyncStack(this, "IncentiveSyncStack", {
+      api: apiStack.api,
+      apiKey: apiStack.apiKey,
+    });
+
     new MonitoringStack(this, "MonitoringStack", {
       api: apiStack.api,
       syncLambda: exchangeSyncStack.syncLambda,
       settlementSweeperLambda: settlementSweeperStack.sweeperLambda,
       venuePollerLambda: venuePollerStack.pollerLambda,
       markPollerLambda: markPollerStack.pollerLambda,
+      incentiveSyncLambda: incentiveSyncStack.syncLambda,
       sessionMonitorLambda: sessionMonitorStack.monitorLambda,
       database: databaseStack.database,
     });

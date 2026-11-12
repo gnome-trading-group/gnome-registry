@@ -268,11 +268,15 @@ describeDb('venue accounts, against Postgres', () => {
       SELECT 10000 + g, 1, 1 FROM generate_series(1, 20000) g`);
     await client.query('ANALYZE sm.listing');
 
+    // pg_stat_xact_* reports the connection's unflushed counts, which are flushed about once a second and so can
+    // still hold the insert and ANALYZE above: the write's reads are the difference across it.
+    const reads = async (c: PoolClient) => Number((await c.query(`SELECT COALESCE(seq_tup_read, 0)
+      + COALESCE(idx_tup_fetch, 0) AS n FROM pg_stat_xact_user_tables WHERE relid = 'sm.listing'::regclass`)).rows[0].n);
     let listingRowsRead = 0;
     await withTransaction(client, async (c) => {
+      const before = await reads(c);
       await writeBatch(c, 'a', JSON.stringify({ sessionId: 'a', fills: [fill(500, 1, 5 * UNIT, 1)] }));
-      listingRowsRead = Number((await c.query(`SELECT COALESCE(seq_tup_read, 0) + COALESCE(idx_tup_fetch, 0) AS n
-        FROM pg_stat_xact_user_tables WHERE relid = 'sm.listing'::regclass`)).rows[0].n);
+      listingRowsRead = (await reads(c)) - before;
     });
 
     expect(listingRowsRead).toBeLessThan(100);

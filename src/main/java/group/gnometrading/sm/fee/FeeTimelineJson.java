@@ -22,7 +22,11 @@ public final class FeeTimelineJson {
     private record Entry(String effectiveFrom, String effectiveTo, Definition definition) {}
 
     @JsonIgnoreProperties(ignoreUnknown = true)
-    private record Definition(String currency, List<Component> components, Rounding rounding) {}
+    private record Definition(
+            String currency, List<Component> components, Rounding rounding, MakerRebate makerRebate) {}
+
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    private record MakerRebate(double share) {}
 
     @JsonIgnoreProperties(ignoreUnknown = true)
     private record Component(String kind, double taker, double maker, Double exponent, String side) {}
@@ -75,7 +79,9 @@ public final class FeeTimelineJson {
                         mode,
                         Math.round(r.increment() * Statics.PRICE_SCALING_FACTOR),
                         FeeRounding.Scope.valueOf(r.scope()));
-        return new FeeSchedule(definition.currency(), components, rounding);
+        final double makerRebateShare =
+                definition.makerRebate() == null ? 0 : definition.makerRebate().share();
+        return new FeeSchedule(definition.currency(), components, rounding, makerRebateShare);
     }
 
     /** ISO-8601 to epoch nanoseconds. */

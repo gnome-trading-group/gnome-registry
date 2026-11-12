@@ -161,5 +161,34 @@ export async function treasury(client: PoolClient, now: Date): Promise<Finding[]
         detail: 'Its limits only count the position on the account it trades now',
       }));
   }
+
+  // Venue credits the poller booked under a type it doesn't know, and rewards that could never be given to the
+  // strategies that earned them, for a week or two after they were paid: someone maps the type, or looks at why.
+  const credits = (await client.query(
+    `SELECT t.transfer_id, t.account_id, a.label, a.exchange_id, e.exchange_code, t.amount, t.occurred_at, t.reason,
+       t.program, t.allocation_state
+     FROM treasury.transfer t
+     JOIN account_master.venue_account a ON a.account_id = t.account_id
+     JOIN sm.exchange e ON e.exchange_id = a.exchange_id
+     WHERE (t.program = 'UNCLASSIFIED' AND t.occurred_at >= $1::timestamptz - INTERVAL '7 days')
+        OR (t.allocation_state = 'FAILED' AND t.occurred_at >= $1::timestamptz - INTERVAL '14 days')`, [now])).rows;
+  for (const c of credits) {
+    const fields = {
+      exchangeId: c.exchange_id, exchangeName: c.exchange_code, accountId: c.account_id, accountLabel: c.label,
+      subject: String(c.transfer_id), since: c.occurred_at.toISOString(),
+    };
+    if (c.program === 'UNCLASSIFIED') {
+      findings.push(finding('live', 'info', 'VENUE_CREDIT_UNCLASSIFIED', [c.account_id, c.transfer_id],
+        `${c.label} was paid ${money(c.amount)} under a type the poller doesn't know`, {
+          ...fields, detail: `${c.reason}; map it in the venue's reader (sync/venues)`,
+        }));
+    }
+    if (c.allocation_state === 'FAILED') {
+      findings.push(finding('live', 'info', 'REWARD_UNALLOCATED', [c.account_id, c.transfer_id],
+        `${c.label}'s ${money(c.amount)} ${String(c.program).toLowerCase().replace('_', ' ')} stays the firm's`, {
+          ...fields, detail: `${c.reason}: couldn't be given to the strategies that earned it`,
+        }));
+    }
+  }
   return findings;
 }

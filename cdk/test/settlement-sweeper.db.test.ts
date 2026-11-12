@@ -162,7 +162,7 @@ describeDb('Settlement sweeper, against Postgres', () => {
     const strategy = await summarize(client, { strategyId: '1', mode: 'paper' }, now()) as any;
     expect(strategy.totals.lifetime).toBe(cents(-401));
     expect(strategy.totals.outsideSessions).toEqual({
-      total: cents(-450), settlements: cents(-450), manual: '0', adjustments: '0', resets: '0', carry: '0',
+      total: cents(-450), settlements: cents(-450), manual: '0', adjustments: '0', resets: '0', rewards: '0', carry: '0',
     });
   });
 
@@ -177,7 +177,8 @@ describeDb('Settlement sweeper, against Postgres', () => {
     const strategy = await summarize(client, { strategyId: '1', mode: 'paper' }, new Date(Date.now() + 60_000)) as any;
     expect(strategy.totals.lifetime).toBe(cents(599));
     expect(strategy.totals.outsideSessions).toEqual({
-      total: cents(550), settlements: cents(700), manual: '0', adjustments: '0', resets: '0', carry: cents(-150),
+      total: cents(550), settlements: cents(700), manual: '0', adjustments: '0', resets: '0', rewards: '0',
+      carry: cents(-150),
     });
   });
 
@@ -292,10 +293,14 @@ describeDb('Settlement sweeper, against Postgres', () => {
       WHERE listing_id = 502`);
     await settle([{ eventContractId: 1, settlementPrice: DOLLAR }]);
 
-    const items = (await attention(client, 'paper', new Date())).filter(i => i.kind.startsWith('SETTLEMENT'));
-    expect(items.map(i => [i.kind, i.listingId, i.detail])).toEqual([
-      ['SETTLEMENT_PENDING', 502, expect.stringMatching(/never recorded/)],
-      ['SETTLEMENT_BLOCKED', 500, expect.stringMatching(/session still holds/)],
+    const settlementItems = async (at: Date) =>
+      (await attention(client, 'paper', at)).filter(i => i.kind.startsWith('SETTLEMENT'));
+    expect((await settlementItems(new Date())).map(i => [i.kind, i.listingId])).toEqual([['SETTLEMENT_PENDING', 502]]);
+
+    const later = new Date(Date.now() + 16 * 60_000);
+    expect((await settlementItems(later)).map(i => [i.kind, i.listingId, i.sessionId, i.detail])).toEqual([
+      ['SETTLEMENT_PENDING', 502, null, expect.stringMatching(/never recorded/)],
+      ['SETTLEMENT_BLOCKED', 500, 's', expect.stringMatching(/session still holds/)],
     ]);
   });
 });

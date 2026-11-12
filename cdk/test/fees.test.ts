@@ -30,6 +30,16 @@ describe('validateDefinition', () => {
     expect(() => validateDefinition({
       currency: 'USD', components: [{ kind: 'PER_UNIT', taker: 0.01, maker: 0.01, side: 'SELL' }], rounding: { mode: 'NONE' },
     })).not.toThrow();
+    expect(() => validateDefinition({ ...curve(0.05), makerRebate: { share: 0.25 } })).not.toThrow();
+  });
+
+  it.each([
+    ['a share of zero', { share: 0 }],
+    ['a share over one', { share: 1.5 }],
+    ['a share that is not a number', { share: '0.25' }],
+    ['an unknown field', { share: 0.25, cap: 1 }],
+  ])('rejects a maker rebate with %s', (_name, makerRebate) => {
+    expect(() => validateDefinition({ ...curve(0.05), makerRebate })).toThrow(ValidationError);
   });
 
   it.each([

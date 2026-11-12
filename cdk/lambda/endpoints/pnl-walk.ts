@@ -1,11 +1,12 @@
 import { PoolClient } from 'pg';
-import { MarkInputs, PositionState, toBigInt } from './ledger-math';
+import { MarkInputs, PositionState, pricedMark, toBigInt } from './ledger-math';
 import { lifetimePnl } from './pnl-math';
-import { FLAT, loadStrategyState, toMark } from './pnl-state';
+import { FLAT, loadRewards, loadStrategyState, toMark } from './pnl-state';
 
 // Walks the ledger forward through a window, applying fills and marks in time order, and records the PnL at each of
 // the given moments. Every PnL-over-time view (a strategy's chart, the firm's chart with each strategy's line, the
-// daily bars) is one walk, so they can never disagree.
+// daily bars) is one walk, so they can never disagree. Venue rewards step a strategy's PnL up when they were paid;
+// over the whole firm, so does the non-trading money that stays the firm's. Neither is on a listing's own walk.
 
 export interface Change {
   timeMs: number;
@@ -47,11 +48,11 @@ export async function loadMarkChanges(
   if (listingIds.length === 0) return [];
   const rows = (await client.query(`
     (SELECT DISTINCT ON (listing_id) listing_id, ts, bid, ask, last_trade FROM ledger.mark
-     WHERE listing_id = ANY($1::int[]) AND ts <= $2 ORDER BY listing_id, ts DESC)
+     WHERE listing_id = ANY($1::int[]) AND ts <= $2 AND ${pricedMark()} ORDER BY listing_id, ts DESC)
     UNION ALL
     (SELECT DISTINCT ON (listing_id, date_bin($4::interval, ts, 'epoch'::timestamptz))
        listing_id, ts, bid, ask, last_trade
-     FROM ledger.mark WHERE listing_id = ANY($1::int[]) AND ts > $2 AND ts <= $3
+     FROM ledger.mark WHERE listing_id = ANY($1::int[]) AND ts > $2 AND ts <= $3 AND ${pricedMark()}
      ORDER BY listing_id, date_bin($4::interval, ts, 'epoch'::timestamptz), ts DESC)`,
   [listingIds, new Date(fromMs), new Date(toMs), `${stepMs} milliseconds`])).rows;
   return rows.map(r => ({ timeMs: Math.max(fromMs, r.ts.getTime()), listingId: r.listing_id, mark: toMark(r) }));
@@ -102,6 +103,9 @@ export interface LifetimeWalk {
   // [key][point]
   keyTotal: bigint[][];
   keyNet: bigint[][];
+  // [point]: each strategy's rewards so far, and (firm-wide walks only) the firm's own non-trading PnL so far.
+  rewards: Map<number, bigint[]>;
+  nonTrading: bigint[];
   events: SeriesEvent[];
 }
 
@@ -164,11 +168,24 @@ export async function walkLifetime(client: PoolClient, options: LifetimeWalkOpti
     }
   }
 
+  // A listing's own line is its trading PnL, as its summary row is; rewards step only strategy and firm lines.
+  const rewardRows = options.listingId !== undefined ? []
+    : await loadRewards(client, mode, { strategyId, firm: strategyId === null }, new Date(toMs));
+  const rewardStrategies = rewardRows.flatMap(r => (r.strategyId === null ? [] : [r.strategyId]));
+  const strategyIds = [...new Set([...[...keyed.values()].map(k => k.strategyId), ...rewardStrategies])].sort((a, b) => a - b);
   const walk: LifetimeWalk = {
-    keys, strategyIds: [...new Set([...keyed.values()].map(k => k.strategyId))].sort((a, b) => a - b), dormantTotal,
+    keys, strategyIds, dormantTotal,
     t: [], total: [], realized: [], unrealized: [], fees: [],
-    keyTotal: keys.map(() => []), keyNet: keys.map(() => []), events: [],
+    keyTotal: keys.map(() => []), keyNet: keys.map(() => []),
+    rewards: new Map([...new Set(rewardStrategies)].map(id => [id, []])), nonTrading: [], events: [],
   };
+  for (const r of rewardRows) {
+    if (r.occurredAt.getTime() <= fromMs) continue;
+    walk.events.push({
+      time: r.occurredAt.toISOString(), kind: r.strategyId === null ? 'NON_TRADING' : 'REWARD', sessionId: null,
+      listingId: r.listingId, pnlImpact: r.amount.toString(), actor: null, reason: `${r.exchangeCode} ${r.program}`,
+    });
+  }
 
   if (options.sessionEvents) {
     const sessions = (await client.query(`
@@ -263,6 +280,15 @@ export async function walkLifetime(client: PoolClient, options: LifetimeWalkOpti
       walk.keyTotal[i].push(p.total);
       walk.keyNet[i].push(netOf(key));
     });
+    let rewarded = 0n;
+    for (const [id, line] of walk.rewards) {
+      const sum = rewardRows.reduce((acc, r) => (r.strategyId === id && r.occurredAt.getTime() <= t ? acc + r.amount : acc), 0n);
+      line.push(sum);
+      rewarded += sum;
+    }
+    const firmOnly = rewardRows.reduce((acc, r) => (r.strategyId === null && r.occurredAt.getTime() <= t ? acc + r.amount : acc), 0n);
+    walk.nonTrading.push(firmOnly);
+    total += rewarded + firmOnly;
     walk.t.push(t);
     walk.total.push(total);
     walk.realized.push(realized);
@@ -273,9 +299,10 @@ export async function walkLifetime(client: PoolClient, options: LifetimeWalkOpti
   return walk;
 }
 
-// One strategy's lifetime PnL at each point of a walk: its active listings' and its dormant ones'.
+// One strategy's lifetime PnL at each point of a walk: its active listings', its dormant ones' and its rewards.
 export function strategyTotals(walk: LifetimeWalk, strategyId: number): bigint[] {
   const base = walk.dormantTotal.get(strategyId) ?? 0n;
   const own = walk.keys.flatMap((key, k) => (key.strategyId === strategyId ? [walk.keyTotal[k]] : []));
-  return walk.t.map((_, p) => own.reduce((sum, line) => sum + line[p], base));
+  const rewards = walk.rewards.get(strategyId);
+  return walk.t.map((_, p) => own.reduce((sum, line) => sum + line[p], base + (rewards?.[p] ?? 0n)));
 }

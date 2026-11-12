@@ -9,11 +9,13 @@ export async function settlement(client: PoolClient, now: Date): Promise<Finding
   const unsettled = (await client.query(`
     SELECT p.strategy_id, st.name AS strategy_name, p.listing_id, p.mode, l.exchange_security_symbol AS symbol,
       p.account_id, p.needs_review, ec.settlement_price, ec.settled_at, l.date_modified,
-      EXISTS (SELECT 1 FROM strategy.session_listing sl
+      (SELECT sl.session_id FROM strategy.session_listing sl
+        JOIN strategy.session s ON s.session_id = sl.session_id
         LEFT JOIN account_master.session_venue_account sva
           ON sva.session_id = sl.session_id AND sva.exchange_id = l.exchange_id
         WHERE sl.strategy_id = p.strategy_id AND sl.mode = p.mode AND sl.listing_id = p.listing_id AND sl.active
-          AND sva.account_id IS NOT DISTINCT FROM p.account_id) AS held
+          AND sva.account_id IS NOT DISTINCT FROM p.account_id
+        ORDER BY s.started_at DESC LIMIT 1) AS holding_session_id
     FROM ledger.position p
     JOIN strategy.strategy st ON st.strategy_id = p.strategy_id
     JOIN sm.listing l ON l.listing_id = p.listing_id
@@ -35,11 +37,14 @@ export async function settlement(client: PoolClient, now: Date): Promise<Finding
         ...fields, detail: 'The listing was deactivated but its result was never recorded',
         since: u.date_modified.toISOString(),
       }));
-    } else if (u.needs_review || u.held || now.getTime() - u.settled_at.getTime() > SETTLEMENT_BOOKING_AFTER_MS) {
+    } else if (u.needs_review || now.getTime() - u.settled_at.getTime() > SETTLEMENT_BOOKING_AFTER_MS) {
+      // A session usually stops shortly after its market settles, so holding is only worth flagging once it lingers.
+      const held = u.holding_session_id !== null;
       findings.push(finding(u.mode, 'warning', 'SETTLEMENT_BLOCKED', key, 'Settled market still has an open position', {
         ...fields,
+        sessionId: u.holding_session_id,
         detail: u.needs_review ? 'Adjust the position to clear its review; the sweeper then settles what remains'
-          : u.held ? 'A session still holds the listing; it settles once that session stops'
+          : held ? 'A session still holds the listing; it settles once that session stops'
           : 'The settlement sweeper has not booked it',
         since: u.settled_at.toISOString(),
       }));

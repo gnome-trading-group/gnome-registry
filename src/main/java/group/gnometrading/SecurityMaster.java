@@ -28,6 +28,8 @@ import group.gnometrading.sm.SecurityType;
 import group.gnometrading.sm.SimulationParameters;
 import group.gnometrading.sm.fee.FeeTimeline;
 import group.gnometrading.sm.fee.FeeTimelineJson;
+import group.gnometrading.sm.incentive.IncentiveTimeline;
+import group.gnometrading.sm.incentive.IncentiveTimelineJson;
 import group.gnometrading.strings.ExpandingMutableString;
 import group.gnometrading.strings.MutableString;
 import group.gnometrading.strings.ViewString;
@@ -54,6 +56,7 @@ public final class SecurityMaster {
     private static final String EVENT_ENDPOINT = "/api/events?";
     private static final String EVENT_CONTRACT_ENDPOINT = "/api/event-contracts?";
     private static final String FEE_ENDPOINT = "/api/fees?";
+    private static final String INCENTIVE_ENDPOINT = "/api/incentive-programs?";
     private static final String SIMULATION_PARAMETERS_ENDPOINT = "/api/simulation-parameters?";
     private static final String SOURCE_ENDPOINT = "/api/sources?";
     private static final String STREAM_ENDPOINT = "/api/streams?";
@@ -131,6 +134,7 @@ public final class SecurityMaster {
     private final MutableString eventPath;
     private final MutableString eventContractPath;
     private final MutableString feePath;
+    private final MutableString incentivePath;
     private final MutableString simulationParametersPath;
     private final MutableString sourcePath;
     private final MutableString streamPath;
@@ -143,6 +147,8 @@ public final class SecurityMaster {
     private final IntMap<FeeTimeline> feeTimelineCache;
     // Keyed by the knowledge time a run pinned, then by listing or exchange: one process normally pins one time.
     private final Map<String, IntMap<FeeTimeline>> pinnedFeeTimelineCache;
+    private final IntMap<IncentiveTimeline> incentiveTimelineCache;
+    private final Map<String, IntMap<IncentiveTimeline>> pinnedIncentiveTimelineCache;
     private final Map<String, IntMap<SimulationParameters>> simulationParametersCache;
     private final Map<String, Exchange> exchangeByCodeCache;
     private final IntMap<Event> eventCache;
@@ -162,6 +168,7 @@ public final class SecurityMaster {
         this.eventPath = new ExpandingMutableString(EVENT_ENDPOINT);
         this.eventContractPath = new ExpandingMutableString(EVENT_CONTRACT_ENDPOINT);
         this.feePath = new ExpandingMutableString(FEE_ENDPOINT);
+        this.incentivePath = new ExpandingMutableString(INCENTIVE_ENDPOINT);
         this.simulationParametersPath = new ExpandingMutableString(SIMULATION_PARAMETERS_ENDPOINT);
         this.sourcePath = new ExpandingMutableString(SOURCE_ENDPOINT);
         this.streamPath = new ExpandingMutableString(STREAM_ENDPOINT);
@@ -173,6 +180,8 @@ public final class SecurityMaster {
         this.listingSpecCache = new IntHashMap<>();
         this.feeTimelineCache = new IntHashMap<>();
         this.pinnedFeeTimelineCache = new HashMap<>();
+        this.incentiveTimelineCache = new IntHashMap<>();
+        this.pinnedIncentiveTimelineCache = new HashMap<>();
         this.simulationParametersCache = new HashMap<>();
         this.exchangeByCodeCache = new HashMap<>();
         this.eventCache = new IntHashMap<>();
@@ -659,6 +668,48 @@ public final class SecurityMaster {
 
         try {
             return FeeTimelineJson.parse(toByteArray(response), listingId);
+        } catch (IOException e) {
+            throw new RuntimeException(e);
+        }
+    }
+
+    /** The venue incentive programs that reach the listing's market, as the registry holds them now. */
+    public IncentiveTimeline getIncentiveTimeline(final int listingId) {
+        final IncentiveTimeline cached = this.incentiveTimelineCache.get(listingId);
+        if (cached != null) {
+            return cached;
+        }
+        final IncentiveTimeline timeline = fetchIncentiveTimeline(listingId, null);
+        this.incentiveTimelineCache.put(listingId, timeline);
+        return timeline;
+    }
+
+    /**
+     * The listing's incentive programs as the registry knew them at {@code knownAsOf} (ISO-8601), so a backtest pinned
+     * to a time sees the programs as they were known then.
+     */
+    public IncentiveTimeline getIncentiveTimeline(final int listingId, final String knownAsOf) {
+        final IntMap<IncentiveTimeline> pinned =
+                this.pinnedIncentiveTimelineCache.computeIfAbsent(knownAsOf, k -> new IntHashMap<>());
+        IncentiveTimeline timeline = pinned.get(listingId);
+        if (timeline == null) {
+            timeline = fetchIncentiveTimeline(listingId, knownAsOf);
+            pinned.put(listingId, timeline);
+        }
+        return timeline;
+    }
+
+    private IncentiveTimeline fetchIncentiveTimeline(final int listingId, final String knownAsOf) {
+        final int originalLength = addParameters(this.incentivePath, "listingIds", listingId);
+        if (knownAsOf != null) {
+            this.incentivePath.appendString("&knownAsOf=");
+            this.incentivePath.appendString(knownAsOf);
+        }
+        final ByteBuffer response = this.registryConnection.get(this.incentivePath);
+        this.incentivePath.setLength(originalLength);
+
+        try {
+            return IncentiveTimelineJson.parse(toByteArray(response), listingId);
         } catch (IOException e) {
             throw new RuntimeException(e);
         }

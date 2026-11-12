@@ -16,7 +16,10 @@ import group.gnometrading.sm.PropositionFilter;
 import group.gnometrading.sm.Security;
 import group.gnometrading.sm.SecurityType;
 import group.gnometrading.sm.SimulationParameters;
+import group.gnometrading.sm.fee.FeeSchedule;
 import group.gnometrading.sm.fee.FeeTimeline;
+import group.gnometrading.sm.incentive.IncentiveProgram;
+import group.gnometrading.sm.incentive.IncentiveTimeline;
 import group.gnometrading.strings.ViewString;
 import java.nio.ByteBuffer;
 import java.util.stream.Stream;
@@ -813,6 +816,65 @@ class SecurityMasterTest {
 
         assertEquals(0, timeline.size());
         assertSame(timeline, securityMaster.getFeeTimeline(7, "2026-10-01T00:00:00.000Z"));
+        verify(registryConnection, times(1)).get(any());
+    }
+
+    @Test
+    void testGetFeeTimelineReadsAMakerRebate() {
+        when(registryConnection.get(new ViewString("/api/fees?listingIds=7")))
+                .thenReturn(ByteBuffer.wrap(
+                        """
+                        [{"listingId": 7, "timeline": [
+                          {"effectiveFrom": "2026-04-03T04:00:00.000Z", "effectiveTo": null,
+                           "definition": {"currency": "USD",
+                             "components": [{"kind": "PRICE_CURVE", "taker": 0.05, "maker": 0, "exponent": 1}],
+                             "rounding": {"mode": "HALF_UP", "increment": 0.00001, "scope": "FILL"},
+                             "makerRebate": {"share": 0.25}}}]}]"""
+                                .getBytes()));
+        final long april = java.time.Instant.parse("2026-04-03T04:00:00Z").getEpochSecond() * 1_000_000_000L;
+
+        final FeeSchedule schedule = securityMaster.getFeeTimeline(7).at(april);
+
+        assertEquals(0.25, schedule.makerRebateShare());
+        assertEquals(0L, schedule.fee(true, 500_000_000L, 1_000_000L, true, null));
+    }
+
+    @Test
+    void testGetIncentiveTimeline() {
+        when(registryConnection.get(new ViewString("/api/incentive-programs?listingIds=7")))
+                .thenReturn(ByteBuffer.wrap(
+                        """
+                        [{"listingId": 7, "programs": [{"venueProgramId": "k1", "versions": [
+                          {"venueProgramId": "k1", "program": "LIQUIDITY", "venueMarket": "KXRT-VIO-60",
+                           "periodStart": "2026-11-11T05:00:00.000Z", "periodEnd": "2026-11-12T05:00:00.000Z",
+                           "reward": "129.62", "rewardPer": "PERIOD",
+                           "definition": {"targetSize": 1000, "discountFactor": 0.5},
+                           "paidOut": true, "effectiveFrom": "2026-11-11T05:00:00.000Z"}]}]}]"""
+                                .getBytes()));
+        final long start = java.time.Instant.parse("2026-11-11T05:00:00Z").getEpochSecond() * 1_000_000_000L;
+
+        final IncentiveTimeline timeline = securityMaster.getIncentiveTimeline(7);
+
+        assertEquals(1, timeline.size());
+        final IncentiveProgram program = timeline.inForce(0, start);
+        assertEquals(129_620_000_000L, program.reward());
+        assertEquals(IncentiveProgram.RewardPer.PERIOD, program.rewardPer());
+        assertEquals(1000, program.definition().get("targetSize").asInt());
+        assertNull(timeline.inForce(0, start - 1));
+        assertSame(timeline, securityMaster.getIncentiveTimeline(7));
+        verify(registryConnection, times(1)).get(any());
+    }
+
+    @Test
+    void testGetIncentiveTimelineAsKnownAtAPinnedTime() {
+        when(registryConnection.get(
+                        new ViewString("/api/incentive-programs?listingIds=7&knownAsOf=2026-10-01T00:00:00.000Z")))
+                .thenReturn(ByteBuffer.wrap("[{\"listingId\": 7, \"programs\": []}]".getBytes()));
+
+        final IncentiveTimeline timeline = securityMaster.getIncentiveTimeline(7, "2026-10-01T00:00:00.000Z");
+
+        assertEquals(0, timeline.size());
+        assertSame(timeline, securityMaster.getIncentiveTimeline(7, "2026-10-01T00:00:00.000Z"));
         verify(registryConnection, times(1)).get(any());
     }
 

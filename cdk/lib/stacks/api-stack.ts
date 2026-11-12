@@ -38,6 +38,8 @@ export class ApiStack extends cdk.Stack {
   private nodeJsProps: lambda.NodejsFunctionProps;
   private props: Props;
   private auth: GnomeApiAuthorizer;
+  private endpointSecurityGroup: ec2.SecurityGroup;
+  private endpointRole: iam.Role;
 
   constructor(scope: Construct, id: string, props: Props) {
     super(scope, id, props);
@@ -85,6 +87,24 @@ export class ApiStack extends cdk.Stack {
     const userPool = cognito.UserPool.fromUserPoolArn(this, 'OperatorUserPool',
       ssm.StringParameter.valueForStringParameter(this, ApiStack.USER_POOL_ARN_PARAMETER));
     this.auth = new GnomeApiAuthorizer(this, 'Authorizer', { userPool, apiKeys: [this.apiKey] });
+
+    // CloudFormation caps a stack at 500 resources, and a security group, role and policy per function cost three
+    // each. The in-VPC endpoints all need the same thing (outbound to the database, which admits the VPC's CIDR, and
+    // rds-db:connect), so they share one of each. A function that needs any other permission gets its own role, so
+    // a grant never widens every endpoint.
+    this.endpointSecurityGroup = new ec2.SecurityGroup(this, 'EndpointSecurityGroup', {
+      vpc: props.vpc,
+      description: 'Registry API endpoint Lambdas',
+      allowAllOutbound: true,
+    });
+    this.endpointRole = new iam.Role(this, 'EndpointRole', {
+      assumedBy: new iam.ServicePrincipal('lambda.amazonaws.com'),
+      managedPolicies: [
+        iam.ManagedPolicy.fromAwsManagedPolicyName('service-role/AWSLambdaBasicExecutionRole'),
+        iam.ManagedPolicy.fromAwsManagedPolicyName('service-role/AWSLambdaVPCAccessExecutionRole'),
+      ],
+    });
+    props.database.grantConnect(this.endpointRole);
 
     this.nodeJsProps = {
       bundling: {
@@ -148,6 +168,8 @@ export class ApiStack extends cdk.Stack {
     // Fee schedules are append-only, so there is no DELETE or PATCH: a fix is a new row.
     this.routeFile('fees', 'fees.ts', { GET: [SERVICE, PERSON, BOT], POST: [SERVICE, PERSON] });
     this.routeFile('simulation-parameters', 'simulation-parameters.ts', { GET: [SERVICE, PERSON, BOT], POST: [SERVICE, PERSON] });
+    // Venue incentive programs, written by the incentive sync as the venues publish them; append-only like fees.
+    this.routeFile('incentive-programs', 'incentive-programs.ts', { GET: [SERVICE, PERSON, BOT], POST: [SERVICE] });
 
     // The controller's PnL, ledger and monitoring reads (PnL is derived from the ledger's fills and marks; nothing
     // about it is stored). One Lambda serves them all, for people and bots.
@@ -289,10 +311,8 @@ export class ApiStack extends cdk.Stack {
     const strategySessionsDbLambda = new lambda.NodejsFunction(this, 'strategy-sessions-lambda', {
       entry: join(__dirname, '..', '..', 'lambda', 'endpoints', 'strategy-sessions.ts'),
       ...this.nodeJsProps,
-      vpc: this.props.vpc,
-      vpcSubnets: this.props.vpc.selectSubnets({ subnetType: ec2.SubnetType.PRIVATE_ISOLATED }),
+      ...this.endpointProps(),
     });
-    this.props.database.grantConnect(strategySessionsDbLambda);
 
     const strategySessionsLauncherLambda = new lambda.NodejsFunction(this, 'strategy-session-launcher-lambda', {
       entry: join(__dirname, '..', '..', 'lambda', 'endpoints', 'strategy-session-launcher.ts'),
@@ -398,16 +418,21 @@ export class ApiStack extends cdk.Stack {
     const l = new lambda.NodejsFunction(this, `${lambdaName}-lambda`, {
       entry: join(__dirname, '..', '..', 'lambda', 'endpoints', fileName),
       ...this.nodeJsProps,
-      vpc: this.props.vpc,
-      vpcSubnets: this.props.vpc.selectSubnets({
-        subnetType: ec2.SubnetType.PRIVATE_ISOLATED,
-      }),
+      ...this.endpointProps(),
     });
-    this.props.database.grantConnect(l);
 
     // CloudFormation caps a stack at 500 resources, and a permission scoped to each method would add one per method
     // (two with the console's "Test" button). One permission per function lets this API invoke it from any of its
     // methods, which are the only ones wired to it anyway.
     return new apigw.LambdaIntegration(l, { scopePermissionToMethod: false });
+  }
+
+  private endpointProps(): Partial<lambda.NodejsFunctionProps> {
+    return {
+      vpc: this.props.vpc,
+      vpcSubnets: this.props.vpc.selectSubnets({ subnetType: ec2.SubnetType.PRIVATE_ISOLATED }),
+      securityGroups: [this.endpointSecurityGroup],
+      role: this.endpointRole,
+    };
   }
 }

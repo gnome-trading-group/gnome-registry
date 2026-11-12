@@ -9,7 +9,7 @@ first_steps:
 
 ## What it means
 
-The market has a settlement value but the position is still open: it needs review, a session still holds the listing, or the sweeper hasn't booked it for 15 minutes.
+The market has a settlement value but the position is still open: it needs review, or for 15 minutes a session has kept holding the listing or the sweeper hasn't booked it. When a session holds it, the alert names that session.
 
 ## Impact
 

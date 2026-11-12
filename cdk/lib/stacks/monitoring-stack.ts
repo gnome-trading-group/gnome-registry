@@ -11,6 +11,7 @@ interface Props extends cdk.StackProps {
   settlementSweeperLambda: lambda.IFunction;
   venuePollerLambda: lambda.IFunction;
   markPollerLambda: lambda.IFunction;
+  incentiveSyncLambda: lambda.IFunction;
   sessionMonitorLambda: lambda.IFunction;
   database: rds.DatabaseInstance;
 }
@@ -76,6 +77,14 @@ export class MonitoringStack extends cdk.Stack {
         lambdaFunction: props.markPollerLambda,
         humanReadableName: 'Mark Poller',
         alarmFriendlyName: 'MarkPoller',
+        addFaultCountAlarm: {
+          Error: { maxErrorCount: 0 },
+        },
+      })
+      .monitorLambdaFunction({
+        lambdaFunction: props.incentiveSyncLambda,
+        humanReadableName: 'Incentive Sync',
+        alarmFriendlyName: 'IncentiveSync',
         addFaultCountAlarm: {
           Error: { maxErrorCount: 0 },
         },

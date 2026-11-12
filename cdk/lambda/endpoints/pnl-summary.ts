@@ -4,8 +4,9 @@ import { connectLedgerDatabase, createResponse, isSessionId, parseMode, parsePos
 import { avgEntryPrice, markPrice, PositionState } from './ledger-math';
 import { fillImpact, lifetimePnl, SessionPnl, sessionPnl } from './pnl-math';
 import {
-  AfterSession, ListingInfo, loadAfterSessions, loadListingInfo, loadOutOfSessionFills, loadSessionStates,
-  loadStrategyState, OutOfSessionSource, PositionFill, SessionListingState, startOfDay, StrategyListingState,
+  AfterSession, ListingInfo, loadAfterSessions, loadListingInfo, loadOutOfSessionFills, loadRewards, loadSessionStates,
+  loadStrategyState, OutOfSessionSource, PositionFill, RewardRow, SessionListingState, startOfDay, StrategyListingState,
+  sumRewards,
 } from './pnl-state';
 
 // The PnL the controller shows, computed here once so the page never sums scaled integers itself. Money, prices and
@@ -16,7 +17,10 @@ import {
 //                           or traded since the day started; the flat rest are summed in history
 //     &listingId=           that listing's rows instead, active or not
 //     &positions=flat       the flat rest themselves, newest first: &limit= (default 100, max 500), &before=nextBefore
-//   ?mode=&tz=              every strategy's lifetime and today's PnL
+//   ?mode=&tz=              every strategy's lifetime and today's PnL, and the firm's non-trading PnL
+//
+// A strategy's lifetime PnL includes the venue rewards given to it (rewards, outside every session); the firm's adds
+// what non-trading money stays the firm's.
 
 const MAX_SESSION_IDS = 100;
 const DEFAULT_FLAT_LIMIT = 100;
@@ -156,12 +160,22 @@ const OUTSIDE_SESSION_TERMS: Record<OutOfSessionSource, 'settlements' | 'manual'
 };
 
 // How a strategy's lifetime PnL differs from the sum of its sessions' PnL: what each kind of fill outside them
-// changed it by, and carry, the mark moving on inventory no session held, which is whatever remains.
-function outsideSessions(total: bigint, fills: PositionFill[]) {
+// changed it by, the venue rewards it was given, and carry, the mark moving on inventory no session held, which is
+// whatever remains.
+function outsideSessions(total: bigint, fills: PositionFill[], rewards: bigint) {
   const terms = { settlements: 0n, manual: 0n, adjustments: 0n, resets: 0n };
   for (const fill of fills) terms[OUTSIDE_SESSION_TERMS[fill.source as OutOfSessionSource]] += impactOf(fill);
-  const booked = terms.settlements + terms.manual + terms.adjustments + terms.resets;
-  return strings({ total, ...terms, carry: total - booked });
+  const booked = terms.settlements + terms.manual + terms.adjustments + terms.resets + rewards;
+  return strings({ total, ...terms, rewards, carry: total - booked });
+}
+
+// Rewards given per listing, for the rows; a taker rebate is the strategy's, on no listing.
+function rewardsByListing(rows: RewardRow[]): Map<number, bigint> {
+  const byListing = new Map<number, bigint>();
+  for (const r of rows) {
+    if (r.listingId !== null) byListing.set(r.listingId, (byListing.get(r.listingId) ?? 0n) + r.amount);
+  }
+  return byListing;
 }
 
 function sessionListingRow(
@@ -170,7 +184,7 @@ function sessionListingRow(
   return {
     ...listingFields(info.get(state.listingId), state.listingId),
     ...positionFields(state.current),
-    markPrice: markPrice(state.mark).toString(),
+    markPrice: markPrice(state.mark)?.toString() ?? null,
     bid: state.mark?.bid.toString() ?? null,
     ask: state.mark?.ask.toString() ?? null,
     markTime: state.markTime,
@@ -180,7 +194,7 @@ function sessionListingRow(
     opening: {
       source: state.startedFlat ? 'FLAT' : state.opening.netQuantity !== 0n ? 'INHERITED' : 'NONE',
       ...positionFields(state.opening),
-      markPrice: markPrice(state.openingMark).toString(),
+      markPrice: markPrice(state.openingMark)?.toString() ?? null,
       unrealized: p.openingUnrealized.toString(),
       markMissing: p.openingMarkMissing,
     },
@@ -237,7 +251,10 @@ const rowKey = (l: StrategyListingState) => `${l.listingId}/${l.accountId}`;
 
 async function strategyRows(
   client: PoolClient, rows: StrategyListingState[], todayStart: Map<string, bigint>, review: Set<number>,
+  rewards: Map<number, bigint>,
 ) {
+  // A listing traded through several accounts has several rows; its rewards go on the first.
+  const shown = new Set<number>();
   const info = await loadListingInfo(client, rows.map(l => l.listingId));
   const labels = await accountLabels(client, rows.map(l => l.accountId));
   return rows.map(l => {
@@ -247,7 +264,7 @@ async function strategyRows(
       accountId: l.accountId,
       accountLabel: l.accountId === null ? null : labels.get(l.accountId) ?? null,
       ...positionFields(l.position),
-      markPrice: markPrice(l.mark).toString(),
+      markPrice: markPrice(l.mark)?.toString() ?? null,
       bid: l.mark?.bid.toString() ?? null,
       ask: l.mark?.ask.toString() ?? null,
       markTime: l.markTime,
@@ -255,6 +272,7 @@ async function strategyRows(
       ...strings({
         total: p.total, today: p.total - (todayStart.get(rowKey(l)) ?? 0n), realized: p.realized,
         unrealized: p.unrealized, fees: p.fees,
+        rewards: shown.has(l.listingId) ? 0n : (shown.add(l.listingId), rewards.get(l.listingId) ?? 0n),
       }),
       version: l.version,
       needsReview: review.has(l.listingId),
@@ -274,6 +292,9 @@ export async function strategySummary(
   )).rows.map(r => r.session_id);
   const sessionPnls = (await loadSessionStates(client, sessionIds, now)).map(s => sessionPnl(s));
   const outside = await loadOutOfSessionFills(client, mode, strategyId, now);
+  const rewardRows = await loadRewards(client, mode, { strategyId, firm: false }, now);
+  const rewards = sumRewards(rewardRows);
+  const rewardsToday = rewards - sumRewards(rewardRows, dayStart);
   const modes = (await client.query(
     'SELECT DISTINCT mode FROM strategy.session WHERE strategy_id = $1', [strategyId])).rows.map(r => r.mode);
   const review = await needsReview(client, strategyId, mode);
@@ -290,20 +311,23 @@ export async function strategySummary(
     modesWithData: modes,
     totals: {
       ...strings({
-        lifetime: lifetime.total,
-        today: lifetime.total - startOfToday.total,
+        lifetime: lifetime.total + rewards,
+        today: lifetime.total - startOfToday.total + rewardsToday,
         realized: lifetime.realized,
         unrealized: lifetime.unrealized,
         fees: lifetime.fees,
+        rewards,
+        rewardsToday,
       }),
-      outsideSessions: outsideSessions(lifetime.total - sessionPnls.reduce((acc, p) => acc + p.total, 0n), outside),
+      outsideSessions: outsideSessions(
+        lifetime.total + rewards - sessionPnls.reduce((acc, p) => acc + p.total, 0n), outside, rewards),
     },
     openPositions: current.listings.filter(l => l.position.netQuantity !== 0n).length,
     history: {
       count: current.listings.length - active.length,
       ...strings({ total: history.total, realized: history.realized, fees: history.fees }),
     },
-    listings: await strategyRows(client, shown, todayStart, review),
+    listings: await strategyRows(client, shown, todayStart, review, rewardsByListing(rewardRows)),
   };
 }
 
@@ -319,8 +343,9 @@ export async function flatPositions(
     .sort((a, b) => (BigInt(b.fillId) > BigInt(a.fillId) ? 1 : -1))
     .slice(0, limit);
   const todayStart = new Map(flat.map(l => [rowKey(l), lifetimePnl(l.position, l.mark).total]));
+  const rewards = rewardsByListing(await loadRewards(client, mode, { strategyId, firm: false }, now));
   return {
-    rows: await strategyRows(client, flat, todayStart, review),
+    rows: await strategyRows(client, flat, todayStart, review, rewards),
     nextBefore: flat.length === limit ? flat[flat.length - 1].fillId : null,
   };
 }
@@ -329,29 +354,70 @@ export async function firmSummary(client: PoolClient, mode: string, timeZone: st
   const dayStart = await startOfDay(client, now, timeZone);
   const current = await loadStrategyState(client, mode, null, now);
   const atDayStart = await loadStrategyState(client, mode, null, dayStart);
-  const strategyIds = [...new Set(current.listings.map(l => l.strategyId))];
+  const rewardRows = await loadRewards(client, mode, { strategyId: null, firm: true }, now);
+  const given = rewardRows.filter(r => r.strategyId !== null);
+  const firmOnly = rewardRows.filter(r => r.strategyId === null);
+  const strategyIds = [...new Set([...current.listings.map(l => l.strategyId), ...given.map(r => r.strategyId as number)])]
+    .sort((a, b) => a - b);
   const strategies = strategyIds.map(strategyId => {
     const own = current.listings.filter(l => l.strategyId === strategyId);
+    const ownRewards = given.filter(r => r.strategyId === strategyId);
+    const rewards = sumRewards(ownRewards);
     const lifetime = lifetimeTotals(own);
     const startOfToday = lifetimeTotals(atDayStart.listings.filter(l => l.strategyId === strategyId));
     return {
       strategyId,
       ...strings({
-        lifetime: lifetime.total, today: lifetime.total - startOfToday.total, unrealized: lifetime.unrealized,
+        lifetime: lifetime.total + rewards,
+        today: lifetime.total - startOfToday.total + rewards - sumRewards(ownRewards, dayStart),
+        unrealized: lifetime.unrealized,
+        rewards,
       }),
       openPositions: own.filter(l => l.position.netQuantity !== 0n).length,
     };
   });
-  const lifetime = lifetimeTotals(current.listings);
-  const startOfToday = lifetimeTotals(atDayStart.listings);
+  const trading = lifetimeTotals(current.listings);
+  const tradingAtDayStart = lifetimeTotals(atDayStart.listings);
+  const rewards = sumRewards(given);
+  const rewardsToday = rewards - sumRewards(given, dayStart);
+  const nonTrading = nonTradingTotals(firmOnly, dayStart);
   return {
     scope: { kind: 'firm', mode, timeZone, dayStart: dayStart.toISOString() },
     asOf: now.toISOString(),
     totals: strings({
-      lifetime: lifetime.total, today: lifetime.total - startOfToday.total, realized: lifetime.realized,
-      unrealized: lifetime.unrealized, fees: lifetime.fees,
+      lifetime: trading.total + rewards + nonTrading.lifetime,
+      today: trading.total - tradingAtDayStart.total + rewardsToday + nonTrading.today,
+      realized: trading.realized,
+      unrealized: trading.unrealized,
+      fees: trading.fees,
+      rewards,
+      rewardsToday,
+      nonTrading: nonTrading.lifetime,
+      nonTradingToday: nonTrading.today,
     }),
+    nonTrading: {
+      ...strings({ lifetime: nonTrading.lifetime, today: nonTrading.today }),
+      byProgram: nonTrading.byProgram,
+      byExchange: nonTrading.byExchange,
+    },
     strategies,
+  };
+}
+
+// The firm's own non-trading PnL, lifetime and since the day started, by program and by exchange.
+function nonTradingTotals(rows: RewardRow[], dayStart: Date) {
+  const group = (key: (r: RewardRow) => string) => {
+    const groups: Record<string, { lifetime: bigint; today: bigint }> = {};
+    for (const r of rows) {
+      const g = groups[key(r)] ??= { lifetime: 0n, today: 0n };
+      g.lifetime += r.amount;
+      if (r.occurredAt > dayStart) g.today += r.amount;
+    }
+    return Object.fromEntries(Object.entries(groups).map(([k, v]) => [k, strings(v)]));
+  };
+  const lifetime = sumRewards(rows);
+  return {
+    lifetime, today: lifetime - sumRewards(rows, dayStart), byProgram: group(r => r.program), byExchange: group(r => r.exchangeCode),
   };
 }
 

@@ -14,8 +14,10 @@ const CENT = 10_000_000;
 const UNIT = 1_000_000;
 const HALF_HOUR = 30 * 60 * 1000;
 const cents = (value: number) => String(value * CENT);
-const outside = (terms: { settlements?: number; manual?: number; adjustments?: number; resets?: number; carry?: number }) => {
-  const all = { settlements: 0, manual: 0, adjustments: 0, resets: 0, carry: 0, ...terms };
+const outside = (terms: {
+  settlements?: number; manual?: number; adjustments?: number; resets?: number; rewards?: number; carry?: number;
+}) => {
+  const all = { settlements: 0, manual: 0, adjustments: 0, resets: 0, rewards: 0, carry: 0, ...terms };
   const total = Object.values(all).reduce((acc, v) => acc + v, 0);
   return { total: cents(total), ...Object.fromEntries(Object.entries(all).map(([k, v]) => [k, cents(v)])) };
 };
@@ -120,12 +122,27 @@ describeDb('PnL derived from the ledger, against Postgres', () => {
     expect(summary.listings[0].afterSession).toBeNull();
   });
 
+  it('a book that empties for a moment leaves the last price in force', async () => {
+    await story();
+    // Every maker pulls at a result: one row with no bid, no ask and no trade, then the book returns one-sided.
+    await mark('2026-10-06T12:50:00Z', 0, 0);
+    const held = await summarize(client, { sessionId: 'new' }, now) as any;
+    expect([held.listings[0].markPrice, held.totals.total]).toEqual([cents(55), cents(45)]);
+    const chart = await marks(client, { listingId: '500', start: '2026-10-06T12:45:00Z', resolution: '60000' }, now);
+    expect(chart.mark).toEqual([cents(55)]);
+
+    await mark('2026-10-06T12:55:00Z', 0, 1);
+    const lost = await summarize(client, { sessionId: 'new' }, now) as any;
+    // Left with only a 1c ask (the match lost): marked at 1c, not valued at its entry.
+    expect(lost.listings[0].markPrice).toBe(cents(1));
+  });
+
   it("a strategy's lifetime is its sessions' PnL plus what moved outside them; today starts at the zone's midnight", async () => {
     await story();
     const utc = await summarize(client, { strategyId: '1', mode: 'paper' }, now) as any;
     expect(utc.totals).toEqual({
       lifetime: cents(144), today: cents(144), realized: cents(56), unrealized: cents(90), fees: cents(2),
-      outsideSessions: outside({ carry: 50 }),
+      rewards: cents(0), rewardsToday: cents(0), outsideSessions: outside({ carry: 50 }),
     });
     expect(utc.openPositions).toBe(1);
     expect(utc.modesWithData).toEqual(['paper']);
@@ -137,7 +154,7 @@ describeDb('PnL derived from the ledger, against Postgres', () => {
 
     const firm = await summarize(client, { mode: 'paper' }, now) as any;
     expect(firm.strategies).toEqual([
-      { strategyId: 1, lifetime: cents(144), today: cents(144), unrealized: cents(90), openPositions: 1 },
+      { strategyId: 1, lifetime: cents(144), today: cents(144), unrealized: cents(90), rewards: cents(0), openPositions: 1 },
     ]);
 
     const page = await summarize(client, { sessionIds: 'new,old' }, now) as any;
@@ -412,7 +429,7 @@ describeDb('PnL derived from the ledger, against Postgres', () => {
     await mark('2026-10-06T10:01:20Z', 0, 45);
     const m = await marks(client, { listingId: '500', start: '2026-10-06T10:00:30Z', resolution: '60000' }, now);
     expect(m.t.map(t => new Date(t).toISOString().slice(11, 19))).toEqual(['10:00:30', '10:00:50', '10:01:20']);
-    expect(m.mark).toEqual([cents(41), cents(43), '0']);
+    expect(m.mark).toEqual([cents(41), cents(43), cents(45)]);
     expect(m.ask).toEqual([cents(42), cents(44), cents(45)]);
     await expect(marks(client, {}, now)).rejects.toThrow(/listingId/);
   });

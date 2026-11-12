@@ -9,10 +9,25 @@ function position(netQuantity: bigint, totalCost: bigint, realizedPnl = 0n, tota
 }
 
 describe('ledger PnL matches the OMS', () => {
-  it('marks at the mid, else the last trade, else unknown', () => {
+  it('marks at the mid, else the quoted side tightened by the last trade, else the last trade, else unknown', () => {
     expect(markPrice({ bid: 30n * CENT, ask: 32n * CENT, lastTrade: 1n })).toBe(31n * CENT);
     expect(markPrice({ bid: 0n, ask: 32n * CENT, lastTrade: 29n * CENT })).toBe(29n * CENT);
-    expect(markPrice(null)).toBe(0n);
+    expect(markPrice({ bid: 0n, ask: 32n * CENT, lastTrade: 40n * CENT })).toBe(32n * CENT);
+    expect(markPrice({ bid: 0n, ask: 32n * CENT, lastTrade: 0n })).toBe(32n * CENT);
+    expect(markPrice({ bid: 30n * CENT, ask: 0n, lastTrade: 35n * CENT })).toBe(35n * CENT);
+    expect(markPrice({ bid: 30n * CENT, ask: 0n, lastTrade: 20n * CENT })).toBe(30n * CENT);
+    expect(markPrice({ bid: 0n, ask: 0n, lastTrade: 29n * CENT })).toBe(29n * CENT);
+    expect(markPrice({ bid: 0n, ask: 0n, lastTrade: 0n })).toBeNull();
+    expect(markPrice(null)).toBeNull();
+  });
+
+  it("values a binary market's loser at its one-sided book, not at its entry", () => {
+    // Bought 798 at 45c; the match is lost and only an ask at 1c is left, with no trade on record.
+    const loser = pnl(position(798n * UNIT, 798n * 45n * CENT, 0n, 0n), { bid: 0n, ask: CENT, lastTrade: 0n });
+    expect(loser.markPrice).toBe(CENT);
+    expect(loser.unrealizedPnl).toBe(-798n * 44n * CENT);
+    const unmarked = pnl(position(798n * UNIT, 798n * 45n * CENT, 0n, 0n), { bid: 0n, ask: 0n, lastTrade: 0n });
+    expect([unmarked.markPrice, unmarked.unrealizedPnl]).toEqual([null, 0n]);
   });
 
   it('values a long at the mark, net of fees', () => {

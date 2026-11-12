@@ -17,13 +17,19 @@ Lifecycle: `PROVISIONING` → `ACTIVE` → `DRAINING` → `RETIRED` (a draining 
    without breaking the others: trading, the poller's (`/read`), and market data (set once per exchange, see below).
    Create Kalshi's poller key with the `read` and `write::transfer` scopes and never `write`: the poller also keeps
    the account's shard rebalancing targets set, which moves cash between its shards but can't trade. Polymarket Intl is the exception: the poller reads the
-   wallet from the chain and its market data is public, so it takes only the trading key.
+   wallet from the chain and its market data is public, so the poller's key is optional: a CLOB API key of the wallet's
+   own, derived with a new nonce (never the gateway's, never the private key), which only lets the poller split the
+   wallet's liquidity rewards by market so its strategies get them. It can be added later with **Update credentials**,
+   leaving the trading fields empty.
    The registry draws a gamer-tag label (e.g. `sleepy-otter-42`), stores the credentials in Secrets Manager as
    `gnome/accounts/<label>/trading` (and `/read`) in every trading region, derives the public identifiers (wallet
    addresses, Kalshi subaccount) from them, and registers the account as `PROVISIONING`. The credentials are never
    written to the database or logged; the dialog shows where they were stored.
 3. Wait for the venue poller to post a green balance snapshot (Treasury page).
-4. Record the account's `OPENING` transfer: the cash it holds now. Reconciliation starts there.
+4. Record the account's `OPENING` transfer: the cash it holds now. Reconciliation starts there. From then on the
+   venue poller books the account's deposits, withdrawals, rewards, rebates and interest itself, from the venue
+   (Treasury → Transfers, recorded by "venue poller"); don't record them by hand. Money it can't see (a plain token
+   transfer into a Polymarket wallet, say) is recorded as a `CORRECTION`.
 5. Set the account's buffer and thresholds, then **Activate** it. On Kalshi, also set the shard rebalancing targets
    (percent of free cash per shard, adding up to 100) in proportion to the budgets that will trade each shard: Kalshi
    keeps each shard's cash for its own markets and never moves it for API orders on its own. Leave them empty to
@@ -49,7 +55,8 @@ once before trading live (this writes a `/read` secret too). That also fills in 
    A strategy with open orders left on the old wallet can't move until they are cancelled.
 4. Once the old wallet's markets resolve, redeem in the Polymarket UI and withdraw to a **fresh deposit address for
    that wallet** (or a separate CEX sub-account): CEX deposit addresses are usually fixed per user, so sending every
-   retired wallet to the same one clusters them publicly. Record the `WITHDRAWAL`.
+   retired wallet to the same one clusters them publicly. The poller books the withdrawal; if recon still breaks
+   (it can't see some transfers out of a wallet), record a `CORRECTION`.
 5. When the Treasury page says it is ready, **Retire** it, then choose **Delete secrets** from its menu (recoverable
    from the Secrets Manager console for 7 days).
 

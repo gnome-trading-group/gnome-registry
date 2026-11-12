@@ -62,7 +62,7 @@ describe('venue keys', () => {
   });
 });
 
-const UNMANAGED = { partition_targets: null, rebalance_reservation: 'sum' };
+const UNMANAGED = { partition_targets: null, rebalance_reservation: 'sum', credits_since: null, pending_credits: [] };
 
 // Real answers captured in Phase 0 (Kalshi demo, the Polymarket Intl test wallet), replayed through the readers.
 describe('venue readers on captured answers', () => {
@@ -105,7 +105,10 @@ describe('venue readers on captured answers', () => {
   });
 
   describe('Kalshi shard rebalancing', () => {
-    const kalshi = { account_id: 1, exchange_id: 1, exchange_code: 'KALSHI', label: 'x', venue_ref: {}, read_secret_name: null };
+    const kalshi = {
+      account_id: 1, exchange_id: 1, exchange_code: 'KALSHI', label: 'x', venue_ref: {}, read_secret_name: null,
+      credits_since: null, pending_credits: [],
+    };
     // Answers Kalshi's reads, holding the targets it was last set to, and records each request.
     const venue = (targets: unknown, setStatus = 200) => {
       let current = targets;

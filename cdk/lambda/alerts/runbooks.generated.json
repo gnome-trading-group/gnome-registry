@@ -517,6 +517,14 @@
       ],
       "url": "https://github.com/gnome-trading-group/gnome-registry/blob/main/docs/runbooks/alerts/RECON_STALE.md"
     },
+    "REWARD_UNALLOCATED": {
+      "summary": "A venue reward couldn't be given to the strategies that earned it, so it stays firm-level.",
+      "firstSteps": [
+        "Open the transfer on Treasury → Transfers to see its program and venue.",
+        "Check whether any live strategy traded or quoted on that account when it was earned."
+      ],
+      "url": "https://github.com/gnome-trading-group/gnome-registry/blob/main/docs/runbooks/alerts/REWARD_UNALLOCATED.md"
+    },
     "RISK_STALE": {
       "summary": "The session can't refresh its risk policies; it refuses new orders.",
       "firstSteps": [
@@ -702,6 +710,14 @@
         "Check whether the venue itself is degraded before changing anything."
       ],
       "url": "https://github.com/gnome-trading-group/gnome-registry/blob/main/docs/runbooks/alerts/STREAM_STALE.md"
+    },
+    "VENUE_CREDIT_UNCLASSIFIED": {
+      "summary": "A venue paid the account something the venue poller doesn't recognise; it's booked but unlabelled.",
+      "firstSteps": [
+        "Read the transfer on Treasury → Transfers (its reason is the venue's own type).",
+        "Map the type in the venue's reader under cdk/lambda/sync/venues."
+      ],
+      "url": "https://github.com/gnome-trading-group/gnome-registry/blob/main/docs/runbooks/alerts/VENUE_CREDIT_UNCLASSIFIED.md"
     }
   },
   "cloudwatch": {

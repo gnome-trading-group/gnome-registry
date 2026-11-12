@@ -77,6 +77,8 @@ export const ALERT_TYPES: Record<string, AlertType> = {
   DRAINING_EXPOSURE: { severity: 'WARNING', debounce: 1 },
   ACCOUNT_DUE_FOR_ROTATION: { severity: 'INFO', debounce: 1 },
   ACCOUNT_READY_TO_RETIRE: { severity: 'INFO', debounce: 1 },
+  VENUE_CREDIT_UNCLASSIFIED: { severity: 'INFO', debounce: 1 },
+  REWARD_UNALLOCATED: { severity: 'INFO', debounce: 1 },
   // Someone cancelled every order on an account around the order gateway (orchestrator's EmergencyCancel): the
   // gateway is broken or distrusted, so someone must look now. A dry run only lists.
   EMERGENCY_CANCEL: { severity: e => e.labels?.dryRun === 'true' ? 'INFO' : 'CRITICAL', debounce: 1 },

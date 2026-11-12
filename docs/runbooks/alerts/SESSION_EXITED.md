@@ -12,7 +12,8 @@ The strategy asked to stop (for example a pregame strategy once its match went l
 orders, closed its positions if the strategy asked for that, and shut down. The session ends STOPPED, with the
 strategy's reason in "stop reason".
 
-INFO: everything the strategy asked for was done. WARNING: it asked to close its positions, and some were still open
+INFO: everything the strategy asked for was done. It is only recorded here, not posted to Slack, unless the strategy
+asked to be notified (`request_exit(..., notify=True)`). WARNING: it asked to close its positions, and some were still open
 when its time ran out, usually because the book was too thin to sell into.
 
 ## Impact

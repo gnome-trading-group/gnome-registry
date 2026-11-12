@@ -103,6 +103,7 @@ describe('ApiStack auth', () => {
     ['contract-sources', 'POST', ['service']],
     ['contract-relationships/reconcile', 'POST', ['service']],
     ['proposition-subjects/merge-candidates', 'POST', ['service']],
+    ['incentive-programs', 'POST', ['service']],
     // People alone, so the audit log attributes each change to a person.
     ['risk/policies', 'POST', ['person']],
     ['risk/policies', 'PATCH', ['person']],
@@ -143,6 +144,7 @@ describe('ApiStack auth', () => {
     ['strategy-sessions/logs', 'GET', ['bot', 'person', 'service']],
     ['strategy-sessions/accounts', 'GET', ['bot', 'person', 'service']],
     ['gateways', 'GET', ['bot', 'person', 'service']],
+    ['incentive-programs', 'GET', ['bot', 'person', 'service']],
     ['ledger/positions', 'GET', ['bot', 'person', 'service']],
     ['ledger/orders', 'GET', ['bot', 'person', 'service']],
     ['sources', 'GET', ['bot', 'person', 'service']],
@@ -195,7 +197,52 @@ describe('ApiStack auth', () => {
   });
 
   it('stays well under the CloudFormation limit of 500 resources per stack', () => {
-    expect(Object.keys(template.toJSON().Resources).length).toBeLessThan(475);
+    expect(Object.keys(template.toJSON().Resources).length).toBeLessThan(400);
+  });
+
+  describe('endpoint Lambdas', () => {
+    const functions = Object.entries(template.findResources('AWS::Lambda::Function'));
+    const inVpc = functions.filter(([, f]) => f.Properties.VpcConfig);
+    const roleOf = (id: string) => functions.find(([fid]) => fid === id)![1].Properties.Role['Fn::GetAtt'][0];
+    const fnId = (prefix: string) => {
+      const ids = functions.map(([id]) => id).filter(id => id.startsWith(prefix));
+      expect(ids).toHaveLength(1);
+      return ids[0];
+    };
+
+    it('share one outbound-only security group', () => {
+      const groups = template.findResources('AWS::EC2::SecurityGroup');
+      expect(Object.keys(groups)).toHaveLength(1);
+      const [groupId, group] = Object.entries(groups)[0];
+      expect(group.Properties.SecurityGroupIngress).toBeUndefined();
+      expect(group.Properties.SecurityGroupEgress).toEqual([expect.objectContaining({ CidrIp: '0.0.0.0/0', IpProtocol: '-1' })]);
+      expect(inVpc.length).toBeGreaterThan(30);
+      for (const [, f] of inVpc) {
+        expect(f.Properties.VpcConfig.SecurityGroupIds).toEqual([{ 'Fn::GetAtt': [groupId, 'GroupId'] }]);
+      }
+    });
+
+    it('share one role that may only connect to the database', () => {
+      const roles = new Set(inVpc.map(([id]) => roleOf(id)));
+      expect(roles.size).toBe(1);
+      const [role] = roles;
+      const managed = JSON.stringify(template.findResources('AWS::IAM::Role')[role].Properties.ManagedPolicyArns);
+      expect(managed).toContain('AWSLambdaBasicExecutionRole');
+      expect(managed).toContain('AWSLambdaVPCAccessExecutionRole');
+      const statements = Object.values(template.findResources('AWS::IAM::Policy'))
+        .filter((p: any) => p.Properties.Roles.some((r: any) => r.Ref === role))
+        .flatMap((p: any) => p.Properties.PolicyDocument.Statement);
+      expect(statements.map((s: any) => s.Action)).toEqual(['rds-db:connect']);
+      expect(roleOf(fnId('strategysessionslambda'))).toBe(role);
+    });
+
+    it('give each Lambda with its own grants its own role', () => {
+      const shared = roleOf(inVpc[0][0]);
+      const special = ['gatewayensurelambda', 'venueaccountcreatelambda', 'strategysessionlauncherlambda']
+        .map(prefix => roleOf(fnId(prefix)));
+      expect(new Set(special).size).toBe(special.length);
+      expect(special).not.toContain(shared);
+    });
   });
 
   it.each([

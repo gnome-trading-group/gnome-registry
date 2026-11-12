@@ -1,5 +1,10 @@
 import { fetchWithRetry } from './http';
-import { PollTarget, PRICE_SCALE, scaleDecimal, SIZE_SCALE, VenueReading } from './types';
+import { polymarketIntlHeaders } from './signers';
+import {
+  BreakdownMarket, CreditBreakdown, CreditKind, CreditProgram, DAY_MS, isoDate, payoutDay, PendingCredit, PollTarget,
+  PRICE_SCALE, scaleDecimal, SIZE_SCALE, VenueCredit, VenueReading,
+} from './types';
+import { IncentiveProgramReading } from './types';
 
 // Polymarket Intl holds everything on chain, so an account is read with no credentials: its collateral is the
 // funder wallet's pUSD balance on Polygon, its positions come from the public data API by that wallet's address.
@@ -68,4 +73,193 @@ export async function readPolymarketIntl(target: PollTarget): Promise<VenueReadi
   return {
     cashTotal: cash, cashAvailable: cash, portfolioValue, redeemableValue, positions, raw: { positions: rows },
   };
+}
+
+// What Polymarket pays a wallet on its own, and its deposits and withdrawals, as the public activity feed lists them.
+// Payouts are each a day's total per program and name no market; they land a little after midnight UTC.
+const CREDIT_TYPES: Record<string, [CreditKind, CreditProgram | null]> = {
+  REWARD: ['REWARD', 'LIQUIDITY'],
+  MAKER_REBATE: ['REWARD', 'MAKER_REBATE'],
+  TAKER_REBATE: ['REWARD', 'TAKER_REBATE'],
+  YIELD: ['REWARD', 'HOLDING'],
+  REFERRAL_REWARD: ['REWARD', 'REFERRAL'],
+  DEPOSIT: ['DEPOSIT', null],
+  WITHDRAWAL: ['WITHDRAWAL', null],
+};
+
+// One transaction can pay a wallet the same type more than once, identical but for the amount (a taker rebate's
+// level-up bonuses), even the same amount twice; such rows share a timestamp, so they come back together, and their
+// order among themselves names them.
+export function parsePolymarketIntlActivity(rows: Record<string, any>[]): VenueCredit[] {
+  const seen = new Map<string, number>();
+  const credits: VenueCredit[] = [];
+  for (const row of rows) {
+    const type = String(row.type);
+    const mapped = CREDIT_TYPES[type];
+    if (!mapped) continue;
+    const size = scaleDecimal(row.usdc_size, PRICE_SCALE);
+    const base = `pm:${type}:${row.transaction_hash}:${size}`;
+    const occurrence = seen.get(base) ?? 0;
+    seen.set(base, occurrence + 1);
+    const [kind, program] = mapped;
+    credits.push({
+      externalRef: `${base}:${occurrence}`, kind, program, amount: kind === 'WITHDRAWAL' ? -size : size,
+      occurredAt: new Date(Number(row.timestamp) * 1000), venueMarket: null, venueType: type, raw: row,
+    });
+  }
+  return credits;
+}
+
+export async function readPolymarketIntlCredits(target: PollTarget, since: Date): Promise<VenueCredit[]> {
+  const funder = target.venue_ref.funderAddress;
+  if (typeof funder !== 'string' || !/^0x[0-9a-fA-F]{40}$/.test(funder)) {
+    throw new Error(`Account ${target.label} has no funderAddress in its venue_ref`);
+  }
+  // Unlike positions, activity wants the user on every page, cursor or not.
+  const filters = `user=${funder}&limit=${PAGE_LIMIT}&type=${Object.keys(CREDIT_TYPES).join(',')}`
+    + `&exclude_deposits_withdrawals=false&start=${Math.floor(since.getTime() / 1000)}`;
+  const rows: Record<string, any>[] = [];
+  let cursor: string | null = null;
+  do {
+    const page = cursor === null ? filters : `${filters}&cursor=${encodeURIComponent(cursor)}`;
+    const res = await fetchWithRetry(`${DATA_API}/activity?${page}`, () => ({ headers: { 'User-Agent': USER_AGENT } }));
+    if (!res.ok) throw new Error(`Polymarket activity failed: ${res.status} ${await res.text()}`);
+    const body = await res.json() as { data: Record<string, any>[] | null; pagination?: { next_cursor: string | null } };
+    rows.push(...(body.data ?? []));
+    cursor = body.pagination?.next_cursor ?? null;
+  } while (cursor !== null);
+  return parsePolymarketIntlActivity(rows);
+}
+
+export interface ClobCredentials {
+  apiKey: string;
+  secret: string;
+  passphrase: string;
+}
+
+const CLOB_API = 'https://clob.polymarket.com';
+const LAST_CURSOR = 'LTE=';
+
+// Rewards and rebates are a UTC day's, so the day is both the time they were earned over and the program's period.
+function byCondition(rows: { condition: string; amount: bigint }[], day: Date): BreakdownMarket[] {
+  const totals = new Map<string, bigint>();
+  for (const r of rows) totals.set(r.condition, (totals.get(r.condition) ?? 0n) + r.amount);
+  const to = new Date(day.getTime() + DAY_MS);
+  return [...totals].filter(([, amount]) => amount > 0n)
+    .map(([venueMarket, amount]) => ({ venueMarket, amount, from: day, to, periodStart: day, periodEnd: to }));
+}
+
+// A day's maker rebates per market, public, keyed by the wallet that made.
+async function makerRebates(funder: string, day: Date): Promise<BreakdownMarket[]> {
+  const res = await fetchWithRetry(`${CLOB_API}/rebates/current?date=${isoDate(day)}&maker_address=${funder}`,
+    () => ({ headers: { 'User-Agent': USER_AGENT } }));
+  if (!res.ok) throw new Error(`Polymarket rebates failed: ${res.status} ${await res.text()}`);
+  const rows = (await res.json() ?? []) as { condition_id: string; rebated_fees_usdc: string }[];
+  return byCondition(rows.map(r => ({ condition: r.condition_id, amount: scaleDecimal(r.rebated_fees_usdc, PRICE_SCALE) })), day);
+}
+
+// Earnings are in the reward's asset; its rate turns them into dollars.
+function inDollars(earnings: unknown, rate: unknown): bigint {
+  return (scaleDecimal(earnings, PRICE_SCALE) * scaleDecimal(rate ?? 1, PRICE_SCALE)) / PRICE_SCALE;
+}
+
+// A day's liquidity rewards per market, which only the wallet's own CLOB API key may read: the native ones, or the
+// sponsored ones (sponsored=true).
+async function liquidityRewards(
+  target: PollTarget, credentials: ClobCredentials, day: Date, sponsored: boolean,
+): Promise<{ condition: string; amount: bigint }[]> {
+  const funder = String(target.venue_ref.funderAddress);
+  const signer = String(target.venue_ref.signerAddress ?? '');
+  const signatureType = String(target.venue_ref.signatureType ?? '');
+  const rows: { condition: string; amount: bigint }[] = [];
+  let cursor = '';
+  for (let page = 0; page < 50; page++) {
+    const path = `/rewards/user?date=${isoDate(day)}&maker_address=${funder}&signature_type=${signatureType}`
+      + `&sponsored=${sponsored}` + (cursor ? `&next_cursor=${encodeURIComponent(cursor)}` : '');
+    const res = await fetchWithRetry(`${CLOB_API}${path}`, () => ({
+      headers: { ...polymarketIntlHeaders(credentials, signer, 'GET', path, Date.now()), 'User-Agent': USER_AGENT },
+    }));
+    if (!res.ok) throw new Error(`Polymarket rewards failed: ${res.status} ${await res.text()}`);
+    const body = await res.json() as {
+      data?: { condition_id: string; earnings: number | string; asset_rate?: number | string }[]; next_cursor?: string;
+    };
+    rows.push(...(body.data ?? []).map(r => ({ condition: r.condition_id, amount: inDollars(r.earnings, r.asset_rate) })));
+    cursor = body.next_cursor ?? '';
+    if (!cursor || cursor === LAST_CURSOR) break;
+  }
+  return rows;
+}
+
+// Each pending payout's split by market, for the day it paid. Liquidity rewards need the wallet's CLOB API key, so
+// without one they're left for when it's added.
+export async function readPolymarketIntlBreakdowns(
+  target: PollTarget, credentials: ClobCredentials | null, pending: PendingCredit[],
+): Promise<CreditBreakdown[]> {
+  const funder = target.venue_ref.funderAddress;
+  if (typeof funder !== 'string') return [];
+  const breakdowns: CreditBreakdown[] = [];
+  for (const credit of pending) {
+    const day = payoutDay(new Date(credit.occurred_at));
+    if (credit.program === 'MAKER_REBATE') {
+      breakdowns.push({ externalRef: credit.external_ref, markets: await makerRebates(funder, day) });
+    } else if (credit.program === 'LIQUIDITY' && credentials) {
+      // Whether the day's payout includes its sponsored rewards isn't documented: both readings are offered.
+      const native = await liquidityRewards(target, credentials, day, false);
+      const sponsored = await liquidityRewards(target, credentials, day, true);
+      breakdowns.push({
+        externalRef: credit.external_ref, markets: byCondition(native, day),
+        alternatives: sponsored.length > 0 ? [byCondition([...native, ...sponsored], day)] : [],
+      });
+    }
+  }
+  return breakdowns;
+}
+
+// Polymarket's liquidity rewards, from the CLOB's public list of every market rewarded now: one program per reward
+// config (a market can carry several, one per sponsor and asset), paid per UTC day. The list has no history and no
+// config id, so a program is its market, asset and start date, and one that drops off the list has ended.
+const REWARDS_URL = `${CLOB_API}/rewards/markets/current`;
+const MAX_REWARD_PAGES = 200;
+// Configs with no end carry this year.
+const OPEN_ENDED_YEAR = 2500;
+
+export function parsePolymarketIntlRewardMarket(m: Record<string, any>): IncentiveProgramReading[] {
+  return (m.rewards_config ?? []).map((c: Record<string, any>) => {
+    const end = new Date(`${c.end_date}T00:00:00Z`);
+    return {
+      venueProgramId: `${m.condition_id}:${String(c.asset_address).toLowerCase()}:${c.start_date}`,
+      program: 'LIQUIDITY',
+      venueMarket: String(m.condition_id),
+      periodStart: new Date(`${c.start_date}T00:00:00Z`).toISOString(),
+      // end_date is the last day paid.
+      periodEnd: end.getUTCFullYear() >= OPEN_ENDED_YEAR ? null : new Date(end.getTime() + DAY_MS).toISOString(),
+      reward: String(c.rate_per_day),
+      rewardPer: 'DAY',
+      definition: {
+        minSize: Number(m.rewards_min_size),
+        maxSpreadCents: Number(m.rewards_max_spread),
+        asset: String(c.asset_address),
+      },
+      paidOut: null,
+      sourceRef: REWARDS_URL,
+      raw: { ...m, rewards_config: [c] },
+    };
+  });
+}
+
+// Every page, or an error: a partial list would read as programs ending.
+export async function readPolymarketIntlIncentivePrograms(): Promise<IncentiveProgramReading[]> {
+  const programs: IncentiveProgramReading[] = [];
+  let cursor = '';
+  for (let page = 0; page < MAX_REWARD_PAGES; page++) {
+    const res = await fetchWithRetry(`${REWARDS_URL}${cursor ? `?next_cursor=${encodeURIComponent(cursor)}` : ''}`,
+      () => ({ headers: { 'User-Agent': USER_AGENT } }));
+    if (!res.ok) throw new Error(`Polymarket rewards page ${page} failed: ${res.status} ${await res.text()}`);
+    const body = await res.json() as { data?: Record<string, any>[]; next_cursor?: string };
+    const markets = body.data ?? [];
+    programs.push(...markets.flatMap(parsePolymarketIntlRewardMarket));
+    cursor = body.next_cursor ?? '';
+    if (!cursor || cursor === LAST_CURSOR || markets.length === 0) return programs;
+  }
+  throw new Error(`Polymarket rewards ran past ${MAX_REWARD_PAGES} pages`);
 }

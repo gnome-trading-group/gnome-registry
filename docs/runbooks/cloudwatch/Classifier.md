@@ -16,7 +16,7 @@ Alarms named `Classifier-…`:
 | `<Queue>` message age | Contracts, Entities, Embeddings or Slack queue backing up |
 | `<Queue>Dlq` | messages failed repeatedly |
 | `<Worker>Worker` memory | a worker near its memory limit |
-| `<Worker>WorkerRestarts` | a worker restarting repeatedly |
+| `<Worker>WorkerRestarts` | a worker crashing repeatedly (2+ in an hour; deploys and spot drains don't count) |
 | `<Worker>BatchFailures` | a queue worker (Normalize, Relationships, Notify) failing 3+ batches or idle passes an hour while it keeps running |
 | RelationshipsSilent | the Relationships worker logged no pass for 2 hours: hung or not running |
 | FetchCycleFailures | fetch cycles failing |

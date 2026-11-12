@@ -48,7 +48,7 @@ synth step, so run `npm test` yourself before handing off.
 - `cdk/lambda/alerts/` - ingest, router, store, sinks (Slack, incident.io), `alert-types.ts` (type catalog + severity)
 - `cdk/lambda/monitoring/rules/` - findings shared by the controller overview and the alert tick
 - `cdk/lambda/sync/` - scheduled jobs: exchange sync (`exchanges/` adapters), venue poller (`venues/`), mark poller,
-  settlement sweeper, strategy-session monitor
+  incentive sync (readers in `venues/`), settlement sweeper, strategy-session monitor
 - `cdk/lambda/fees/`, `cdk/lambda/simulation/` - fee calculator/timeline and simulation-parameter resolution
 - `cdk/test/` - jest tests; `*.db.test.ts` need Postgres; `fixtures/` holds venue payloads and test cases
 - `src/main/java/group/gnometrading/` - Java client: `RegistryConnection`, `SecurityMaster`, `risk/`, `account/`,
@@ -72,11 +72,13 @@ synth step, so run `npm test` yourself before handing off.
   (risk policy writes, ledger adjustments, venue-account create/status, treasury transfers) are `PERSON` only.
   `risk/halts` is `SERVICE` only and can only enable a kill.
 - One route tree (no `/cognito` copy); CORS preflights carry no authorizer. Keep the authorizer set per method.
-- The API stack must stay under 475 CloudFormation resources (test-enforced; the hard limit is 500). It holds 473
-  (2026-11-10), and a new route costs about 10 (path, a method each plus OPTIONS, function, role, policy, security
-  group, invoke permission), so the next route needs a stack split; a new method on an existing path costs 1.
-  Integrations use `scopePermissionToMethod: false` for this reason. Don't merge unrelated routes into one Lambda just
-  to save resources; give a new resource its own Lambda.
+- The API stack must stay under 400 CloudFormation resources (test-enforced; the hard limit is 500). It holds 380
+  (2026-11-12), and a new route costs about 5 (path, a method each plus OPTIONS, function, invoke permission); a new
+  method on an existing path costs 1. The in-VPC endpoint Lambdas share one security group and one role
+  (`rds-db:connect` only); a Lambda that needs any other grant is built by hand with its own role (the launcher,
+  account creator, gateway ensure), so a grant never widens every endpoint. Integrations use
+  `scopePermissionToMethod: false` for the same reason. Don't merge unrelated routes into one Lambda just to save
+  resources; give a new resource its own Lambda.
 - SQL: never interpolate a value into query text. `ResourceHandler`'s `generate*Query` methods return `Sql`
   (pg's `{ text, values }`), built with the helpers in `cdk/lambda/endpoints/sql.ts`: the ``sql`...` `` tag turns
   values into `$n` placeholders and composes fragments; `where()`, `set()` and `anyId()` cover optional filters,
@@ -101,8 +103,8 @@ synth step, so run `npm test` yourself before handing off.
   branch, which `RegistryPipeline` (in the InfraPipelines account) builds: synth, `Dev` stage, manual `ApproveProd`,
   `Prod` stage. Dev and prod are separate AWS accounts. Stacks per stage: `Dev-`/`Prod-` + `DatabaseStack`,
   `ApiStack`, `ExchangeSyncStack`, `StrategySessionMonitorStack`, `SettlementSweeperStack`, `VenuePollerStack`,
-  `MarkPollerStack`, `MonitoringStack`, `AlertingStack`. After a release with new migrations, invoke the
-  `DatabaseInitLambda` in each account.
+  `MarkPollerStack`, `IncentiveSyncStack`, `MonitoringStack`, `AlertingStack`. After a release with new migrations,
+  invoke the `DatabaseInitLambda` in each account.
 - What runs:
   - ApiStack: the Registry API (stage `api`), one Lambda per resource in the VPC; the strategy-session launcher
     (launch/stop/logs, outside the VPC, starts EC2 orchestrators) and the venue-account creator (Secrets Manager,
@@ -144,8 +146,20 @@ synth step, so run `npm test` yourself before handing off.
     reconciliation. On Kalshi it reads cash per exchange shard and keeps the account's shard rebalancing targets
     (`treasury.account_config.partition_targets`) set on Kalshi, with the read key (scopes `read` + `write::transfer`,
     never `write`); it never touches the trading key. Each listing's shard is `sm.listing.venue_partition` (text, set
-    by the classifier); launch checks and the treasury rules check each shard a session trades on.
+    by the classifier); launch checks and the treasury rules check each shard a session trades on. It also reads each
+    account's credits (rewards, rebates, yield, interest, deposits, withdrawals) and books them as `treasury.transfer`
+    rows keyed by the venue's id (`external_ref`) before reconciling; people no longer record deposits/withdrawals on
+    polled venues. Liquidity rewards and maker/taker rebates are then given to the strategies that earned them
+    (`treasury.transfer_allocation`, `endpoints/treasury-allocate.ts`) from the venue's per-market breakdown, which the
+    poller reads too; a Polymarket Intl wallet's liquidity breakdown needs its CLOB API key in the optional read
+    secret. Strategy PnL counts its allocations as `rewards`; firm PnL adds the rest as `nonTrading`.
   - MarkPollerStack: every minute, marks listings still held after their sessions stopped.
+  - IncentiveSyncStack: every 15 min, reads the venues' incentive programs (Kalshi liquidity incentives, Polymarket
+    Intl liquidity rewards) from their public APIs and posts them to `/incentive-programs`, which keeps new and changed
+    ones in `sm.incentive_program` (append-only, point in time like fee schedules; the registry sets
+    `effective_from`). Kalshi: the unpaid programs every run, plus a sweep of paid ones in the first run after 11:00
+    UTC; `scripts/backfill-incentive-programs.ts` loads older ones. Polymarket Intl lists only current programs, so one
+    that drops off a complete read is ended at that UTC day's start. Paper and backtest reward estimates read them.
   - SettlementSweeperStack: every 5 min, books SETTLEMENT entries for settled positions no session holds.
   - StrategySessionMonitorStack: updates session status from EC2 instance state-change events.
   - AlertingStack: event bus `gnome-alerts`; ingest API (`POST /alerts`, registry API key, URL in SSM
@@ -160,7 +174,7 @@ synth step, so run `npm test` yourself before handing off.
   `alertrouter`). Orchestrator logs, which this API's own `strategy-sessions/logs` route reads, are under `/gnome/orchestrator/*`.
 - Alarms and alerts it raises:
   - `Registry-*` (MonitoringStack): API 5xx (Error), Lambda faults for ExchangeSync, SettlementSweeper, VenuePoller,
-    MarkPoller, StrategySessionMonitor (Error), RDS free storage < 5 GiB and CPU > 80% (Warning). No actions; they
+    MarkPoller, IncentiveSync, StrategySessionMonitor (Error), RDS free storage < 5 GiB and CPU > 80% (Warning). No actions; they
     reach the router as `CLOUDWATCH_ALARM`. Runbook: `docs/runbooks/cloudwatch/Registry.md`.
   - `AlertingMeta-<RouterErrors|StoreErrors|IngestErrors|Dlq|TickNotRunning|Undelivered>-Critical`: alerting's own
     health; bypass the router (SNS to incident.io in prod, and email). Runbook: `docs/runbooks/cloudwatch/AlertingMeta.md`.

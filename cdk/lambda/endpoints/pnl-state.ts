@@ -1,5 +1,5 @@
 import { PoolClient } from 'pg';
-import { MarkInputs, PositionState, toBigInt } from './ledger-math';
+import { MarkInputs, PositionState, pricedMark, toBigInt } from './ledger-math';
 
 // Reads the ledger state PnL is derived from: positions from fills (GAP rows carry no position of their own) and
 // marks as of a moment. Every lookup is an as-of query on an indexed (key, time) pair.
@@ -140,11 +140,11 @@ export async function loadSessionStates(client: PoolClient, sessionIds: string[]
     ) cur ON TRUE
     LEFT JOIN LATERAL (
       SELECT bid, ask, last_trade FROM ledger.mark m
-      WHERE m.listing_id = l.listing_id AND m.ts <= s.started_at ORDER BY m.ts DESC LIMIT 1
+      WHERE m.listing_id = l.listing_id AND m.ts <= s.started_at AND ${pricedMark('m')} ORDER BY m.ts DESC LIMIT 1
     ) m0 ON TRUE
     LEFT JOIN LATERAL (
       SELECT bid, ask, last_trade, ts FROM ledger.mark m
-      WHERE m.listing_id = l.listing_id AND m.ts <= s.as_of ORDER BY m.ts DESC LIMIT 1
+      WHERE m.listing_id = l.listing_id AND m.ts <= s.as_of AND ${pricedMark('m')} ORDER BY m.ts DESC LIMIT 1
     ) m1 ON TRUE
     ORDER BY s.session_id, l.listing_id`, [sessionIds, now])).rows;
   return rows.map(r => {
@@ -208,7 +208,7 @@ export async function loadStrategyState(
       AND tot.account_id IS NOT DISTINCT FROM pos.account_id
     LEFT JOIN LATERAL (
       SELECT bid, ask, last_trade, ts FROM ledger.mark m
-      WHERE m.listing_id = pos.listing_id AND m.ts <= $3 ORDER BY m.ts DESC LIMIT 1
+      WHERE m.listing_id = pos.listing_id AND m.ts <= $3 AND ${pricedMark('m')} ORDER BY m.ts DESC LIMIT 1
     ) mk ON TRUE
     ORDER BY pos.strategy_id, pos.listing_id, pos.account_id`, [mode, strategyId, at])).rows;
   const sessions = (await client.query(`${filtered}
@@ -273,7 +273,7 @@ const POSITION_FILL = `
   ) prev ON TRUE
   LEFT JOIN LATERAL (
     SELECT bid, ask, last_trade FROM ledger.mark m
-    WHERE m.listing_id = f.listing_id AND m.ts < f.recorded_at ORDER BY m.ts DESC LIMIT 1
+    WHERE m.listing_id = f.listing_id AND m.ts < f.recorded_at AND ${pricedMark('m')} ORDER BY m.ts DESC LIMIT 1
   ) mk ON TRUE`;
 
 function positionFill(r: Record<string, any>): PositionFill {
@@ -368,4 +368,61 @@ export async function startOfDay(client: PoolClient, at: Date, timeZone: string)
   const result = await client.query(
     `SELECT (date_trunc('day', $1::timestamptz AT TIME ZONE $2) AT TIME ZONE $2) AS start`, [at, timeZone]);
   return result.rows[0].start;
+}
+
+// Venue money that is PnL without being trading: rewards, rebates, yield and interest, and fee adjustments.
+export const NON_TRADING_KINDS = ['REWARD', 'INTEREST', 'FEE_ADJUSTMENT'];
+
+// Rewards in PnL, one row per (strategy, venue market, program, period): a payout's part given to a strategy
+// (strategyId set, source ALLOCATION), or, firm-wide, what a non-trading transfer leaves to the firm (strategyId null,
+// source FIRM: interest, yield, referral, fee adjustments, and what no strategy earned). estimated marks a session's
+// own estimate rather than money the venue paid; venue payouts never are. Venue accounts are live, so paper has none.
+export interface RewardRow {
+  strategyId: number | null;
+  listingId: number | null;
+  venueMarket: string | null;
+  program: string;
+  periodStart: Date | null;
+  periodEnd: Date | null;
+  amount: bigint;
+  occurredAt: Date;
+  exchangeCode: string;
+  source: 'ALLOCATION' | 'FIRM';
+  estimated: boolean;
+}
+
+export async function loadRewards(
+  client: PoolClient, mode: string, scope: { strategyId: number | null; listingId?: number; firm: boolean }, at: Date,
+): Promise<RewardRow[]> {
+  if (mode !== 'live') return [];
+  const rows = (await client.query(`
+    SELECT 'ALLOCATION' AS source, al.strategy_id, al.listing_id, al.venue_market, t.program, al.period_start,
+      al.period_end, al.amount, t.occurred_at, e.exchange_code
+    FROM treasury.transfer_allocation al
+    JOIN treasury.transfer t ON t.transfer_id = al.transfer_id
+    JOIN account_master.venue_account a ON a.account_id = t.account_id
+    JOIN sm.exchange e ON e.exchange_id = a.exchange_id
+    WHERE t.occurred_at <= $1 AND ($2::int IS NULL OR al.strategy_id = $2) AND ($3::int IS NULL OR al.listing_id = $3)
+    UNION ALL
+    SELECT 'FIRM', NULL, NULL, t.venue_market, COALESCE(t.program, t.kind), NULL, NULL,
+      t.amount - COALESCE((SELECT SUM(al.amount) FROM treasury.transfer_allocation al
+                           WHERE al.transfer_id = t.transfer_id), 0),
+      t.occurred_at, e.exchange_code
+    FROM treasury.transfer t
+    JOIN account_master.venue_account a ON a.account_id = t.account_id
+    JOIN sm.exchange e ON e.exchange_id = a.exchange_id
+    WHERE $4 AND t.kind = ANY($5::text[]) AND t.occurred_at <= $1
+    ORDER BY occurred_at`,
+  [at, scope.strategyId, scope.listingId ?? null, scope.firm, NON_TRADING_KINDS])).rows;
+  return rows
+    .map(r => ({
+      strategyId: r.strategy_id, listingId: r.listing_id, venueMarket: r.venue_market, program: r.program,
+      periodStart: r.period_start, periodEnd: r.period_end, amount: toBigInt(r.amount), occurredAt: r.occurred_at,
+      exchangeCode: r.exchange_code, source: r.source, estimated: false,
+    }))
+    .filter(r => r.amount !== 0n);
+}
+
+export function sumRewards(rows: RewardRow[], until?: Date): bigint {
+  return rows.reduce((sum, r) => (until === undefined || r.occurredAt <= until ? sum + r.amount : sum), 0n);
 }
