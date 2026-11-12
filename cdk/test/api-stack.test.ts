@@ -104,6 +104,7 @@ describe('ApiStack auth', () => {
     ['contract-relationships/reconcile', 'POST', ['service']],
     ['proposition-subjects/merge-candidates', 'POST', ['service']],
     ['incentive-programs', 'POST', ['service']],
+    ['ledger/reward-accruals', 'POST', ['service']],
     // People alone, so the audit log attributes each change to a person.
     ['risk/policies', 'POST', ['person']],
     ['risk/policies', 'PATCH', ['person']],
@@ -145,6 +146,7 @@ describe('ApiStack auth', () => {
     ['strategy-sessions/accounts', 'GET', ['bot', 'person', 'service']],
     ['gateways', 'GET', ['bot', 'person', 'service']],
     ['incentive-programs', 'GET', ['bot', 'person', 'service']],
+    ['ledger/reward-accruals', 'GET', ['bot', 'person', 'service']],
     ['ledger/positions', 'GET', ['bot', 'person', 'service']],
     ['ledger/orders', 'GET', ['bot', 'person', 'service']],
     ['sources', 'GET', ['bot', 'person', 'service']],

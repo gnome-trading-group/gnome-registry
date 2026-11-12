@@ -1,4 +1,5 @@
 import { APIGatewayProxyEvent } from 'aws-lambda';
+import { latestAccruals, sessionRewardTotals, sessionsRewardGross } from '../rewards/accruals';
 import { PoolClient } from 'pg';
 import { connectLedgerDatabase, createResponse, isSessionId, parseMode, parsePositiveInt } from './ledger-common';
 import { avgEntryPrice, markPrice, PositionState } from './ledger-math';
@@ -86,6 +87,8 @@ export async function sessionSummary(client: PoolClient, sessionId: string, now:
   const refusals = (await client.query(
     'SELECT listing_id, reason, count FROM ledger.reject_count WHERE session_id = $1 ORDER BY count DESC',
     [sessionId])).rows;
+  const accruals = await latestAccruals(client, { sessionId });
+  const rewardTotals = sessionRewardTotals(accruals);
 
   const pnls = states.map(state => sessionPnl(state));
   const open = states.filter(leftOpen);
@@ -108,6 +111,11 @@ export async function sessionSummary(client: PoolClient, sessionId: string, now:
       refused: refusals.reduce((acc, r) => acc + Number(r.count), 0),
     },
     refusals: refusals.map(r => ({ listingId: r.listing_id, reason: r.reason, count: Number(r.count) })),
+    // The session's own estimate of venue liquidity rewards (paper), outside its trading PnL; none in live.
+    rewards: {
+      ...strings({ estimatedGross: rewardTotals.gross, estimatedPaid: rewardTotals.paid }),
+      programs: accruals,
+    },
     listings: states.map((state, i) => ({
       ...sessionListingRow(state, pnls[i], info, review),
       afterSession: after.has(state) ? afterSessionRow(after.get(state) as AfterSession) : null,
@@ -210,6 +218,7 @@ export async function sessionsTotals(client: PoolClient, sessionIds: string[], n
     SELECT session_id, count(*) AS fills FROM ledger.fill
     WHERE session_id = ANY($1::text[]) AND source IN ('VENUE', 'RECOVERY') GROUP BY session_id`,
   [sessionIds])).rows;
+  const rewardGross = await sessionsRewardGross(client, sessionIds);
   return sessionIds.map(sessionId => {
     const own = states.filter(s => s.sessionId === sessionId);
     return {
@@ -217,6 +226,7 @@ export async function sessionsTotals(client: PoolClient, sessionIds: string[], n
       opening: own.some(s => s.startedFlat) ? 'FLAT' : own.some(s => s.opening.netQuantity !== 0n) ? 'INHERITED' : 'NONE',
       totals: strings(sessionTotals(own.map(s => sessionPnl(s)))),
       fills: Number(fills.find(f => f.session_id === sessionId)?.fills ?? 0),
+      rewardsEstimated: (rewardGross.get(sessionId) ?? 0n).toString(),
     };
   });
 }

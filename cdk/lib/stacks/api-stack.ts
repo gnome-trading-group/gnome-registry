@@ -186,6 +186,9 @@ export class ApiStack extends cdk.Stack {
     // The trading ledger. Running sessions write it; an operator's position adjustments are people only, so each one is
     // attributed to a person.
     this.routeFile('ledger/batch', 'ledger-batch.ts', { POST: [SERVICE] });
+    // A paper session's estimated venue rewards, posted by its rewards agent apart from the batch so they can never
+    // fence trading; people and bots read them.
+    this.routeFile('ledger/reward-accruals', 'reward-accruals.ts', { GET: [SERVICE, PERSON, BOT], POST: [SERVICE] });
     this.routeFile('ledger/positions', 'ledger-positions.ts', { GET: [SERVICE, PERSON, BOT] });
     this.routeFile('ledger/orders', 'ledger-orders.ts', { GET: [SERVICE, PERSON, BOT] });
     this.routeFile('ledger/adjustments', 'ledger-adjustments.ts', { POST: [PERSON] });

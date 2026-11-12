@@ -159,6 +159,13 @@ synth step, so run `npm test` yourself before handing off.
     poller reads too; a Polymarket Intl wallet's liquidity breakdown needs its CLOB API key, which account
     creation and credential updates copy from the trading credentials into the read secret (never the private key). Strategy PnL counts its allocations as `rewards`; firm PnL adds the rest as `nonTrading`.
   - MarkPollerStack: every minute, marks listings still held after their sessions stopped.
+  - Paper sessions' estimated venue rewards: a paper session's rewards agent (gnome-orchestrator `RewardsAgent`) posts
+    its scorer's snapshots to `POST /ledger/reward-accruals` (`ledger.reward_accrual`, append-only, one row per
+    listing, program and snapshot time; apart from `/ledger/batch`, so a reward row can never fence trading: rows that
+    don't fit are skipped and counted). `loadRewards` turns a paper strategy's consecutive snapshots into estimated
+    `RewardRow`s (`source: 'ESTIMATE'`), so paper PnL's rewards terms count them; the session summary carries
+    `rewards` (gross, paid once a period ended, per program) outside its trading PnL. `GET /ledger/reward-accruals`
+    (`sessionId`, or `strategyId` + `mode`) gives each listing and program's latest snapshot.
   - IncentiveSyncStack: every 15 min, reads the venues' incentive programs (Kalshi liquidity incentives, Polymarket
     Intl liquidity rewards) from their public APIs and posts them to `/incentive-programs`, which keeps new and changed
     ones in `sm.incentive_program` (append-only, point in time like fee schedules; the registry sets

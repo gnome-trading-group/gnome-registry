@@ -1,4 +1,5 @@
 import { PoolClient } from 'pg';
+import { accrualDeltas } from '../rewards/accruals';
 import { MarkInputs, PositionState, pricedMark, toBigInt } from './ledger-math';
 
 // Reads the ledger state PnL is derived from: positions from fills (GAP rows carry no position of their own) and
@@ -376,7 +377,9 @@ export const NON_TRADING_KINDS = ['REWARD', 'INTEREST', 'FEE_ADJUSTMENT'];
 // Rewards in PnL, one row per (strategy, venue market, program, period): a payout's part given to a strategy
 // (strategyId set, source ALLOCATION), or, firm-wide, what a non-trading transfer leaves to the firm (strategyId null,
 // source FIRM: interest, yield, referral, fee adjustments, and what no strategy earned). estimated marks a session's
-// own estimate rather than money the venue paid; venue payouts never are. Venue accounts are live, so paper has none.
+// own estimate rather than money the venue paid; venue payouts never are. Venue accounts are live, so paper has none
+// of those: a paper strategy's rewards are its sessions' estimates (source ESTIMATE), what accrued between their
+// snapshots, booked when each snapshot was taken.
 export interface RewardRow {
   strategyId: number | null;
   listingId: number | null;
@@ -387,14 +390,22 @@ export interface RewardRow {
   amount: bigint;
   occurredAt: Date;
   exchangeCode: string;
-  source: 'ALLOCATION' | 'FIRM';
+  source: 'ALLOCATION' | 'FIRM' | 'ESTIMATE';
   estimated: boolean;
 }
 
 export async function loadRewards(
   client: PoolClient, mode: string, scope: { strategyId: number | null; listingId?: number; firm: boolean }, at: Date,
 ): Promise<RewardRow[]> {
-  if (mode !== 'live') return [];
+  if (mode !== 'live') {
+    return (await accrualDeltas(client, mode, scope, at))
+      .map(r => ({
+        strategyId: r.strategy_id, listingId: r.listing_id, venueMarket: r.venue_market, program: r.program,
+        periodStart: r.period_start, periodEnd: r.period_end, amount: toBigInt(r.amount), occurredAt: r.as_of,
+        exchangeCode: r.exchange_code, source: 'ESTIMATE' as const, estimated: true,
+      }))
+      .filter(r => r.amount !== 0n);
+  }
   const rows = (await client.query(`
     SELECT 'ALLOCATION' AS source, al.strategy_id, al.listing_id, al.venue_market, t.program, al.period_start,
       al.period_end, al.amount, t.occurred_at, e.exchange_code

@@ -3,7 +3,10 @@
 // through the same route as the sync; the registry drops any it already holds unchanged. Safe to rerun.
 //
 //   REGISTRY_API_URL=https://<api>/api REGISTRY_API_KEY=<key> \
-//     npx ts-node scripts/backfill-incentive-programs.ts [--since 2026-07-01] [--dry-run]
+//     npx ts-node scripts/backfill-incentive-programs.ts [--since 2026-07-01] [--pause-ms 250] [--dry-run]
+//
+// --pause-ms waits between posts. Inserting hundreds of thousands of rows back to back slowed the shared database
+// enough that other endpoints couldn't open connections, so pace it in prod.
 import { postInChunks, registryPost } from '../lambda/sync/incentive-sync';
 import { resolveApiKey } from '../lambda/sync/registry-client';
 import { parseKalshiIncentiveProgram, readKalshiIncentivePages } from '../lambda/sync/venues/kalshi';
@@ -23,7 +26,17 @@ async function main() {
     .filter((p): p is IncentiveProgramReading => p !== null);
   console.log(`${programs.length} Kalshi liquidity programs started since ${since.toISOString()}`);
   if (process.argv.includes('--dry-run')) return;
-  const result = await postInChunks(registryPost(await resolveApiKey()), programs, 'KALSHI', 'BACKFILL');
+  const pauseMs = Number(option('pause-ms') ?? 0);
+  const post = registryPost(await resolveApiKey());
+  let posted = 0;
+  const paced: typeof post = async (rows, exchangeCode, source) => {
+    const result = await post(rows, exchangeCode, source);
+    posted += rows.length;
+    if (posted % 20_000 < rows.length) console.log(`posted ${posted} of ${programs.length}`);
+    await new Promise(resolve => setTimeout(resolve, pauseMs));
+    return result;
+  };
+  const result = await postInChunks(paced, programs, 'KALSHI', 'BACKFILL');
   console.log(`inserted ${result.inserted}, unchanged ${result.unchanged}`);
 }
 
