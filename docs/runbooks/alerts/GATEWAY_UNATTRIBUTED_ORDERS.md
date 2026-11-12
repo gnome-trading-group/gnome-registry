@@ -10,7 +10,9 @@ first_steps:
 
 After a restart, or when a session new to the gateway said hello, the gateway reconciled the orders it holds with the ones the session lists, and found orders resting at the venue that the session doesn't know (`GATEWAY_UNATTRIBUTED_EVENTS` in its log). It cancelled them.
 
-It also fires from a restarted gateway's startup sweep: an order resting on the account, placed before the gateway started, that it has no record of and no session claimed within its window (the earlier gateway's state was lost, e.g. it came back on another host). The alert then names the account, the order and its market.
+It also fires from a restarted gateway's startup sweep: an order resting on the account, placed before the gateway started, that it has no record of and no session claimed within its window (the earlier gateway's state was lost, e.g. it came back on another host). The alert then names the account, the order and its market, and the order as its session knew it (`<session id>-<counter>`): where the venue's id names the session's slot rather than the session (Polymarket US), the gateway looks the session up by its `session_seq`; if the registry can't say in time, the slot is given instead.
+
+A paper gateway never raises it: it keeps no ownership log and runs no sweep.
 
 ## Impact
 

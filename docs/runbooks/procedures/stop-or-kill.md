@@ -18,8 +18,9 @@ Enable one on the controller's Risk Policies page (`/risk/policies`), scoped as 
 | Account | every live order on one venue account, whichever strategy's (order gateway only) |
 | Global | everything |
 
-Live sessions trade through the order gateway, which enforces the same kills a second time, behind the OMS: within
-about a second it refuses new orders a kill covers and cancels the covered orders it holds. An account kill is the
+Every session trades through an order gateway (live sessions through the venue's live gateway, paper sessions through
+its paper gateway), which enforces the same kills a second time, behind the OMS: within about a second it refuses new
+orders a kill covers and cancels the covered orders it holds. An account kill is the
 gateway's alone (the OMS never sees it); set it from the Treasury page (account row → Halt account).
 
 A kill only works while the session's process (or for live, the order gateway) is alive and can reach the registry.
@@ -39,7 +40,8 @@ then stop the session so its instance and listings are released.
 
 ## When the order gateway is broken: emergency cancel
 
-Every live order goes through the order gateway, so a hung or crash-looping gateway leaves orders resting that
+For live accounts only: a paper gateway simulates its venue, so nothing it holds rests anywhere real, and stopping
+its sessions is enough. Every live order goes through the order gateway, so a hung or crash-looping gateway leaves orders resting that
 neither a kill nor a stop can cancel, and Kalshi and Polymarket US cancel nothing on their own. The `EmergencyCancel`
 Lambda goes around it: it lists the account's open orders on the venue with the account's trading key, cancels each,
 and lists them again. It cancels every strategy's orders on that account. Each call raises an `EMERGENCY_CANCEL`

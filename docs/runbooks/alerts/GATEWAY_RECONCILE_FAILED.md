@@ -12,12 +12,16 @@ Each minute, and whenever a session asks, the reconciler decides whether each ga
 
 ## Impact
 
-The gateway isn't started, stopped or moved to a new release as it should be. If it is wanted and down, live sessions on that venue can't trade.
+The gateway isn't started, stopped or moved to a new release as it should be. If it is wanted and down, sessions on that venue can't trade (paper ones, for a paper gateway).
 
 ## Diagnose
 
-- The error in the reconciler log: `AccessDenied` (its role), `ClientException` on the base task definition `order-gateway` (OrderGatewayStack not deployed in that region), the Elastic IP limit reached in the region, the ECS cluster or capacity provider missing.
-- Whether the gateway's row in the registry (`GET /gateways?mode=live`) names a region the platform runs in.
+- The error in the reconciler log: `AccessDenied` (its role), `ClientException` on the base task definition
+  (`order-gateway` for live, `order-gateway-paper` for paper: OrderGatewayStack not deployed in that region), the
+  Elastic IP limit reached in the region (live only; paper gateways get none), the ECS cluster or capacity provider
+  missing (`order-gateway-hosts` for live, `order-gateway-paper-hosts` for paper).
+- Whether the gateway's row in the registry (`GET /gateways`; the reconciler reads every mode) names a region the
+  platform runs in. A paper row is created on first want in its exchange's region (`sm.exchange.region`).
 
 ## Resolve
 

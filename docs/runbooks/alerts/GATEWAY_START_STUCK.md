@@ -1,15 +1,16 @@
 ---
 type: GATEWAY_START_STUCK
-summary: A live order gateway that sessions want hasn't become READY 6 minutes after the reconciler started it.
+summary: An order gateway that sessions want hasn't become READY 6 minutes after the reconciler started it.
 first_steps:
-  - Find the gateway in the alert key (`GATEWAY_START_STUCK:live:<exchange>:<instance>`) and its region in the labels.
+  - Find the gateway in the alert key (`GATEWAY_START_STUCK:<live|paper>:<exchange>:<instance>`) and its region in the labels.
   - Check the ECS service `order-gateway-<key with : as ->` in cluster `order-gateways` for stopped tasks and their reasons (also in the alert title).
   - Read the gateway log `/gnome/order-gateway/<region>`, stream `gateway/gateway/<task>`.
 ---
 
 ## What it means
 
-A session asked for this gateway (the launcher, or the session itself every 10 s while it waits), the gateway reconciler (gnome-orchestrator, Lambda `GatewayReconciler`) set its ECS service to one task, and 6 minutes later its endpoint item in `service-endpoints` (`order-gateway#<key>`) still doesn't say READY. A cold start (host, image, jar download, venue connections) takes 3–5 minutes.
+A session asked for this gateway (the launcher, or the session itself every 10 s while it waits), the gateway reconciler (gnome-orchestrator, Lambda `GatewayReconciler`) set its ECS service to one task, and 6 minutes later its endpoint item in `service-endpoints` (`order-gateway#<key>`) still doesn't say READY. A cold start (host, image, jar download, venue connections) took about 2.5 minutes in prod on a fresh host; the
+first start after a release waits about 1.5 minutes more while the reconciler moves the service onto the new revision.
 
 ## Impact
 
@@ -26,6 +27,20 @@ Live sessions on this venue can't trade: a NEW is rejected `GATEWAY_UNAVAILABLE`
 
 - Fix the cause; ECS keeps replacing the task, and the alert resolves once the gateway is READY.
 - A bad orchestrator release: the gateway runs `/gnome/orchestrator/latest-version`; point it at the last good version and the reconciler registers a new revision on its next tick.
+
+**A paper gateway.**
+
+Its paper sessions can't trade until it is READY; nothing real is at risk. It runs on `order-gateway-paper-hosts`
+(`c7a.medium`) from the base task definition `order-gateway-paper`, has no venue account and no Elastic IP. What stops
+one instead:
+
+- The market-data lease API: its revision carries `MARKET_DATA_API_URL` and `MARKET_DATA_API_KEY_SECRET`; a key it
+  can't read stops it reading its sessions' books.
+- The exchange in its key missing from the security master (`No exchange <CODE> for paper:...`).
+
+A paper gateway that is READY but can't build a session's simulation logs `can't simulate session <id>'s venue` and
+refuses that session's new orders `GATEWAY_NOT_READY`: check the session's `config.simulation` (its `as_of` and
+overrides).
 
 ## Escalate
 

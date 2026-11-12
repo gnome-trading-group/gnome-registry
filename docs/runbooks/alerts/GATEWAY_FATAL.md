@@ -24,6 +24,12 @@ Its sessions lose their link until the replacement is READY. Open orders stay at
 
 - Usually nothing: the replacement recovers. A crash that repeats on every start needs a fix, or a rollback of the orchestrator release.
 
+**A paper gateway.**
+
+The same, without anything real at stake: the replacement reports its paper sessions' orders CANCELED. A watchdog stall
+on the simulated lane (30 s on paper) points at an overloaded gateway: see [GATEWAY_DEGRADED](GATEWAY_DEGRADED.md)'s
+paper section.
+
 ## Escalate
 
 If it repeats, or GATEWAY_DOWN follows.

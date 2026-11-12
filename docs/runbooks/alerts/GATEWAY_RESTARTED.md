@@ -23,6 +23,12 @@ Orders the old gateway held are taken back from its ownership log when the new t
 
 Find why the task stopped (the stop reason, the old log's tail) and fix it. Check [GATEWAY_UNATTRIBUTED_ORDERS](GATEWAY_UNATTRIBUTED_ORDERS.md) for orders the sweep cancelled.
 
+**A paper gateway.**
+
+The simulated venue doesn't survive the process: the new task knows none of the paper sessions' orders and reports each
+CANCELED, nothing filled, when the session says hello again. Nothing real rests, and there is no sweep. Look into it
+only if it repeats.
+
 ## Escalate
 
 If it repeats, or sessions don't link to the new gateway.

@@ -212,7 +212,7 @@
       "url": "https://github.com/gnome-trading-group/gnome-registry/blob/main/docs/runbooks/alerts/FEE_TYPE_UNSUPPORTED.md"
     },
     "GATEWAY_DEGRADED": {
-      "summary": "A live order gateway has been DEGRADED for 2 minutes: an account's lane or venue connection isn't healthy.",
+      "summary": "An order gateway has been DEGRADED for 2 minutes: an account's lane or venue connection isn't healthy.",
       "firstSteps": [
         "Read the gateway log `/gnome/order-gateway/<region>` for the account that went down (connection, reader or lane lines).",
         "Check the venue's status page.",
@@ -221,7 +221,7 @@
       "url": "https://github.com/gnome-trading-group/gnome-registry/blob/main/docs/runbooks/alerts/GATEWAY_DEGRADED.md"
     },
     "GATEWAY_DOWN": {
-      "summary": "A live order gateway that was READY is gone (no running task, or no endpoint item) while sessions were linked or orders working.",
+      "summary": "An order gateway that was READY is gone (no running task, or no endpoint item) while sessions were linked or orders working.",
       "firstSteps": [
         "Read the labels: `workingOrders` above 0 means orders may be resting at the venue with nothing watching them (this pages). `cleanStop` true means its planned stop finished (every order cancelled, every session told) and only the gateway is missing (a warning).",
         "Check the ECS service `order-gateway-<key with : as ->` in `order-gateways` for the stopped task's reason.",
@@ -272,9 +272,9 @@
       "url": "https://github.com/gnome-trading-group/gnome-registry/blob/main/docs/runbooks/alerts/GATEWAY_RESTARTED.md"
     },
     "GATEWAY_START_STUCK": {
-      "summary": "A live order gateway that sessions want hasn't become READY 6 minutes after the reconciler started it.",
+      "summary": "An order gateway that sessions want hasn't become READY 6 minutes after the reconciler started it.",
       "firstSteps": [
-        "Find the gateway in the alert key (`GATEWAY_START_STUCK:live:<exchange>:<instance>`) and its region in the labels.",
+        "Find the gateway in the alert key (`GATEWAY_START_STUCK:<live|paper>:<exchange>:<instance>`) and its region in the labels.",
         "Check the ECS service `order-gateway-<key with : as ->` in cluster `order-gateways` for stopped tasks and their reasons (also in the alert title).",
         "Read the gateway log `/gnome/order-gateway/<region>`, stream `gateway/gateway/<task>`."
       ],
@@ -456,7 +456,7 @@
       "url": "https://github.com/gnome-trading-group/gnome-registry/blob/main/docs/runbooks/alerts/NO_PRICE.md"
     },
     "ORDER_GATEWAY_UNLINKED": {
-      "summary": "A live session has been unlinked from a venue's order gateway for over a minute while it has orders working there.",
+      "summary": "A session has been unlinked from a venue's order gateway for over a minute while it has orders working there.",
       "firstSteps": [
         "Check the gateway's ECS service (cluster order-gateways) and its log group /gnome/order-gateway/<region>.",
         "If the session can't link again soon, cancel the account's orders with EmergencyCancel, then stop the session."

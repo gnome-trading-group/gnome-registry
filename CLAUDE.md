@@ -72,7 +72,7 @@ synth step, so run `npm test` yourself before handing off.
   (risk policy writes, ledger adjustments, venue-account create/status, treasury transfers) are `PERSON` only.
   `risk/halts` is `SERVICE` only and can only enable a kill.
 - One route tree (no `/cognito` copy); CORS preflights carry no authorizer. Keep the authorizer set per method.
-- The API stack must stay under 400 CloudFormation resources (test-enforced; the hard limit is 500). It holds 380
+- The API stack must stay under 400 CloudFormation resources (test-enforced; the hard limit is 500). It holds about 386
   (2026-11-12), and a new route costs about 5 (path, a method each plus OPTIONS, function, invoke permission); a new
   method on an existing path costs 1. The in-VPC endpoint Lambdas share one security group and one role
   (`rds-db:connect` only); a Lambda that needs any other grant is built by hand with its own role (the launcher,
@@ -135,6 +135,11 @@ synth step, so run `npm test` yourself before handing off.
     (`/gnome/orchestrator/properties/<version>`; earlier releases simulate venues in the session). The session asks
     again every 10 s until linked, then every minute. The reconciler reads the rows of every mode (`GET /gateways`) with the API key, at the
     URL ApiStack publishes in SSM `/gnome/registry/api-url` (us-east-1), for any service outside this repo.
+    `GET /gateways/status` (the controller's Gateways page; its own Lambda outside the VPC, reading only
+    `order-gateway#*` items) joins each row to what the gateway writes of itself in gnome-shared-infra's
+    `service-endpoints` table: its endpoint (state, linked sessions, working orders, release; not running once unwritten
+    for a minute) and its minutes item `order-gateway#<key>#minutes` (its last hour: per account what went, waited and
+    was refused, the venue's answers and 429s, each session's sends; a paper gateway's books' lag).
   - DatabaseStack: RDS Postgres 16 (`gnome` db) in isolated subnets, plus the migration Lambda and a query Lambda
     (`{"query": "..."}`, returns rows) for read-only inspection.
   - ExchangeSyncStack: security-master sync every 15 minutes (Hyperliquid, Lighter adapters); in prod it reports to `#gnome-security-master`.

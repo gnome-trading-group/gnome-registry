@@ -12,7 +12,8 @@ import { join } from 'path';
 import { RECONCILER_QUEUE } from '../../lambda/endpoints/gateway-reconciler-queue';
 import { Runtime } from 'aws-cdk-lib/aws-lambda';
 import {
-  API_KEY_SECRET_NAMES, ApiKeySecret, CallerKind, GnomeApiAuthorizer, platformRegions, RouteMethods, Stage,
+  API_KEY_SECRET_NAMES, ApiKeySecret, CallerKind, GnomeApiAuthorizer, platformRegions, RouteMethods, SERVICE_ENDPOINTS,
+  Stage,
 } from '@gnome-trading-group/gnome-shared-cdk';
 import { CONTROLLER_READ_PATHS } from '../../lambda/endpoints/controller-read-paths';
 import { ALERT_BUS_NAME } from '../../lambda/alerts/model';
@@ -238,6 +239,31 @@ export class ApiStack extends cdk.Stack {
     }));
     this.route('gateways/ensure', new apigw.LambdaIntegration(gatewayWanted, { scopePermissionToMethod: false }),
       { POST: [SERVICE, PERSON] });
+    // Every gateway as it stands, for the controller: its row, and what it writes of itself in `service-endpoints`
+    // (gnome-shared-infra's table, primary region). Outside the VPC, to reach DynamoDB; reads only gateways' items.
+    const gatewayStatus = new lambda.NodejsFunction(this, 'gateway-status-lambda', {
+      entry: join(__dirname, '..', '..', 'lambda', 'endpoints', 'gateway-status.ts'),
+      ...this.nodeJsProps,
+      bundling: {
+        externalModules: ['pg-native', '@aws-sdk/*'],
+      },
+      environment: {
+        REGISTRY_API_URL: `https://${this.api.restApiId}.execute-api.${this.region}.${this.urlSuffix}/${ApiStack.STAGE_NAME}/`,
+        REGISTRY_API_KEY_ID: this.apiKey.keyId,
+        SERVICE_ENDPOINTS_REGION: SERVICE_ENDPOINTS.region,
+      },
+    });
+    gatewayStatus.addToRolePolicy(new iam.PolicyStatement({
+      actions: ['apigateway:GET'],
+      resources: [`arn:aws:apigateway:${this.region}::/apikeys/${this.apiKey.keyId}`],
+    }));
+    gatewayStatus.addToRolePolicy(new iam.PolicyStatement({
+      actions: ['dynamodb:BatchGetItem'],
+      resources: [`arn:aws:dynamodb:${SERVICE_ENDPOINTS.region}:${this.account}:table/${SERVICE_ENDPOINTS.tableName}`],
+      conditions: { 'ForAllValues:StringLike': { 'dynamodb:LeadingKeys': ['order-gateway#*'] } },
+    }));
+    this.route('gateways/status', new apigw.LambdaIntegration(gatewayStatus, { scopePermissionToMethod: false }),
+      { GET: [SERVICE, PERSON, BOT] });
 
     new ssm.StringParameter(this, 'RegistryApiUrl', {
       parameterName: ApiStack.API_URL_PARAMETER,

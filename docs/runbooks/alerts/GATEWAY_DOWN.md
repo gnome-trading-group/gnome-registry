@@ -1,6 +1,6 @@
 ---
 type: GATEWAY_DOWN
-summary: A live order gateway that was READY is gone (no running task, or no endpoint item) while sessions were linked or orders working.
+summary: An order gateway that was READY is gone (no running task, or no endpoint item) while sessions were linked or orders working.
 first_steps:
   - Read the labels: `workingOrders` above 0 means orders may be resting at the venue with nothing watching them (this pages). `cleanStop` true means its planned stop finished (every order cancelled, every session told) and only the gateway is missing (a warning).
   - Check the ECS service `order-gateway-<key with : as ->` in `order-gateways` for the stopped task's reason.
@@ -27,12 +27,22 @@ After a clean stop nothing rests: sessions only wait for the replacement.
 
 ## Resolve
 
-- A replacement usually comes up within minutes; the alert resolves when it is READY.
+- A replacement usually comes up on its own; the alert resolves when it is READY. Measured in prod: a hung JVM killed
+  by `gateway-start.sh`'s supervisor (no `/health` answer for 15 s) is READY again on the same host in about a minute;
+  a lost host is replaced and READY in about 3 minutes.
 - If it doesn't, or the host was lost, cancel the accounts' orders with `EmergencyCancel` (Treasury in the controller, or `aws lambda invoke`; see `stop-or-kill.md`), then stop the affected sessions.
 
 ## Escalate
 
-Yes, when orders were working and it isn't back within 5 minutes.
+Yes, for a live gateway when orders were working and it isn't back within 5 minutes.
+
+**A paper gateway.**
+
+A paper gateway (`paper:<exchange>:main`, alert mode `paper`, never pages) simulates its venue: nothing rests at a real
+venue, so there is nothing to cancel and EmergencyCancel doesn't apply. Its paper sessions' new orders are refused
+`GATEWAY_UNAVAILABLE` until it is back; the replacement knows none of their orders and reports each CANCELED when the
+session says hello again. It runs on the paper hosts (`order-gateway-paper-hosts`, `c7a.medium`). Act only if it
+keeps failing: read its log for the cause.
 
 ## Related
 

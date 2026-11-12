@@ -69,6 +69,7 @@ describe('Polymarket Intl reward markets', () => {
       rewardPer: 'DAY',
       definition: { minSize: 20, maxSpreadCents: 4.5, asset: '0xC011a7E12a19f7B1f670d46F03B03f3342E82DFB' },
       paidOut: null,
+      raw: null,
     });
     expect(() => validateIncentiveDefinition('POLYMARKET_INTL', p.definition)).not.toThrow();
   });

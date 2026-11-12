@@ -217,7 +217,9 @@ export async function readPolymarketIntlBreakdowns(
 
 // Polymarket's liquidity rewards, from the CLOB's public list of every market rewarded now: one program per reward
 // config (a market can carry several, one per sponsor and asset), paid per UTC day. The list has no history and no
-// config id, so a program is its market, asset and start date, and one that drops off the list has ended.
+// config id, so a program is its market, asset and start date, and one that drops off the list has ended. Daily rates
+// move by a dollar or so many times a day, each move a new version, so the venue's row isn't kept: the program's
+// columns already hold all of it.
 const REWARDS_URL = `${CLOB_API}/rewards/markets/current`;
 const MAX_REWARD_PAGES = 200;
 // Configs with no end carry this year.
@@ -242,7 +244,7 @@ export function parsePolymarketIntlRewardMarket(m: Record<string, any>): Incenti
       },
       paidOut: null,
       sourceRef: REWARDS_URL,
-      raw: { ...m, rewards_config: [c] },
+      raw: null,
     };
   });
 }
