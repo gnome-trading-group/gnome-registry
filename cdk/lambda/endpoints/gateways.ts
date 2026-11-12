@@ -5,10 +5,12 @@ import { connectLedgerDatabase, createResponse, isPositiveInt } from './ledger-c
 import { NOW, set, Sql, sql, where } from './sql';
 
 // Order gateways: what an operator decides about each one (profile, pinned release), when a session last asked for it,
-// and which venue accounts it holds. Gateway rows are created by migration, one per gateway that exists, so gateways
-// themselves are only read and updated.
+// and which venue accounts it holds. A live gateway's row is created by migration, one per venue with order entry; a
+// paper gateway's (one per venue, simulating it) is created the first time a paper session wants it, so every exchange
+// that can be paper-traded gets one without anything per exchange being written down.
 
 const LIVE_PROFILES = ['standard', 'low_latency'];
+const PAPER_KEY = /^paper:([a-z0-9_]+):[a-z0-9-]+$/;
 const VERSION_PATTERN = /^\d+\.\d+\.\d+$/;
 
 interface IUpdateGateway {
@@ -42,7 +44,44 @@ function orchestratorVersion(value: unknown): string | null | undefined {
   return value;
 }
 
+/**
+ * Marks a paper gateway wanted, creating its row first if no paper session wanted it before: on its exchange (named by
+ * the key, in lower case), in that exchange's region. Nothing is returned for an exchange that doesn't exist.
+ */
+export function generateWantPaperQuery(gatewayKey: string): Sql {
+  const exchangeCode = PAPER_KEY.exec(gatewayKey)?.[1];
+  if (!exchangeCode) throw new ValidationError(`${gatewayKey} isn't a paper gateway's key`);
+  return sql`
+    INSERT INTO account_master.gateway (gateway_key, mode, exchange_id, region, profile, wanted_at)
+    SELECT ${gatewayKey}, 'paper', e.exchange_id, e.region, 'paper', ${NOW}
+    FROM sm.exchange e WHERE lower(e.exchange_code) = ${exchangeCode}
+    ON CONFLICT (gateway_key) DO UPDATE SET wanted_at = EXCLUDED.wanted_at, date_modified = ${NOW}
+    RETURNING *`;
+}
+
+/** Whether a PATCH only marks a paper gateway wanted, which may create its row. */
+function wantsPaper(params: APIGatewayProxyEventQueryStringParameters | null, body: string | null): boolean {
+  if (!params?.gatewayKey || !PAPER_KEY.test(params.gatewayKey) || !body) return false;
+  try {
+    const parsed = JSON.parse(body);
+    return parsed !== null && typeof parsed === 'object' && Object.keys(parsed).length === 1 && parsed.wanted === true;
+  } catch {
+    return false;
+  }
+}
+
 export class GatewayHandler extends ResourceHandler {
+  async modifyOne(params: APIGatewayProxyEventQueryStringParameters | null, body: string | null) {
+    if (!wantsPaper(params, body)) return super.modifyOne(params, body);
+    return this.runWrite(async () => {
+      const result = await this.client.query(generateWantPaperQuery(params!.gatewayKey as string));
+      if (result.rowCount !== 1) {
+        return this.createResponse(404, { message: `No exchange for paper gateway ${params!.gatewayKey}` });
+      }
+      return this.createResponse(200, result.rows[0]);
+    });
+  }
+
   generateSelectQuery(params: APIGatewayProxyEventQueryStringParameters | null): Sql {
     return sql`
       SELECT g.*, e.exchange_code,

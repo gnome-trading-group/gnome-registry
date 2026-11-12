@@ -4,12 +4,13 @@ import { SendMessageCommand, SQSClient } from '@aws-sdk/client-sqs';
 import { RECONCILER_GROUP } from './gateway-reconciler-queue';
 import { createResponse } from './ledger-common';
 
-// A session wanting a live order gateway: the launcher for each venue a live session trades, the session itself every
-// 10 s while it waits for its gateway and every minute once linked. It records that on the gateway's row (wanted_at)
-// and wakes the gateway reconciler, the only thing that starts and stops gateways (gnome-orchestrator's),
-// so it starts a stopped one in seconds rather than at its next minute's tick. It touches nothing in ECS or EC2 itself.
+// A session wanting an order gateway, live or paper: the launcher for each venue a session trades, the session itself
+// every 10 s while it waits for its gateway and every minute once linked. It records that on the gateway's row
+// (wanted_at; a paper gateway's row is created then if it is the first time, by the gateways route) and wakes the
+// gateway reconciler, the only thing that starts and stops gateways (gnome-orchestrator's), so it starts a stopped one
+// in seconds rather than at its next minute's tick. It touches nothing in ECS or EC2 itself.
 
-const KEY_PATTERN = /^live:[a-z0-9_]+:[a-z0-9-]+$/;
+const KEY_PATTERN = /^(live|paper):[a-z0-9_]+:[a-z0-9-]+$/;
 // Wake-ups within this long of each other are one: the queue drops a message with a deduplication id it has seen.
 const WAKE_BUCKET_MS = 5_000;
 
@@ -27,11 +28,13 @@ export interface EnsureDeps {
 
 /** Records that the gateway is wanted and wakes the reconciler. */
 export async function ensureGateway(gatewayKey: string, deps: EnsureDeps): Promise<{ gatewayKey: string; wanted: true }> {
-  if (!KEY_PATTERN.test(gatewayKey)) {
-    throw new EnsureError(400, `gatewayKey must be a live gateway's key, like live:kalshi:main, not ${JSON.stringify(gatewayKey)}`);
+  const kind = KEY_PATTERN.exec(gatewayKey)?.[1];
+  if (!kind) {
+    throw new EnsureError(400,
+      `gatewayKey must be a gateway's key, like live:kalshi:main or paper:kalshi:main, not ${JSON.stringify(gatewayKey)}`);
   }
   const row = await deps.markWanted(gatewayKey);
-  if (row.mode !== 'live') throw new EnsureError(400, `${gatewayKey} isn't a live gateway`);
+  if (row.mode !== kind) throw new EnsureError(400, `${gatewayKey} isn't a ${kind} gateway`);
   await deps.wake(`wake-${Math.floor(deps.nowMs() / WAKE_BUCKET_MS)}`);
   return { gatewayKey, wanted: true };
 }
@@ -62,6 +65,7 @@ const lambdaDeps: EnsureDeps = {
       body: JSON.stringify({ wanted: true }),
     });
     const body = await res.json().catch(() => null);
+    // A live gateway without a row, or a paper one on an exchange that doesn't exist.
     if (res.status === 404) throw new EnsureError(404, `No gateway ${gatewayKey}`);
     if (!res.ok) throw new EnsureError(502, `Couldn't mark ${gatewayKey} wanted (${res.status}): ${JSON.stringify(body)}`);
     return body as { mode: string };

@@ -51,6 +51,15 @@ describe('alert severity', () => {
     expect(severityOf({ ...base, type: 'SESSION_EXITED', severity: 'CRITICAL' }, 'live', 'prod')).toBe('INFO');
   });
 
+  it('takes a degraded polling source at its own severity, never paging', () => {
+    const degraded = (severity?: AlertEvent['severity']) =>
+      severityOf({ ...base, type: 'SOURCE_DEGRADED', severity, labels: { pipeline: 'rt_reviews' } }, null, 'prod');
+    expect([degraded('INFO'), degraded('WARNING'), degraded('ERROR')]).toEqual(['INFO', 'WARNING', 'ERROR']);
+    expect(degraded('CRITICAL')).toBe('WARNING');
+    expect(degraded(undefined)).toBe('WARNING');
+    expect(sinksFor(degraded('ERROR'), 'prod', {})).toEqual(['slack']);
+  });
+
   it('pages an emergency cancel, but not a dry run of one', () => {
     expect(severityOf({ ...base, type: 'EMERGENCY_CANCEL', labels: { dryRun: 'false' } }, 'live', 'prod')).toBe('CRITICAL');
     expect(severityOf({ ...base, type: 'EMERGENCY_CANCEL', labels: { dryRun: 'true' } }, 'live', 'prod')).toBe('INFO');

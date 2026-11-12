@@ -82,7 +82,7 @@ export class ResourceHandler {
     return false;
   }
 
-  private async runWrite<T>(fn: () => Promise<T>): Promise<T> {
+  protected async runWrite<T>(fn: () => Promise<T>): Promise<T> {
     return this.audit ? withTransaction(this.client, fn, this.audit) : fn();
   }
 

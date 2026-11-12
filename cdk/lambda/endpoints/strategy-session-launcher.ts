@@ -147,6 +147,11 @@ export function liveGatewayKey(exchangeCode: string): string {
   return `live:${exchangeCode.toLowerCase()}:main`;
 }
 
+/** The paper order gateway that simulates a venue for paper sessions; its row is created the first time it's wanted. */
+export function paperGatewayKey(exchangeCode: string): string {
+  return `paper:${exchangeCode.toLowerCase()}:main`;
+}
+
 // The listings and exchanges endpoints return their rows as stored, in snake_case.
 async function listingExchanges(listingIds: number[]): Promise<Map<number, number>> {
   const exchangeOf = new Map<number, number>();
@@ -428,6 +433,21 @@ function createResponse(statusCode: number, body: any) {
 export interface OrchestratorProperties {
   version: string;
   properties: Record<string, string>;
+}
+
+// Published (true) by the orchestrator releases whose paper sessions trade through paper order gateways; a paper
+// session pinned to an earlier release simulates its venues itself and wants no gateway.
+const PAPER_GATEWAY_PROPERTY = 'order.gateway.paper';
+
+/** Whether a release's paper sessions trade through paper gateways: its own property list says so, never the latest. */
+export async function tradesPaperThroughGateways(version: string): Promise<boolean> {
+  try {
+    const known = JSON.parse(
+      await getParameter(VERSION_PARAMETER_REGION, `${ORCHESTRATOR_PROPERTIES_PREFIX}/${version}`)) as OrchestratorProperties;
+    return known.properties?.[PAPER_GATEWAY_PROPERTY] === 'true';
+  } catch {
+    return false;
+  }
 }
 
 // Releases from before per-version publishing have no list of their own, so they're checked against the latest one.
@@ -716,12 +736,15 @@ async function handleLaunch(body: string | null) {
     return createResponse(502, { message: `Market-data lease failed: ${message}` });
   }
 
-  // A live session trades through its venues' order gateways, which run only while wanted: started here, so each boots
-  // while the session's instance does. The session asks again while it waits for them.
-  if (s.mode === 'live') {
+  // A live session trades through its venues' order gateways, and a paper one through gateways simulating them (on a
+  // release that does), each running only while wanted: started here, so each boots while the session's instance
+  // does. The session asks again while it waits for them.
+  const gatewayKeyOf = s.mode === 'live' ? liveGatewayKey
+    : await tradesPaperThroughGateways(orchestratorVersion) ? paperGatewayKey : null;
+  if (gatewayKeyOf) {
     try {
       for (const exchange of exchanges.values()) {
-        await registryFetch('/gateways/ensure', 'POST', {}, { gatewayKey: liveGatewayKey(exchange.exchange_code) });
+        await registryFetch('/gateways/ensure', 'POST', {}, { gatewayKey: gatewayKeyOf(exchange.exchange_code) });
       }
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);

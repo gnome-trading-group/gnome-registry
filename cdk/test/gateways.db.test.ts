@@ -1,12 +1,12 @@
 import { Pool, PoolClient } from 'pg';
 import { connectExclusive, LOCK_TIMEOUT_MS, release } from './ledger-db';
-import { AssignmentError, assignAccount, GatewayHandler } from '../lambda/endpoints/gateways';
+import { AssignmentError, assignAccount, GatewayHandler, generateWantPaperQuery } from '../lambda/endpoints/gateways';
 import { gatewayAccounts, registerAccount } from '../lambda/endpoints/venue-accounts';
 
 const url = process.env.LEDGER_TEST_DB;
 const describeDb = url ? describe : describe.skip;
 
-// Kalshi (1) has one live gateway, Polymarket Intl (2) two instances, Hyperliquid (3) none; plus the paper gateway.
+// Kalshi (1) has one live gateway, Polymarket Intl (2) two instances, Hyperliquid (3) none; Kalshi a paper one too.
 describeDb('gateways and the accounts they hold, against Postgres', () => {
   let pool: Pool;
   let client: PoolClient;
@@ -29,7 +29,7 @@ describeDb('gateways and the accounts they hold, against Postgres', () => {
       VALUES ('live:kalshi:main', 'live', 1, 'us-east-1', 'standard'),
              ('live:polymarket_intl:main', 'live', 2, 'eu-west-1', 'standard'),
              ('live:polymarket_intl:b', 'live', 2, 'eu-west-1', 'standard'),
-             ('paper', 'paper', NULL, 'us-east-1', 'paper')`);
+             ('paper:kalshi:main', 'paper', 1, 'us-east-1', 'paper')`);
   });
 
   async function register(exchangeId: number, label: string): Promise<number> {
@@ -65,7 +65,7 @@ describeDb('gateways and the accounts they hold, against Postgres', () => {
       .rejects.toMatchObject({ statusCode: 409 });
 
     const other = await register(2, 'swift-crane-04');
-    await expect(assignAccount(client, other, 'paper', 'ops@example.com')).rejects.toBeInstanceOf(AssignmentError);
+    await expect(assignAccount(client, other, 'paper:kalshi:main', 'ops@example.com')).rejects.toBeInstanceOf(AssignmentError);
     await client.query('DELETE FROM account_master.gateway_account WHERE account_id = $1', [kalshi]);
     await expect(assignAccount(client, kalshi, 'live:polymarket_intl:main', 'ops@example.com'))
       .rejects.toMatchObject({ statusCode: 400 });
@@ -84,10 +84,41 @@ describeDb('gateways and the accounts they hold, against Postgres', () => {
     expect(held.map((a) => a.account_id)).toEqual([active, draining]);
     expect(held[0]).toMatchObject({ exchange_code: 'KALSHI', trading_secret_name: 'gnome/accounts/steady-heron-01/trading' });
     expect(held.map((a) => a.account_id)).not.toContain(provisioning);
-    expect(await gatewayAccounts(client, 'paper')).toEqual([]);
+    expect(await gatewayAccounts(client, 'paper:kalshi:main')).toEqual([]);
 
     const handler = new GatewayHandler();
     const rows = (await client.query(handler.generateSelectQuery({ mode: 'live' }))).rows;
     expect(rows.find((g) => g.gateway_key === 'live:kalshi:main')).toMatchObject({ accounts: 2, exchange_code: 'KALSHI' });
+  });
+
+  it('creates a paper gateway in its exchange\'s region the first time it is wanted, and only marks it after', async () => {
+    const first = (await client.query(generateWantPaperQuery('paper:hyperliquid:main'))).rows;
+    expect(first).toHaveLength(1);
+    expect(first[0]).toMatchObject({
+      gateway_key: 'paper:hyperliquid:main', mode: 'paper', exchange_id: 3, region: 'ap-northeast-1', profile: 'paper',
+    });
+    expect(first[0].wanted_at).not.toBeNull();
+
+    await client.query(`UPDATE account_master.gateway SET wanted_at = NOW() - INTERVAL '1 hour', profile = 'paper'
+      WHERE gateway_key = 'paper:hyperliquid:main'`);
+    const again = (await client.query(generateWantPaperQuery('paper:hyperliquid:main'))).rows[0];
+    expect(Date.now() - new Date(again.wanted_at).getTime()).toBeLessThan(60_000);
+    expect((await client.query(`SELECT COUNT(*)::int AS n FROM account_master.gateway
+      WHERE gateway_key = 'paper:hyperliquid:main'`)).rows[0].n).toBe(1);
+
+    expect((await client.query(generateWantPaperQuery('paper:nowhere:main'))).rows).toEqual([]);
+  });
+
+  it('keeps a key to its kind: paper rows are paper gateways on an exchange, live rows live ones', async () => {
+    await expect(client.query(`INSERT INTO account_master.gateway (gateway_key, mode, exchange_id, region, profile)
+      VALUES ('paper', 'paper', 1, 'us-east-1', 'paper')`)).rejects.toThrow(/violates check constraint/);
+    await expect(client.query(`INSERT INTO account_master.gateway (gateway_key, mode, exchange_id, region, profile)
+      VALUES ('paper:Kalshi:main', 'paper', 1, 'us-east-1', 'paper')`)).rejects.toThrow(/gateway_gateway_key_check/);
+    await expect(client.query(`INSERT INTO account_master.gateway (gateway_key, mode, exchange_id, region, profile)
+      VALUES ('paper:kalshi:b', 'paper', NULL, 'us-east-1', 'paper')`)).rejects.toThrow(/gateway_check/);
+    await expect(client.query(`INSERT INTO account_master.gateway (gateway_key, mode, exchange_id, region, profile)
+      VALUES ('live:kalshi:b', 'paper', 1, 'us-east-1', 'paper')`)).rejects.toThrow(/gateway_check/);
+    await expect(client.query(`INSERT INTO account_master.gateway (gateway_key, mode, exchange_id, region, profile)
+      VALUES ('paper:kalshi:c', 'live', 1, 'us-east-1', 'standard')`)).rejects.toThrow(/gateway_check/);
   });
 });

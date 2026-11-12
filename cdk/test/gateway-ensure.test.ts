@@ -38,10 +38,21 @@ describe('a session asking for a gateway', () => {
     expect(wakes[2]).not.toBe(wakes[1]);
   });
 
-  it('refuses what isn\'t a live gateway', async () => {
-    await expect(ensureGateway('paper', deps().d)).rejects.toThrow(/live gateway's key/);
-    const { d, wakes } = deps('paper');
-    await expect(ensureGateway('live:kalshi:main', d)).rejects.toThrow(/isn't a live gateway/);
-    expect(wakes).toEqual([]);
+  it('asks for a paper gateway as for a live one', async () => {
+    const { d, marked, wakes } = deps('paper');
+
+    expect(await ensureGateway('paper:hyperliquid:main', d)).toEqual({ gatewayKey: 'paper:hyperliquid:main', wanted: true });
+    expect(marked).toEqual(['paper:hyperliquid:main']);
+    expect(wakes).toHaveLength(1);
+  });
+
+  it('refuses what isn\'t a gateway\'s key, or a row of the other kind', async () => {
+    await expect(ensureGateway('paper', deps().d)).rejects.toThrow(/gateway's key/);
+    const asPaper = deps('paper');
+    await expect(ensureGateway('live:kalshi:main', asPaper.d)).rejects.toThrow(/isn't a live gateway/);
+    expect(asPaper.wakes).toEqual([]);
+    const asLive = deps('live');
+    await expect(ensureGateway('paper:kalshi:main', asLive.d)).rejects.toThrow(/isn't a paper gateway/);
+    expect(asLive.wakes).toEqual([]);
   });
 });

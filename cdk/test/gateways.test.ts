@@ -1,8 +1,8 @@
-import { GatewayHandler } from '../lambda/endpoints/gateways';
+import { GatewayHandler, generateWantPaperQuery } from '../lambda/endpoints/gateways';
 
 const handler = new GatewayHandler();
 const live = { gateway_key: 'live:kalshi:main', mode: 'live' };
-const paper = { gateway_key: 'paper', mode: 'paper' };
+const paper = { gateway_key: 'paper:kalshi:main', mode: 'paper' };
 
 describe('gateways', () => {
   it('filters by key, mode and exchange', () => {
@@ -21,7 +21,17 @@ describe('gateways', () => {
     expect(() => handler.generateModifyQuery(live, JSON.stringify({ wanted: false }))).toThrow('wanted');
   });
 
-  it('takes a live profile for a live gateway and only paper for the simulated one', () => {
+  it('creates a paper gateway on its exchange the first time it is wanted, and only marks it after', () => {
+    const query = generateWantPaperQuery('paper:polymarket_intl:main');
+    expect(query.text).toContain('INSERT INTO account_master.gateway');
+    expect(query.text).toContain('lower(e.exchange_code) = $2');
+    expect(query.text).toContain('ON CONFLICT (gateway_key) DO UPDATE SET wanted_at');
+    expect(query.values).toEqual(['paper:polymarket_intl:main', 'polymarket_intl']);
+    expect(() => generateWantPaperQuery('live:kalshi:main')).toThrow("isn't a paper gateway's key");
+    expect(() => generateWantPaperQuery("paper:x' OR 1=1:main")).toThrow("isn't a paper gateway's key");
+  });
+
+  it('takes a live profile for a live gateway and only paper for a paper one', () => {
     expect(handler.generateModifyQuery(live, JSON.stringify({ profile: 'low_latency' })).values)
       .toEqual(['low_latency', 'live:kalshi:main']);
     expect(() => handler.generateModifyQuery(live, JSON.stringify({ profile: 'paper' }))).toThrow('profile');

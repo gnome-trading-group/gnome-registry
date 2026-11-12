@@ -273,6 +273,8 @@ describe('POST /strategy-sessions/launch', () => {
       'SSM /gnome/alerting/api-url',
       'POST /strategy-sessions',
       'MD POST /collection/leases',
+      // Whether this release's paper sessions trade through paper gateways (this one's publishes no list: no).
+      'SSM /gnome/orchestrator/properties/1.12.2',
       'RunInstances',
       'PATCH /strategy-sessions',
     ]);
@@ -994,10 +996,40 @@ describe('market-data streams and leases', () => {
     expect(started).toBeLessThan(events.indexOf('RunInstances'));
   });
 
-  it('starts no gateway for a paper session', async () => {
+  it('starts no gateway for a paper session on a release that simulates its venues itself', async () => {
     await launch();
+    ssmParams['/gnome/orchestrator/properties/1.12.2'] =
+      JSON.stringify({ version: '1.12.2', properties: { 'journal.enabled': 'false' } });
+    await launch();
+    delete ssmParams['/gnome/orchestrator/properties/1.12.2'];
 
     expect(ensured).toEqual([]);
+  });
+
+  it('starts a paper session\'s paper gateways on a release that trades paper through them', async () => {
+    ssmParams['/gnome/orchestrator/properties/1.12.2'] =
+      JSON.stringify({ version: '1.12.2', properties: { 'order.gateway.paper': 'true' } });
+    try {
+      const res = await launch();
+
+      expect(res.statusCode).toBe(200);
+      expect(ensured).toEqual(['paper:kalshi:main']);
+      expect(events.indexOf('POST /gateways/ensure')).toBeLessThan(events.indexOf('RunInstances'));
+    } finally {
+      delete ssmParams['/gnome/orchestrator/properties/1.12.2'];
+    }
+  });
+
+  it('decides a release\'s paper path from its own property list, never the latest one', async () => {
+    ssmParams['/gnome/orchestrator/properties/latest'] =
+      JSON.stringify({ version: '1.13.0', properties: { 'order.gateway.paper': 'true' } });
+    try {
+      expect(await launcher.tradesPaperThroughGateways('1.12.2')).toBe(false);
+      await launch();
+      expect(ensured).toEqual([]);
+    } finally {
+      delete ssmParams['/gnome/orchestrator/properties/latest'];
+    }
   });
 
   it('fails a live session, launching nothing and releasing its lease, when its gateway can\'t be started', async () => {

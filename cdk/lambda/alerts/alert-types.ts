@@ -138,6 +138,12 @@ export const ALERT_TYPES: Record<string, AlertType> = {
     severity: e => e.labels?.trigger === 'scheduled' || e.labels?.kind === 'source' ? 'ERROR' : 'INFO',
     debounce: 1,
   },
+  // A polling source's own checks (a feed failing for 15 min, a budget nearly spent): it waits before raising them and
+  // picks the severity, never above ERROR, since nothing a source collects is trading money yet.
+  SOURCE_DEGRADED: {
+    severity: e => e.severity === 'ERROR' || e.severity === 'INFO' ? e.severity : 'WARNING',
+    debounce: 1,
+  },
   CUSTOM: { severity: e => e.severity ?? 'WARNING', debounce: 1 },
 
   // From the alarm's name: cdk-monitoring-constructs ends it with the tier it was declared under.

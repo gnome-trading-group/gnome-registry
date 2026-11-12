@@ -631,6 +631,15 @@
       ],
       "url": "https://github.com/gnome-trading-group/gnome-registry/blob/main/docs/runbooks/alerts/SILENT.md"
     },
+    "SOURCE_DEGRADED": {
+      "summary": "A polling source is running but one of its checks is failing (a feed, a page, a paid service or its budget).",
+      "firstSteps": [
+        "Read the alert's body for the failing task (label `check`) and its last error.",
+        "Open the source's run on the controller's Research → Pipelines page and read its logs.",
+        "Check poll_health for the source's task_error and note rows around the alert's time."
+      ],
+      "url": "https://github.com/gnome-trading-group/gnome-registry/blob/main/docs/runbooks/alerts/SOURCE_DEGRADED.md"
+    },
     "START_STUCK": {
       "summary": "A session has been launching for 15 minutes without starting.",
       "firstSteps": [
