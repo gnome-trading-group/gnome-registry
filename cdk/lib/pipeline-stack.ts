@@ -8,6 +8,7 @@ import { ApiStack } from "./stacks/api-stack";
 import { ExchangeSyncStack } from "./stacks/exchange-sync-stack";
 import { StrategySessionMonitorStack } from "./stacks/strategy-session-monitor-stack";
 import { SettlementSweeperStack } from "./stacks/settlement-sweeper-stack";
+import { SamplesApiStack } from "./stacks/samples-api-stack";
 import { VenuePollerStack } from "./stacks/venue-poller-stack";
 import { MarkPollerStack } from "./stacks/mark-poller-stack";
 import { IncentiveSyncStack } from "./stacks/incentive-sync-stack";
@@ -22,6 +23,7 @@ class AppStage extends cdk.Stage {
 
     const databaseStack = new DatabaseStack(this, "DatabaseStack", {
       instanceType: config.dbInstanceType,
+      storage: config.dbStorage,
     });
 
     const apiStack = new ApiStack(this, "ApiStack", {
@@ -49,6 +51,13 @@ class AppStage extends cdk.Stage {
       rootUserSecret: databaseStack.rootUserSecret,
     });
 
+    const samplesApiStack = new SamplesApiStack(this, "SamplesApiStack", {
+      database: databaseStack.database,
+      vpc: databaseStack.vpc,
+      rootUserSecret: databaseStack.rootUserSecret,
+      apiKey: apiStack.apiKey,
+    });
+
     const venuePollerStack = new VenuePollerStack(this, "VenuePollerStack", {
       api: apiStack.api,
       apiKey: apiStack.apiKey,
@@ -73,6 +82,8 @@ class AppStage extends cdk.Stage {
       markPollerLambda: markPollerStack.pollerLambda,
       incentiveSyncLambda: incentiveSyncStack.syncLambda,
       sessionMonitorLambda: sessionMonitorStack.monitorLambda,
+      samplesApi: samplesApiStack.api,
+      samplePartitionsLambda: samplesApiStack.partitionsLambda,
       database: databaseStack.database,
     });
 

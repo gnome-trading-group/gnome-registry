@@ -7,6 +7,7 @@ import { DatabaseInitLambda } from '../constructs/db-init-lambda';
 
 export interface DatabaseStackProps extends cdk.StackProps {
   instanceType?: ec2.InstanceType;
+  storage?: { allocatedGb: number; maxAllocatedGb: number };
 }
 
 export class DatabaseStack extends cdk.Stack {
@@ -87,8 +88,8 @@ export class DatabaseStack extends cdk.Stack {
       vpcSubnets: { subnetType: ec2.SubnetType.PRIVATE_ISOLATED },
       instanceType,
       engine,
-      allocatedStorage: 20,
-      maxAllocatedStorage: 40,
+      allocatedStorage: props?.storage?.allocatedGb ?? 20,
+      maxAllocatedStorage: props?.storage?.maxAllocatedGb ?? 40,
       storageType: rds.StorageType.GP3,
       port,
       securityGroups: [sg],

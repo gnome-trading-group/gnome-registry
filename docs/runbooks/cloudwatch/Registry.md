@@ -20,6 +20,8 @@ Alarms named `Registry-…`:
 | VenuePoller fault | the 5-minute balance poller crashed (a failed account read is an ERROR snapshot instead, seen as RECON_STALE) |
 | IncentiveSync fault | the 15-minute incentive program sync couldn't read a venue or post to the registry (paper and backtest reward estimates then see no new or changed programs) |
 | StrategySessionMonitor fault | session status updates from EC2 events failed |
+| SamplesApi 5xx | the samples API failed posts or reads; gateways and shards keep their samples and resend, up to their buffers |
+| SamplePartitions fault | the hourly upkeep of `ops.sample`'s daily partitions failed. Partitions are made 3 days ahead, so samples keep landing for days; past that, sessions' samples are dropped (their heartbeats still count). Once the cause is fixed, invoke the `SamplesApiStack` partitions Lambda by hand rather than wait for the hour |
 
 ## Impact
 

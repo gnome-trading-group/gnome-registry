@@ -44,11 +44,13 @@ synth step, so run `npm test` yourself before handing off.
 - `cdk/lambda/endpoints/` - one handler per API resource; `base.ts` has `ResourceHandler`, `withTransaction`, actor helpers
 - `cdk/lambda/endpoints/ledger-*.ts`, `pnl-*.ts` - ledger writes/reads and PnL derived from fills and marks
 - `cdk/lambda/endpoints/controller-reads.ts` + `controller-read-paths.ts` - one Lambda for the controller's GET reads
+- `cdk/lambda/endpoints/samples.ts` - samples: subject kinds (`SUBJECT_KINDS`), parsing, storing, ingest and paged
+  reads (the samples API's Lambda; the heartbeat uses it too)
 - `cdk/lambda/db-init/migrations/NNN_*.sql` - schema migrations, applied in filename order
 - `cdk/lambda/alerts/` - ingest, router, store, sinks (Slack, incident.io), `alert-types.ts` (type catalog + severity)
 - `cdk/lambda/monitoring/rules/` - findings shared by the controller overview and the alert tick
 - `cdk/lambda/sync/` - scheduled jobs: exchange sync (`exchanges/` adapters), venue poller (`venues/`), mark poller,
-  incentive sync (readers in `venues/`), settlement sweeper, strategy-session monitor
+  incentive sync (readers in `venues/`), settlement sweeper, strategy-session monitor, sample partitions
 - `cdk/lambda/fees/`, `cdk/lambda/simulation/` - fee calculator/timeline and simulation-parameter resolution
 - `cdk/test/` - jest tests; `*.db.test.ts` need Postgres; `fixtures/` holds venue payloads and test cases
 - `src/main/java/group/gnometrading/` - Java client: `RegistryConnection`, `SecurityMaster`, `risk/`, `account/`,
@@ -72,8 +74,8 @@ synth step, so run `npm test` yourself before handing off.
   (risk policy writes, ledger adjustments, venue-account create/status, treasury transfers) are `PERSON` only.
   `risk/halts` is `SERVICE` only and can only enable a kill.
 - One route tree (no `/cognito` copy); CORS preflights carry no authorizer. Keep the authorizer set per method.
-- The API stack must stay under 400 CloudFormation resources (test-enforced; the hard limit is 500). It holds about 386
-  (2026-11-12), and a new route costs about 5 (path, a method each plus OPTIONS, function, invoke permission); a new
+- The API stack must stay under 400 CloudFormation resources (test-enforced; the hard limit is 500). It holds about 396
+  (2026-11-13), and a new route costs about 5 (path, a method each plus OPTIONS, function, invoke permission); a new
   method on an existing path costs 1. The in-VPC endpoint Lambdas share one security group and one role
   (`rds-db:connect` only); a Lambda that needs any other grant is built by hand with its own role (the launcher,
   account creator, gateway ensure), so a grant never widens every endpoint. Integrations use
@@ -103,7 +105,7 @@ synth step, so run `npm test` yourself before handing off.
   branch, which `RegistryPipeline` (in the InfraPipelines account) builds: synth, `Dev` stage, manual `ApproveProd`,
   `Prod` stage. Dev and prod are separate AWS accounts. Stacks per stage: `Dev-`/`Prod-` + `DatabaseStack`,
   `ApiStack`, `ExchangeSyncStack`, `StrategySessionMonitorStack`, `SettlementSweeperStack`, `VenuePollerStack`,
-  `MarkPollerStack`, `IncentiveSyncStack`, `MonitoringStack`, `AlertingStack`. After a release with new migrations,
+  `MarkPollerStack`, `IncentiveSyncStack`, `SamplesApiStack`, `MonitoringStack`, `AlertingStack`. After a release with new migrations,
   invoke the `DatabaseInitLambda` in each account.
 - What runs:
   - ApiStack: the Registry API (stage `api`), one Lambda per resource in the VPC; the strategy-session launcher
@@ -173,6 +175,24 @@ synth step, so run `npm test` yourself before handing off.
     poller reads too; a Polymarket Intl wallet's liquidity breakdown needs its CLOB API key, which account
     creation and credential updates copy from the trading credentials into the read secret (never the private key). Strategy PnL counts its allocations as `rewards`; firm PnL adds the rest as `nonTrading`.
   - MarkPollerStack: every minute, marks listings still held after their sessions stopped.
+  - Samples (`ops.sample`, migration 076): a time series of readings from the platform's processes, keyed
+    `(subject_kind, subject_id, kind, ts)`, `data` jsonb the registry never reads. Subject kinds and their ids are in
+    `samples.ts` `SUBJECT_KINDS`: `session` (session id), `gateway` (gateway key, e.g. `live:kalshi:main`), `shard`
+    (shard id, e.g. `use1-1b7a9c`); a new kind of process is one entry there. Sample kinds are shared where the
+    fields are (`runtime`) and prefixed where they're one process's (`gateway.lanes`). Each post holds at most 300;
+    malformed ones, older than a day or over 5 minutes ahead are dropped and logged; a repeat (an answer lost) is
+    ignored.
+    - Sessions: their heartbeat carries `samples` (`[{kind, tsMs, data}]`, collected since the last accepted post);
+      the endpoint stores `health` without them and inserts them apart. A failed insert is logged and the heartbeat
+      still answers 200, so a sample problem never makes a session look silent. Heartbeats may be 64 KB.
+    - SamplesApiStack: its own API (`gnome-samples-api`, URL in SSM `/gnome/samples/api-url`), so telemetry volume
+      and the registry API's resource cap never meet. `POST /samples {subjectKind, subjectId, samples}` (SERVICE,
+      gateways and shards only, 128 KB); `GET /samples?subjectKind=&subjectId=&kind=|kindPrefix=&from=&to=&limit=&after=`
+      (SERVICE, PERSON, BOT; oldest first, a page stops at 4 MB, `next` continues it). Same authorizer and API key as
+      the registry API.
+    - Partitioned by UTC day; the stack's hourly Lambda runs `ops.ensure_sample_partitions(3, 7)`: 3 days ahead,
+      days older than 7 dropped whole (that is the retention). Prod's database is 50 GB (autoscaling to 100) for
+      them (`config.ts` `dbStorage`).
   - Paper sessions' estimated venue rewards: a paper session's rewards agent (gnome-orchestrator `RewardsAgent`) posts
     its scorer's snapshots to `POST /ledger/reward-accruals` (`ledger.reward_accrual`, append-only, one row per
     listing, program and snapshot time; apart from `/ledger/batch`, so a reward row can never fence trading: rows that
@@ -200,7 +220,7 @@ synth step, so run `npm test` yourself before handing off.
   `alertrouter`). Orchestrator logs, which this API's own `strategy-sessions/logs` route reads, are under `/gnome/orchestrator/*`.
 - Alarms and alerts it raises:
   - `Registry-*` (MonitoringStack): API 5xx (Error), Lambda faults for ExchangeSync, SettlementSweeper, VenuePoller,
-    MarkPoller, IncentiveSync, StrategySessionMonitor (Error), RDS free storage < 5 GiB and CPU > 80% (Warning). No actions; they
+    MarkPoller, IncentiveSync, StrategySessionMonitor, SamplePartitions (Error); samples API 5xx (Warning), RDS free storage < 5 GiB and CPU > 80% (Warning). No actions; they
     reach the router as `CLOUDWATCH_ALARM`. Runbook: `docs/runbooks/cloudwatch/Registry.md`.
   - `AlertingMeta-<RouterErrors|StoreErrors|IngestErrors|Dlq|TickNotRunning|Undelivered>-Critical`: alerting's own
     health; bypass the router (SNS to incident.io in prod, and email). Runbook: `docs/runbooks/cloudwatch/AlertingMeta.md`.

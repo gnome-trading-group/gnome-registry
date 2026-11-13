@@ -13,6 +13,8 @@ interface Props extends cdk.StackProps {
   markPollerLambda: lambda.IFunction;
   incentiveSyncLambda: lambda.IFunction;
   sessionMonitorLambda: lambda.IFunction;
+  samplesApi: apigw.RestApi;
+  samplePartitionsLambda: lambda.IFunction;
   database: rds.DatabaseInstance;
 }
 
@@ -93,6 +95,23 @@ export class MonitoringStack extends cdk.Stack {
         lambdaFunction: props.sessionMonitorLambda,
         humanReadableName: 'Strategy Session Monitor',
         alarmFriendlyName: 'StrategySessionMonitor',
+        addFaultCountAlarm: {
+          Error: { maxErrorCount: 0 },
+        },
+      })
+      // Samples are telemetry: losing some is a Warning, never a page.
+      .monitorApiGateway({
+        api: props.samplesApi,
+        humanReadableName: 'Samples API',
+        alarmFriendlyName: 'SamplesApi',
+        add5XXFaultCountAlarm: {
+          Warning: { maxErrorCount: 10 },
+        },
+      })
+      .monitorLambdaFunction({
+        lambdaFunction: props.samplePartitionsLambda,
+        humanReadableName: 'Sample Partitions',
+        alarmFriendlyName: 'SamplePartitions',
         addFaultCountAlarm: {
           Error: { maxErrorCount: 0 },
         },

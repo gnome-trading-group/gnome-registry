@@ -8,6 +8,9 @@ export interface RegistryConfig {
   account: GnomeAccount;
   slackChannel: string;
   dbInstanceType: ec2.InstanceType;
+  // The database's storage in GB, and the most autoscaling may grow it to. Never lower allocated below what the instance
+  // already has: RDS can't shrink storage, and the update would fail.
+  dbStorage: { allocatedGb: number; maxAllocatedGb: number };
   // Where the venue poller reads each venue's accounts.
   // Where alerts go: every alert to the Slack channel; CRITICAL ones also page through incident.io where enabled.
   // metaEmails hear when alerting itself is broken.
@@ -30,6 +33,7 @@ export interface RegistryConfig {
 const defaultConfig = {
   slackChannel: '',
   dbInstanceType: ec2.InstanceType.of(ec2.InstanceClass.T4G, ec2.InstanceSize.SMALL),
+  dbStorage: { allocatedGb: 20, maxAllocatedGb: 40 },
   venuePoller: {
     kalshiApiUrl: 'https://external-api.kalshi.com',
     // polygon-rpc.com stopped serving anonymous requests; publicnode answers without a key.
@@ -63,5 +67,7 @@ export const CONFIGS: { [stage in Stage]?: RegistryConfig } = {
     },
     slackChannel: 'C0B60PCAPNC', // #gnome-security-master
     dbInstanceType: ec2.InstanceType.of(ec2.InstanceClass.T4G, ec2.InstanceSize.MEDIUM),
+    // Samples (ops.sample) from every session, gateway and shard: about 1.5 GB a day at 7 days' retention.
+    dbStorage: { allocatedGb: 50, maxAllocatedGb: 100 },
   },
 };
