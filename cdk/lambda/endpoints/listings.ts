@@ -30,6 +30,8 @@ export class ListingHandler extends ResourceHandler {
       'date_modified'];
   }
 
+  sortTieBreaker(): string { return 'listing_id'; }
+
   generateDeleteQuery(body: string): Sql {
     const listing = JSON.parse(body) as IDeleteListing;
     return sql`DELETE FROM sm.listing WHERE listing_id = ${listing.listingId}`;
@@ -49,8 +51,6 @@ export class ListingHandler extends ResourceHandler {
   }
 
   generateSelectQuery(params: APIGatewayProxyEventQueryStringParameters | null): Sql {
-    const denormalize = params?.denormalize === 'true';
-    const column = (name: string) => (denormalize ? `l.${name}` : name);
     const pattern = `%${params?.search}%`;
     let minVolume: number | undefined;
     if (params?.minVolume24h) {
@@ -60,33 +60,33 @@ export class ListingHandler extends ResourceHandler {
       }
     }
 
-    const from = denormalize
+    // Every listing has exactly one exchange and one security, so a count gets the same answer without the joins.
+    const from = params?.denormalize === 'true' && params?.count !== 'true'
       ? sql`SELECT l.*, e.exchange_name, s.symbol AS security_symbol, s.type AS security_type, s.active AS security_active
          FROM sm.listing l
          JOIN sm.exchange e ON l.exchange_id = e.exchange_id
          JOIN sm.security s ON l.security_id = s.security_id`
-      : sql`SELECT * FROM sm.listing`;
+      : sql`SELECT l.* FROM sm.listing l`;
 
     const query = sql`${from}${where([
-      params?.listingId && sql`${raw(column('listing_id'))} = ${params.listingId}`,
+      params?.listingId && sql`l.listing_id = ${params.listingId}`,
       // Batch lookup for UIs labelling many listings at once.
-      params?.listingIds !== undefined && anyId(column('listing_id'), parseIdList(params.listingIds)),
-      params?.securityId && sql`${raw(column('security_id'))} = ${params.securityId}`,
-      params?.exchangeId && sql`${raw(column('exchange_id'))} = ${params.exchangeId}`,
-      params?.exchangeIds !== undefined && anyId(column('exchange_id'), parseIdList(params.exchangeIds)),
-      params?.securityTypes !== undefined && sql`${raw(column('security_id'))} IN (
+      params?.listingIds !== undefined && anyId('l.listing_id', parseIdList(params.listingIds)),
+      params?.securityId && sql`l.security_id = ${params.securityId}`,
+      params?.exchangeId && sql`l.exchange_id = ${params.exchangeId}`,
+      params?.exchangeIds !== undefined && anyId('l.exchange_id', parseIdList(params.exchangeIds)),
+      params?.securityTypes !== undefined && sql`l.security_id IN (
         SELECT security_id FROM sm.security WHERE type = ANY(${securityTypes(params.securityTypes)}::int[]))`,
-      minVolume !== undefined && sql`${raw(column('volume_24h'))} >= ${minVolume}`,
-      params?.exchangeSecurityId && sql`${raw(column('exchange_security_id'))} = ${params.exchangeSecurityId}`,
-      params?.exchangeSecuritySymbol && sql`${raw(column('exchange_security_symbol'))} = ${params.exchangeSecuritySymbol}`,
-      params?.search && denormalize
-        && sql`(s.symbol ILIKE ${pattern} OR e.exchange_name ILIKE ${pattern} OR l.exchange_security_symbol ILIKE ${pattern} OR l.listing_id::text = ${params.search})`,
-      params?.active !== undefined && sql`${raw(column('active'))} = ${params.active === 'true'}`,
+      minVolume !== undefined && sql`l.volume_24h >= ${minVolume}`,
+      params?.exchangeSecurityId && sql`l.exchange_security_id = ${params.exchangeSecurityId}`,
+      params?.exchangeSecuritySymbol && sql`l.exchange_security_symbol = ${params.exchangeSecuritySymbol}`,
+      params?.search && params?.denormalize === 'true' && sql`l.exchange_security_symbol ILIKE ${pattern}`,
+      params?.active !== undefined && sql`l.active = ${params.active === 'true'}`,
     ])}`;
     // By volume, listings with none yet sort last either way, and ties keep a stable order for paging.
     if (params?.sortBy === 'volume_24h') {
       const order = params.sortOrder === 'desc' ? 'DESC' : 'ASC';
-      return sql`${query} ORDER BY ${raw(column('volume_24h'))} ${raw(order)} NULLS LAST, ${raw(column('listing_id'))}`;
+      return sql`${query} ORDER BY l.volume_24h ${raw(order)} NULLS LAST, l.listing_id`;
     }
     return query;
   }

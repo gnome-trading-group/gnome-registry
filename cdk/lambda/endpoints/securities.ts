@@ -18,6 +18,8 @@ export class SecurityHandler extends ResourceHandler {
     return ['security_id', 'symbol', 'type', 'asset_class', 'active', 'date_created', 'date_modified'];
   }
 
+  sortTieBreaker(): string { return 'security_id'; }
+
   generateDeleteQuery(body: string): Sql {
     const security = JSON.parse(body) as IDeleteSecurity;
     return sql`DELETE FROM sm.security WHERE security_id = ${security.securityId} RETURNING *`;

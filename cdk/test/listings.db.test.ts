@@ -2,6 +2,7 @@ import { Pool, PoolClient } from 'pg';
 import { connectExclusive, LOCK_TIMEOUT_MS, release } from './ledger-db';
 import { ValidationError } from '../lambda/endpoints/base';
 import { ListingHandler } from '../lambda/endpoints/listings';
+import { SecurityHandler } from '../lambda/endpoints/securities';
 
 const url = process.env.LEDGER_TEST_DB;
 const describeDb = url ? describe : describe.skip;
@@ -61,6 +62,66 @@ describeDb('listings by 24h volume, against Postgres', () => {
       exchangeIds: '3,4', securityTypes: '1', minVolume24h: '1', active: 'true', denormalize: 'true',
       sortBy: 'volume_24h', sortOrder: 'desc', limit: '2',
     })).toEqual([10, 13]);
+  });
+
+  it('searches denormalized listings by their own symbol only', async () => {
+    await client.query(`UPDATE sm.listing SET exchange_security_symbol = 'Bitcoin perp' WHERE listing_id = 13`);
+    await client.query(`UPDATE sm.listing SET exchange_security_symbol = 'Ether perp' WHERE listing_id IN (11, 14, 15)`);
+    const search = (term: string, extra: Record<string, string> = {}) => ids({ denormalize: 'true', search: term, ...extra });
+    expect(await search('bitcoin')).toEqual([13]);
+    expect(await search('PERP')).toEqual([11, 13, 14, 15]);
+    expect(await search('perp', { active: 'true', exchangeId: '3' })).toEqual([11]);
+    expect(await search('btc-usdc')).toEqual([]);
+    expect(await search('lighter')).toEqual([]);
+    expect(await search('16')).toEqual([]);
+    const count = await handler().get({ denormalize: 'true', search: 'ether', count: 'true' });
+    expect(JSON.parse(count.body)).toEqual({ count: 3 });
+  });
+
+  it('counts denormalized listings the same as the rows it returns', async () => {
+    const filters: Record<string, string>[] = [{}, { active: 'true' }, { exchangeIds: '3', securityTypes: '1' }];
+    for (const filter of filters) {
+      const rows = await ids({ denormalize: 'true', ...filter });
+      const count = await handler().get({ denormalize: 'true', count: 'true', ...filter });
+      expect(JSON.parse(count.body)).toEqual({ count: rows.length });
+    }
+  });
+
+  it('pages newest first through listings created together without repeating or skipping one', async () => {
+    await client.query(`INSERT INTO sm.listing (listing_id, exchange_id, security_id, exchange_security_id, active, date_created)
+      SELECT n, 1, 4, 'BULK' || n, n % 3 <> 0, '2026-11-01' FROM generate_series(100, 129) n`);
+    const filters: Record<string, string>[] = [{ exchangeId: '1' }, { exchangeId: '1', active: 'true' }];
+    for (const filter of filters) {
+      const params = { ...filter, denormalize: 'true', sortBy: 'date_created', sortOrder: 'desc' };
+      const all = await ids({ ...params, limit: '100' });
+      const pages: number[] = [];
+      for (let offset = 0; offset < all.length; offset += 7) {
+        pages.push(...await ids({ ...params, limit: '7', offset: String(offset) }));
+      }
+      expect(pages).toEqual(all);
+      expect(new Set(pages).size).toBe(all.length);
+    }
+    expect(await ids({ exchangeId: '1', sortBy: 'date_created', sortOrder: 'desc', limit: '3' })).toEqual([16, 129, 128]);
+  });
+
+  it('pages securities created together newest first, and searches them by symbol', async () => {
+    await client.query(`INSERT INTO sm.security (security_id, symbol, type, date_created)
+      SELECT n, 'BULK-' || n, 4, '2020-01-01' FROM generate_series(100, 129) n`);
+    const securities = new SecurityHandler();
+    securities.client = client;
+    const get = async (params: Record<string, string>) =>
+      JSON.parse((await securities.get(params)).body).map((row: { security_id: number }) => row.security_id);
+    const params = { sortBy: 'date_created', sortOrder: 'asc', search: 'bulk-' };
+    const all = await get({ ...params, limit: '100' });
+    const pages: number[] = [];
+    for (let offset = 0; offset < all.length; offset += 7) {
+      pages.push(...await get({ ...params, limit: '7', offset: String(offset) }));
+    }
+    expect(all).toHaveLength(30);
+    expect(pages).toEqual(all);
+    expect(all.slice(0, 3)).toEqual([100, 101, 102]);
+    expect(await get({ search: 'usdc-perp' })).toEqual([1, 2]);
+    expect(JSON.parse((await securities.get({ search: 'bulk-12', count: 'true' })).body)).toEqual({ count: 10 });
   });
 
   it('refuses a security type that is not a code', async () => {

@@ -187,9 +187,11 @@ synth step, so run `npm test` yourself before handing off.
       still answers 200, so a sample problem never makes a session look silent. Heartbeats may be 64 KB.
     - SamplesApiStack: its own API (`gnome-samples-api`, URL in SSM `/gnome/samples/api-url`), so telemetry volume
       and the registry API's resource cap never meet. `POST /samples {subjectKind, subjectId, samples}` (SERVICE,
-      gateways and shards only, 128 KB); `GET /samples?subjectKind=&subjectId=&kind=|kindPrefix=&from=&to=&limit=&after=`
-      (SERVICE, PERSON, BOT; oldest first, a page stops at 4 MB, `next` continues it). Same authorizer and API key as
-      the registry API.
+      gateways and shards only, 128 KB); `GET /samples?subjectKind=&subjectId=&kind=|kinds=a,b|kindPrefix=&from=&to=&limit=&after=`
+      (SERVICE, PERSON, BOT; oldest first, at most 2,000 rows and 4 MB a page, `next` continues it). `&everyMs=` thins
+      a long range to the first sample of each kind per bucket (`date_bin`, 1 s to 1 day; a thinned counter is one
+      sample's change, not the bucket's sum), ordered and paged by (bucket, kind). The partition job sets a 2 s
+      `lock_timeout`: creating or dropping a partition locks the table, and it retries hourly. Same authorizer and API key as the registry API.
     - Partitioned by UTC day; the stack's hourly Lambda runs `ops.ensure_sample_partitions(3, 7)`: 3 days ahead,
       days older than 7 dropped whole (that is the retention). Prod's database is 50 GB (autoscaling to 100) for
       them (`config.ts` `dbStorage`).

@@ -94,10 +94,64 @@ describeDb('Samples, against Postgres', () => {
     expect(window.samples.map((s: Sample) => s.tsMs)).toEqual([minute + 10_000]);
   });
 
+  it('thins a long range to the first sample of each kind in each bucket, paging by whole buckets', async () => {
+    const samples = [];
+    for (let i = 0; i < 12; i++) samples.push(runtime(i * 10_000, i));
+    samples.push({ kind: 'latency.oms', tsMs: minute, data: { keys: [] } });
+    samples.push({ kind: 'latency.oms', tsMs: minute + 60_000, data: { keys: [] } });
+    await heartbeat('s1', samples);
+
+    const thinned = await readSamples(client, { subjectKind: 'session', subjectId: 's1', kindPrefix: 'runtime',
+      everyMs: '60000' });
+    expect(thinned.samples.map((s: Sample) => s.data)).toEqual([{ cpu: 0 }, { cpu: 6 }]);
+    expect(thinned.next).toBeNull();
+
+    const both = await readSamples(client, { subjectKind: 'session', subjectId: 's1', kindPrefix: 'r',
+      everyMs: '60000', limit: '1' });
+    expect(both.samples.map((s: Sample) => s.data)).toEqual([{ cpu: 0 }]);
+    expect(both.next).toBe(`${minute}:runtime`);
+    const rest = await readSamples(client, { subjectKind: 'session', subjectId: 's1', kindPrefix: 'r',
+      everyMs: '60000', after: both.next! });
+    expect(rest.samples.map((s: Sample) => s.data)).toEqual([{ cpu: 6 }]);
+
+    const everyKind = await readSamples(client, { subjectKind: 'session', subjectId: 's1', kindPrefix: 'l',
+      everyMs: '120000' });
+    expect(everyKind.samples).toHaveLength(minute % 120_000 === 0 ? 1 : 2);
+    await expect(readSamples(client, { subjectKind: 'session', subjectId: 's1', kind: 'runtime', everyMs: '10' }))
+      .rejects.toThrow(/everyMs/);
+  });
+
+  it('pages a thinned read of several kinds without losing a kind at a page boundary', async () => {
+    await heartbeat('s1', [
+      { kind: 'latency.oms', tsMs: minute + 10_000, data: { n: 1 } },
+      { kind: 'latency.strategy', tsMs: minute + 20_000, data: { n: 2 } },
+      { kind: 'latency.oms', tsMs: minute + 70_000, data: { n: 3 } },
+      { kind: 'latency.strategy', tsMs: minute + 80_000, data: { n: 4 } },
+    ]);
+    const seen: unknown[] = [];
+    let after: string | undefined;
+    do {
+      const page = await readSamples(client, { subjectKind: 'session', subjectId: 's1', kindPrefix: 'latency.',
+        everyMs: '60000', limit: '1', after });
+      seen.push(...page.samples.map((s: Sample) => s.data));
+      after = page.next ?? undefined;
+    } while (after);
+    expect(seen).toEqual([{ n: 1 }, { n: 2 }, { n: 3 }, { n: 4 }]);
+  });
+
+  it('reads a list of kinds', async () => {
+    await heartbeat('s1', [runtime(0, 1), { kind: 'session.ledger', tsMs: minute, data: { lag: 0 } },
+      { kind: 'session.positions', tsMs: minute, data: { listings: [] } }]);
+    const page = await readSamples(client, { subjectKind: 'session', subjectId: 's1', kinds: 'runtime,session.ledger' });
+    expect(page.samples.map((s: Sample) => s.kind)).toEqual(['runtime', 'session.ledger']);
+    await expect(readSamples(client, { subjectKind: 'session', subjectId: 's1', kinds: 'runtime,Bad' }))
+      .rejects.toThrow(/kinds/);
+  });
+
   it('refuses a read that names no single kind or prefix', async () => {
     await expect(readSamples(client, { subjectKind: 'session', subjectId: 's1' })).rejects.toThrow(/exactly one/);
     await expect(readSamples(client, { subjectKind: 'session', subjectId: 's1', kind: 'runtime', kindPrefix: 'r' })).rejects.toThrow(/exactly one/);
-    await expect(readSamples(client, { subjectKind: 'session', subjectId: 's1', kind: "runtime' OR 1=1" })).rejects.toThrow(/not a sample kind/);
+    await expect(readSamples(client, { subjectKind: 'session', subjectId: 's1', kind: "runtime' OR 1=1" })).rejects.toThrow(/sample kinds/);
   });
 
   it('takes a gateway\'s and a shard\'s posted samples, under their own subjects', async () => {

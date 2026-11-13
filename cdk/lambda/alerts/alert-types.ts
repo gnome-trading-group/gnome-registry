@@ -106,6 +106,10 @@ export const ALERT_TYPES: Record<string, AlertType> = {
   // data collection is behind trading: research collection never pages. TODO(Phase 10): a production stream (a
   // session's lease) stale or not live pages, once the reconciler labels alerts with priority.
   COLLECTOR_SHARD_DOWN: { severity: 'ERROR', debounce: 1 },
+  // A shard's unexpected errors (3+ in an hour; the reconciler waits that long itself): worth a look, never a page.
+  SHARD_ERRORS: { severity: 'WARNING', debounce: 1 },
+  // gnome-market-data's daily count of every shard's unexpected errors; posted only on a day with some.
+  SHARD_LOG_DIGEST: { severity: 'INFO', debounce: 1 },
   STREAM_NOT_LIVE: { severity: 'WARNING', debounce: 1 },
   STREAM_STALE: { severity: 'WARNING', debounce: 1 },
   COLLECTION_BUDGET: { severity: 'ERROR', debounce: 1 },

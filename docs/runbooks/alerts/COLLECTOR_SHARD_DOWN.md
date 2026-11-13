@@ -13,7 +13,7 @@ The reconciler (gnome-market-data) found no status from any of the shard's tasks
 
 ## Impact
 
-Every stream on the shard is uncovered: those minutes are missing from the final bucket and recorded as gaps once coverage resumes. Live trading is unaffected.
+Every stream on the shard is uncovered: those minutes are missing from the final bucket and recorded as gaps once coverage resumes. Sessions read their market data from shards, so sessions leasing streams on it see them flagged bad (`MARKET_DATA_BAD`) and their OMS refuses new orders on those listings until the streams are live again, on this shard or another.
 
 ## Diagnose
 

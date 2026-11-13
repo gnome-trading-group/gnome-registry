@@ -9,7 +9,16 @@ export const KEEP_DAYS = 7;
 
 export const handler = async () => {
   const pool = await connectDatabase(1);
-  await pool.query('SELECT ops.ensure_sample_partitions($1, $2)', [DAYS_AHEAD, KEEP_DAYS]);
+  const client = await pool.connect();
+  try {
+    // Creating or dropping a partition locks the whole table; waiting behind a long read would hold every insert behind
+    // this. Give up quickly instead: the next hour retries, with days ahead to spare.
+    await client.query("SET lock_timeout = '2s'");
+    await client.query('SELECT ops.ensure_sample_partitions($1, $2)', [DAYS_AHEAD, KEEP_DAYS]);
+  } finally {
+    await client.query('RESET lock_timeout');
+    client.release();
+  }
   const partitions = await pool.query(`
     SELECT c.relname FROM pg_inherits i JOIN pg_class c ON c.oid = i.inhrelid JOIN pg_class p ON p.oid = i.inhparent
     JOIN pg_namespace n ON n.oid = p.relnamespace WHERE n.nspname = 'ops' AND p.relname = 'sample' ORDER BY 1`);

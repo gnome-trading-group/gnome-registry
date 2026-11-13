@@ -30,8 +30,8 @@ interface Health {
     ageMs: number | null;
   };
   // The session's samples not yet accepted by the registry, and those it dropped when its buffer filled (the samples
-  // themselves go to ops.sample, never here).
-  samples?: { pending: number; dropped: number };
+  // themselves, the heartbeat's `samples`, go to ops.sample, never here).
+  sampleBuffer?: { pending: number; dropped: number };
 }
 
 // Running sessions: silent ones, then the parts of the rest that are in trouble. A stopping session goes quiet on

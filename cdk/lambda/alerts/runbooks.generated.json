@@ -612,6 +612,15 @@
       ],
       "url": "https://github.com/gnome-trading-group/gnome-registry/blob/main/docs/runbooks/alerts/SHARD_BALANCE_LOW.md"
     },
+    "SHARD_ERRORS": {
+      "summary": "A market-data shard logged 3 or more unexpected errors in the last hour; something on it is broken, not just a venue being a venue.",
+      "firstSteps": [
+        "The title ends with the latest error; find it in the table below.",
+        "Read the shard's log around it (Market Data → Shards → the shard → Logs, or `/collection/shards-<region>`, filter `UNKNOWN_ERROR`).",
+        "If the line isn't in the table, it is new: work out whether it is a bug or something routine logged at the wrong level."
+      ],
+      "url": "https://github.com/gnome-trading-group/gnome-registry/blob/main/docs/runbooks/alerts/SHARD_ERRORS.md"
+    },
     "SHARD_FUNDS_REJECTED": {
       "summary": "Kalshi is refusing orders for want of cash on one exchange shard.",
       "firstSteps": [
@@ -620,6 +629,15 @@
         "Check whether the strategy was halted on the exchange."
       ],
       "url": "https://github.com/gnome-trading-group/gnome-registry/blob/main/docs/runbooks/alerts/SHARD_FUNDS_REJECTED.md"
+    },
+    "SHARD_LOG_DIGEST": {
+      "summary": "The day's unexpected errors across every market-data shard, by kind, with the ones new since the day before.",
+      "firstSteps": [
+        "Look at the rows marked `new` first, then any that grew a lot.",
+        "Find each in the SHARD_ERRORS runbook's table.",
+        "A kind not in that table is new: decide whether it is a bug (fix it) or routine (lower its log level)."
+      ],
+      "url": "https://github.com/gnome-trading-group/gnome-registry/blob/main/docs/runbooks/alerts/SHARD_LOG_DIGEST.md"
     },
     "SHARD_UNTARGETED": {
       "summary": "Kalshi's rebalancing sweeps cash off a shard live sessions trade.",

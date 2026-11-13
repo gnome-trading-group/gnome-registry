@@ -27,11 +27,17 @@ export const MAX_SAMPLES_PER_POST = 300;
 export const MAX_FUTURE_MS = 5 * 60_000;
 export const MAX_AGE_MS = 24 * 3_600_000;
 export const MAX_POST_BYTES = 128 * 1024;
-export const DEFAULT_READ_LIMIT = 1_000;
-export const MAX_READ_LIMIT = 10_000;
+// Rows are read before the page's byte cap applies, and a latency sample can run to tens of KB: kept small enough
+// that a full page never strains the Lambda's memory.
+export const DEFAULT_READ_LIMIT = 500;
+export const MAX_READ_LIMIT = 2_000;
+export const MAX_KINDS = 16;
 // Under the Lambda response limit (MAX_RESPONSE_BYTES) with room for the envelope: a page stops early once its rows
 // reach this, and `next` carries on from there.
 export const READ_PAGE_BYTES = 4_000_000;
+// Thinning (`everyMs`): one sample per bucket of at least a second and at most a day.
+export const MIN_EVERY_MS = 1_000;
+export const MAX_EVERY_MS = 86_400_000;
 
 const KIND = /^[a-z][a-z0-9._-]{0,63}$/;
 
@@ -110,10 +116,11 @@ export async function ingest(client: PoolClient, body: string, nowMs: number): P
 function parseTimeMs(value: string | undefined, name: string): number | undefined {
   if (value === undefined || value === '') return undefined;
   const ms = /^\d+$/.test(value) ? Number(value) : Date.parse(value);
-  if (!Number.isFinite(ms)) throw new BadRequest(`${name} must be epoch milliseconds or an ISO time`);
+  if (!Number.isSafeInteger(ms)) throw new BadRequest(`${name} must be epoch milliseconds or an ISO time`);
   return ms;
 }
 
+// Where the next page starts: after (tsMs, kind) in the page's order. A thinned read's tsMs is a bucket's start.
 interface Cursor {
   tsMs: number;
   kind: string;
@@ -128,6 +135,15 @@ function parseCursor(value: string | undefined): Cursor | undefined {
   return { tsMs, kind };
 }
 
+function parseEveryMs(value: string | undefined): number | undefined {
+  if (value === undefined || value === '') return undefined;
+  const everyMs = Number(value);
+  if (!Number.isInteger(everyMs) || everyMs < MIN_EVERY_MS || everyMs > MAX_EVERY_MS) {
+    throw new BadRequest(`everyMs must be ${MIN_EVERY_MS} to ${MAX_EVERY_MS}`);
+  }
+  return everyMs;
+}
+
 export interface SamplePage {
   samples: Sample[];
   // Pass as `after` for the rest; null once there is nothing more in the window.
@@ -135,20 +151,27 @@ export interface SamplePage {
 }
 
 /**
- * A subject's samples of one kind (`kind`) or of every kind under a prefix (`kindPrefix`, e.g. `latency.`), oldest
- * first, from `from` (inclusive) to `to` (exclusive), each epoch ms or ISO; `after` continues a page.
+ * A subject's samples of one kind (`kind`), of several (`kinds`, comma-separated) or of every kind under a prefix
+ * (`kindPrefix`, e.g. `latency.`), oldest first, from `from` (inclusive) to `to` (exclusive), each epoch ms or ISO;
+ * `after` continues a page (repeat the other parameters). With `everyMs`, only the first sample of each kind in each
+ * bucket of that many ms (from the epoch), ordered by bucket then kind: a long range thinned to a chart's worth. A thinned
+ * counter is one sample's change, not the bucket's sum.
  */
 export async function readSamples(client: PoolClient, params: Record<string, string | undefined>): Promise<SamplePage> {
   const { subjectKind, subjectId } = params;
   if (!isSubject(subjectKind, subjectId)) throw new BadRequest('subjectKind and subjectId must name a subject');
-  const kind = params.kind;
+  const selectors = [params.kind, params.kinds, params.kindPrefix].filter(v => v !== undefined);
+  if (selectors.length !== 1) throw new BadRequest('Give exactly one of kind, kinds or kindPrefix');
+  const kinds = params.kind !== undefined ? [params.kind] : params.kinds?.split(',');
+  if (kinds && (kinds.length > MAX_KINDS || !kinds.every(k => KIND.test(k)))) {
+    throw new BadRequest(`kinds must be 1 to ${MAX_KINDS} sample kinds`);
+  }
   const prefix = params.kindPrefix;
-  if ((kind === undefined) === (prefix === undefined)) throw new BadRequest('Give exactly one of kind or kindPrefix');
-  if (kind !== undefined && !KIND.test(kind)) throw new BadRequest('kind is not a sample kind');
   if (prefix !== undefined && !KIND.test(prefix)) throw new BadRequest('kindPrefix is not a kind prefix');
   const fromMs = parseTimeMs(params.from, 'from');
   const toMs = parseTimeMs(params.to, 'to');
   const after = parseCursor(params.after);
+  const everyMs = parseEveryMs(params.everyMs);
   const limit = params.limit === undefined ? DEFAULT_READ_LIMIT : Number(params.limit);
   if (!Number.isInteger(limit) || limit < 1 || limit > MAX_READ_LIMIT) {
     throw new BadRequest(`limit must be 1 to ${MAX_READ_LIMIT}`);
@@ -156,44 +179,64 @@ export async function readSamples(client: PoolClient, params: Record<string, str
 
   const values: unknown[] = [subjectKind, subjectId];
   const where = ['subject_kind = $1', 'subject_id = $2'];
-  if (kind !== undefined) {
-    values.push(kind);
-    where.push(`kind = $${values.length}`);
+  const at = (ms: number) => {
+    values.push(ms);
+    return `TIMESTAMPTZ 'epoch' + $${values.length}::bigint * INTERVAL '1 millisecond'`;
+  };
+  if (kinds) {
+    values.push(kinds);
+    where.push(`kind = ANY($${values.length}::text[])`);
   } else {
     // A kind holds no LIKE wildcard but '_', which is escaped.
     values.push(`${prefix!.replace(/_/g, '\\_')}%`);
     where.push(`kind LIKE $${values.length}`);
   }
-  if (fromMs !== undefined) {
-    values.push(fromMs);
-    where.push(`ts >= TIMESTAMPTZ 'epoch' + $${values.length}::bigint * INTERVAL '1 millisecond'`);
+  if (fromMs !== undefined) where.push(`ts >= ${at(fromMs)}`);
+  if (toMs !== undefined) where.push(`ts < ${at(toMs)}`);
+
+  let query: string;
+  if (everyMs === undefined) {
+    if (after !== undefined) {
+      const ts = at(after.tsMs);
+      values.push(after.kind);
+      where.push(`(ts, kind) > (${ts}, $${values.length})`);
+    }
+    values.push(limit + 1);
+    query = `SELECT kind, (EXTRACT(EPOCH FROM ts) * 1000)::BIGINT AS ts_ms, NULL::BIGINT AS bucket_ms, data
+      FROM ops.sample WHERE ${where.join(' AND ')} ORDER BY ts, kind LIMIT $${values.length}`;
+  } else {
+    values.push(everyMs);
+    const bucket = `date_bin($${values.length}::bigint * INTERVAL '1 millisecond', ts, TIMESTAMPTZ 'epoch')`;
+    let resume = '';
+    if (after !== undefined) {
+      // Nothing before the cursor's bucket can follow it, so the inner read starts there.
+      where.push(`ts >= ${at(after.tsMs)}`);
+      const bucketAt = at(after.tsMs);
+      values.push(after.kind);
+      resume = `WHERE (bucket, kind) > (${bucketAt}, $${values.length})`;
+    }
+    values.push(limit + 1);
+    query = `SELECT kind, (EXTRACT(EPOCH FROM ts) * 1000)::BIGINT AS ts_ms,
+        (EXTRACT(EPOCH FROM bucket) * 1000)::BIGINT AS bucket_ms, data
+      FROM (SELECT DISTINCT ON (kind, ${bucket}) kind, ${bucket} AS bucket, ts, data FROM ops.sample
+        WHERE ${where.join(' AND ')} ORDER BY kind, ${bucket}, ts) thinned
+      ${resume}
+      ORDER BY bucket, kind LIMIT $${values.length}`;
   }
-  if (toMs !== undefined) {
-    values.push(toMs);
-    where.push(`ts < TIMESTAMPTZ 'epoch' + $${values.length}::bigint * INTERVAL '1 millisecond'`);
-  }
-  if (after !== undefined) {
-    values.push(after.tsMs, after.kind);
-    where.push(`(ts, kind) > (TIMESTAMPTZ 'epoch' + $${values.length - 1}::bigint * INTERVAL '1 millisecond', $${values.length})`);
-  }
-  values.push(limit + 1);
-  const rows = (await client.query(`
-    SELECT kind, (EXTRACT(EPOCH FROM ts) * 1000)::BIGINT AS ts_ms, data FROM ops.sample
-    WHERE ${where.join(' AND ')}
-    ORDER BY ts, kind
-    LIMIT $${values.length}`, values)).rows;
+  const rows = (await client.query(query, values)).rows;
 
   const samples: Sample[] = [];
   let bytes = 0;
+  let last: { kind: string; tsMs: number; bucketMs: number | null } | null = null;
   for (const row of rows.slice(0, limit)) {
     const sample = { kind: row.kind, tsMs: Number(row.ts_ms), data: row.data };
-    bytes += JSON.stringify(sample).length;
+    bytes += Buffer.byteLength(JSON.stringify(sample));
     if (samples.length > 0 && bytes > READ_PAGE_BYTES) break;
     samples.push(sample);
+    last = { kind: row.kind, tsMs: sample.tsMs, bucketMs: row.bucket_ms === null ? null : Number(row.bucket_ms) };
   }
-  const more = samples.length < rows.length;
-  const last = samples[samples.length - 1];
-  return { samples, next: more && last ? `${last.tsMs}:${last.kind}` : null };
+  if (samples.length === rows.length || !last) return { samples, next: null };
+  return { samples, next: `${last.bucketMs ?? last.tsMs}:${last.kind}` };
 }
 
 export const handler = async (event: APIGatewayProxyEvent) => {
