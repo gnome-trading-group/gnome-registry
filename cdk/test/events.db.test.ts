@@ -64,6 +64,39 @@ describeDb('events by volume, against Postgres', () => {
     expect(await ids({ sortBy: 'volume_24h', sortOrder: 'desc', limit: '2', offset: '2' })).toEqual([1, 2]);
   });
 
+  it('pages newest first through events created together without repeating or skipping one', async () => {
+    await client.query(`INSERT INTO sm.event (event_id, title, exchange_id, native_event_id, tags, resolved, date_created)
+      SELECT n, 'Bulk ' || n, 1, 'BULK' || n, ARRAY['bulk'], n % 3 = 0, '2026-11-01'
+      FROM generate_series(10, 39) n`);
+    const sorted = { sortBy: 'date_created', sortOrder: 'desc', tag: 'bulk' };
+    for (const resolved of [undefined, 'false']) {
+      const filter = resolved === undefined ? sorted : { ...sorted, resolved };
+      const all = await ids({ ...filter, limit: '100' });
+      const pages: number[] = [];
+      for (let offset = 0; offset < all.length; offset += 7) {
+        pages.push(...await ids({ ...filter, limit: '7', offset: String(offset) }));
+      }
+      expect(pages).toEqual(all);
+      expect(new Set(pages).size).toBe(resolved === undefined ? 30 : 20);
+      const count = JSON.parse((await handler().get({ ...filter, count: 'true' })).body).count;
+      expect(count).toBe(all.length);
+    }
+    expect((await ids({ ...sorted, limit: '3' }))).toEqual([39, 38, 37]);
+    expect((await ids({ ...sorted, sortOrder: 'asc', limit: '3' }))).toEqual([10, 11, 12]);
+  });
+
+  it('searches titles only and combines search with the other filters', async () => {
+    await client.query(`UPDATE sm.event SET title = 'Lakers at Celtics', description = 'Rules mention Knicks'
+      WHERE event_id = 1`);
+    await client.query(`UPDATE sm.event SET title = 'Knicks at Lakers' WHERE event_id = 4`);
+    expect(await ids({ search: 'lakers' })).toEqual([1, 4]);
+    expect(await ids({ search: 'knicks' })).toEqual([4]);
+    expect(await ids({ search: 'lakers', exchangeId: '2' })).toEqual([4]);
+    expect(await ids({ search: 'lakers', tag: 'nfl', category: 'Sports', resolved: 'false' })).toEqual([1, 4]);
+    expect(await ids({ tag: 'nba' })).toEqual([3]);
+    expect(await ids({ tag: 'nfl', resolved: 'false' })).toEqual([1, 4]);
+  });
+
   it('refuses a filter that is not a time or a number', async () => {
     await expect(handler().get({ expiryFrom: "x'; DROP TABLE sm.event; --" })).rejects.toThrow(ValidationError);
     await expect(handler().get({ minVolume24h: 'lots' })).rejects.toThrow(ValidationError);

@@ -52,6 +52,8 @@ export class EventHandler extends ResourceHandler {
     return ['event_id', 'title', 'category', 'resolved', 'expiry', 'start_time', 'date_created', 'date_modified'];
   }
 
+  sortTieBreaker(): string { return 'event_id'; }
+
   generateDeleteQuery(body: string): Sql {
     const event = JSON.parse(body) as IDeleteEvent;
     return sql`DELETE FROM sm.event WHERE event_id = ${event.eventId} RETURNING *`;
@@ -94,7 +96,7 @@ export class EventHandler extends ResourceHandler {
       params?.exchangeId && sql`exchange_id = ${params.exchangeId}`,
       params?.nativeEventId && sql`native_event_id = ${params.nativeEventId}`,
       params?.resolved !== undefined && sql`resolved = ${params.resolved === 'true'}`,
-      params?.tag && sql`${params.tag} = ANY(tags)`,
+      params?.tag && sql`tags @> ARRAY[${params.tag}]::text[]`,
       params?.eventIds !== undefined && anyId('event_id', parseIdList(params.eventIds)),
       params?.exchangeIds !== undefined && anyId('exchange_id', parseIdList(params.exchangeIds)),
       params?.categories && sql`category = ANY(${textList(params.categories)}::text[])`,
@@ -105,7 +107,7 @@ export class EventHandler extends ResourceHandler {
       params?.startFrom && sql`start_time >= ${timestamp('startFrom', params.startFrom)}`,
       params?.startTo && sql`start_time < ${timestamp('startTo', params.startTo)}`,
       minVolume !== undefined && sql`volume_24h >= ${minVolume}`,
-      params?.search && sql`(title ILIKE ${pattern} OR description ILIKE ${pattern})`,
+      params?.search && sql`title ILIKE ${pattern}`,
     ])}`;
     // By volume, events with none yet sort last either way, and ties keep a stable order for paging.
     if (params?.sortBy === 'volume_24h') {

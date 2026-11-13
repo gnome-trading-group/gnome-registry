@@ -265,6 +265,11 @@ export class ResourceHandler {
     return [];
   }
 
+  /** A unique column ordered after the requested sort, so rows sharing a sort value page by offset without repeats. */
+  sortTieBreaker(): string | null {
+    return null;
+  }
+
   async get(params: APIGatewayProxyEventQueryStringParameters | null) {
     if (params?.count === 'true') {
       const result = await this.client.query(sql`SELECT COUNT(*) FROM (${this.generateSelectQuery(params)}) t`);
@@ -280,7 +285,11 @@ export class ResourceHandler {
       const allowed = this.allowedSortColumns();
       const sortBy = params?.sortBy && allowed.includes(params.sortBy) ? params.sortBy : null;
       const sortOrder = params?.sortOrder === 'desc' ? 'DESC' : 'ASC';
-      query = sql`${query}${raw(sortBy ? ` ORDER BY ${sortBy} ${sortOrder}` : ' ORDER BY 1')}`;
+      const tieBreaker = this.sortTieBreaker();
+      const order = sortBy && tieBreaker && sortBy !== tieBreaker
+        ? ` ORDER BY ${sortBy} ${sortOrder}, ${tieBreaker} ${sortOrder}`
+        : sortBy ? ` ORDER BY ${sortBy} ${sortOrder}` : ' ORDER BY 1';
+      query = sql`${query}${raw(order)}`;
     }
     query = sql`${query} LIMIT ${limit} OFFSET ${offset}`;
 
