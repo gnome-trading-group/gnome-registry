@@ -375,11 +375,16 @@ export class ApiStack extends cdk.Stack {
       actions: ['ssm:GetParameter'],
       resources: [
         'arn:aws:ssm:*:*:parameter/gnome/orchestrator/ami/*',
-        'arn:aws:ssm:*:*:parameter/gnome/orchestrator/latest-version',
         'arn:aws:ssm:*:*:parameter/gnome/orchestrator/properties/*',
         'arn:aws:ssm:*:*:parameter/gnome/alerting/api-url',
         'arn:aws:ssm:*:*:parameter/gnome/market-data/api-url',
       ],
+    }));
+    // A session's commit pins the releases it runs on; the launcher reads them from GitHub with the token the session
+    // clones that commit with.
+    strategySessionsLauncherLambda.addToRolePolicy(new iam.PolicyStatement({
+      actions: ['secretsmanager:GetSecretValue'],
+      resources: [`arn:aws:secretsmanager:us-east-1:${this.account}:secret:gnomepy/gh-token-*`],
     }));
     // A paper launch leases its streams from gnome-market-data's collection control plane, and a stop releases them.
     strategySessionsLauncherLambda.addToRolePolicy(new iam.PolicyStatement({
@@ -387,8 +392,14 @@ export class ApiStack extends cdk.Stack {
       resources: [`arn:aws:secretsmanager:us-east-1:${this.account}:secret:${API_KEY_SECRET_NAMES.MARKET_DATA}-*`],
     }));
     strategySessionsLauncherLambda.addToRolePolicy(new iam.PolicyStatement({
-      actions: ['ec2:DescribeSubnets', 'ec2:DescribeSecurityGroups'],
+      actions: ['ec2:DescribeSubnets', 'ec2:DescribeSecurityGroups', 'ec2:DescribePlacementGroups'],
       resources: ['*'],
+    }));
+    // Where a low-latency session's order gateway runs, so the session launches in its zone.
+    strategySessionsLauncherLambda.addToRolePolicy(new iam.PolicyStatement({
+      actions: ['dynamodb:GetItem'],
+      resources: [`arn:aws:dynamodb:${SERVICE_ENDPOINTS.region}:${this.account}:table/${SERVICE_ENDPOINTS.tableName}`],
+      conditions: { 'ForAllValues:StringLike': { 'dynamodb:LeadingKeys': ['order-gateway#*'] } },
     }));
     strategySessionsLauncherLambda.addToRolePolicy(new iam.PolicyStatement({
       actions: ['apigateway:GET'],

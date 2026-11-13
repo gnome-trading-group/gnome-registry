@@ -59,6 +59,8 @@ export const ALERT_TYPES: Record<string, AlertType> = {
   // A full disk crashes a live session.
   DISK_LOW: { severity: 'CRITICAL', debounce: 1 },
   JOURNAL_BACKLOG: { severity: 'WARNING', debounce: 2 },
+  // Trading is unaffected; latency measured against other hosts isn't to be trusted while it lasts.
+  CLOCK_UNSYNCED: { severity: 'WARNING', debounce: 3 },
   FAILED: { severity: 'CRITICAL', debounce: 1 },
   START_STUCK: { severity: 'ERROR', debounce: 1 },
   STOP_STUCK: { severity: 'ERROR', debounce: 1, aboutStopping: true },

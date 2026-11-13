@@ -1,7 +1,7 @@
 import { PoolClient } from 'pg';
 import { Finding, finding, Mode, seconds } from './types';
 import {
-  BOOK_RESYNCS_PER_5M, DISK_FREE_MIN_BYTES, DISK_FREE_MIN_SEGMENTS, HOST_CPU_BUSY_PERMILLE, HOST_CPU_STEAL_PERMILLE,
+  BOOK_RESYNCS_PER_5M, CLOCK_ERROR_BOUND_MAX_NANOS, CLOCK_STATUS_MAX_AGE_MS, DISK_FREE_MIN_BYTES, DISK_FREE_MIN_SEGMENTS, HOST_CPU_BUSY_PERMILLE, HOST_CPU_STEAL_PERMILLE,
   HOST_MEM_AVAILABLE_MIN_PERCENT, HOT_PATH_STALL_MS, JOURNAL_BACKLOG_AGE_MS, JOURNAL_BACKLOG_SEGMENTS,
   MARKET_DATA_BAD_AFTER_MS, MARKET_DATA_BAD_HELD_AFTER_MS, NO_HEARTBEAT_AFTER_MS, ORDER_GATEWAY_UNLINKED_AFTER_MS,
   SILENT_AFTER_MS,
@@ -24,6 +24,11 @@ interface Health {
   } | null;
   // Null with the journal off.
   journal?: { pendingSegments: number; oldestPendingMs: number; segmentBytes: number } | null;
+  // How far the host's clock can be from UTC. UNKNOWN: the host writes no clock status (an image from before it did).
+  clock?: {
+    source: 'PHC' | 'NTP' | 'UNSYNCED' | 'UNKNOWN'; errorBoundNanos: number | null; offsetNanos: number;
+    ageMs: number | null;
+  };
 }
 
 // Running sessions: silent ones, then the parts of the rest that are in trouble. A stopping session goes quiet on
@@ -147,6 +152,19 @@ function hostFindings(health: Health, on: On): void {
   if (host && host.diskFreeBytes >= 0 && host.diskFreeBytes < diskMin) {
     on('critical', 'DISK_LOW', null, `Disk ${bytes(host.diskFreeBytes)} free`,
       { facts: { diskFreeBytes: host.diskFreeBytes, diskMinBytes: diskMin } });
+  }
+  const clock = health.clock;
+  if (clock && clock.source !== 'UNKNOWN') {
+    const stale = clock.ageMs !== null && clock.ageMs > CLOCK_STATUS_MAX_AGE_MS;
+    const wide = clock.errorBoundNanos !== null && clock.errorBoundNanos > CLOCK_ERROR_BOUND_MAX_NANOS;
+    if (clock.source === 'UNSYNCED' || stale || wide) {
+      const title = clock.source === 'UNSYNCED' ? 'Clock has no time source'
+        : stale ? `Clock status not updated for ${seconds(clock.ageMs!)}`
+          : `Clock within ${(clock.errorBoundNanos! / 1e6).toFixed(1)} ms of UTC (${clock.source})`;
+      on('warning', 'CLOCK_UNSYNCED', null, title, { facts: {
+        errorBoundNanos: clock.errorBoundNanos ?? -1, offsetNanos: clock.offsetNanos, ageMs: clock.ageMs ?? -1,
+      } });
+    }
   }
   if (journal && (journal.pendingSegments >= JOURNAL_BACKLOG_SEGMENTS || journal.oldestPendingMs >= JOURNAL_BACKLOG_AGE_MS)) {
     const segments = journal.pendingSegments === 1 ? 'segment' : 'segments';

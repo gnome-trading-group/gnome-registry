@@ -72,6 +72,15 @@
       ],
       "url": "https://github.com/gnome-trading-group/gnome-registry/blob/main/docs/runbooks/alerts/BOOK_RESYNCS.md"
     },
+    "CLOCK_UNSYNCED": {
+      "summary": "The session host's clock has no time source, can be more than 1 ms from UTC, or its clock status stopped updating.",
+      "firstSteps": [
+        "Read the heartbeat's clock (source, errorBoundNanos, ageMs) on the session's page in the controller.",
+        "Over SSM, run chronyc tracking and chronyc sources on the instance.",
+        "Check gnome-clock-status and gnome-clock-setup with systemctl status."
+      ],
+      "url": "https://github.com/gnome-trading-group/gnome-registry/blob/main/docs/runbooks/alerts/CLOCK_UNSYNCED.md"
+    },
     "CLOUDWATCH_ALARM": {
       "summary": "A CloudWatch alarm fired.",
       "firstSteps": [

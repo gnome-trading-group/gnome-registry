@@ -111,6 +111,20 @@ synth step, so run `npm test` yourself before handing off.
     outside the VPC) call back through the API. The creator also sets collection's market-data accounts
     (`/market-data-accounts`, `gnome/market-data/<source>/<label>`, recorded in `md.source_account` through
     `/sources/accounts`); sessions hold no market-data key, they read from shards.
+  - What a session runs: one commit, `researchCommit` (gnomepy-research) for a python strategy or `strategyCommit`
+    (gnome-strategies) for a java one, default `main`. The launcher resolves it to a SHA through the GitHub API
+    (token `gnomepy/gh-token`, us-east-1, the one sessions clone with) and reads the releases it pins
+    (`platform.properties`'s orchestrator and gnomepy, or `strategies/pom.xml`'s `platform.orchestrator`: a java
+    session needs no gnomepy; `endpoints/strategy-platform.ts`). The session gets `ORCHESTRATOR_VERSION`,
+    `GNOMEPY_VERSION` (python only) and `RESEARCH_COMMIT` or `STRATEGY_COMMIT`, none of which config can set, and the
+    row records the SHA and the versions. An unknown commit, a missing file or a non-release pin is a 400 before anything is recorded. Callers
+    name no versions.
+  - Where the launcher puts an instance: every session goes in the zone of the first of its region's gateways already
+    running (from the `private_ip` that gateway advertises in `service-endpoints`; the first zone when none runs yet,
+    or when the session trades through none). A `low_latency` session on a type that supports it also goes in the
+    region's precision-time placement group (found by the platform tag), so its clock follows the Nitro hardware
+    clock. On `InsufficientInstanceCapacity` it tries that zone outside the group, then the other zone in and out of
+    it; a zone named in the request is the only one tried.
   - Every session reads market data from collector shards: after writing the session row the launcher
     leases the session's streams from gnome-market-data (`POST /collection/leases {sessionId, streams, mode, region}`;
     streams = each traded listing's book stream from `md.stream` + config `streams`, the data-only stream ids, which

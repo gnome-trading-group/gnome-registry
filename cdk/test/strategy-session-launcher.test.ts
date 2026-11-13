@@ -4,6 +4,12 @@ const events: string[] = [];
 const ec2Calls: { kind: string; input: any; region?: string }[] = [];
 const ssmParams: Record<string, string> = {};
 let runInstancesError: Error | null = null;
+// Errors successive RunInstances calls throw before one succeeds (each used once), and the placement group the
+// region's network has (null: none).
+let runInstancesErrors: Error[] = [];
+let precisionTimeGroup: string | null = 'gnome-precision-time-pg';
+// The private IP each gateway advertises in service-endpoints.
+const gatewayIps: Record<string, string> = {};
 
 jest.mock('@aws-sdk/client-ec2', () => {
   const command = (kind: string) => jest.fn().mockImplementation((input) => ({ kind, input }));
@@ -14,15 +20,20 @@ jest.mock('@aws-sdk/client-ec2', () => {
         if (cmd.kind === 'DescribeSubnets') {
           return {
             Subnets: [
-              { SubnetId: 'subnet-a', AvailabilityZone: 'us-east-1a' },
-              { SubnetId: 'subnet-b', AvailabilityZone: 'us-east-1b' },
+              { SubnetId: 'subnet-a', AvailabilityZone: 'us-east-1a', CidrBlock: '10.144.0.0/20' },
+              { SubnetId: 'subnet-b', AvailabilityZone: 'us-east-1b', CidrBlock: '10.144.16.0/20' },
             ],
           };
+        }
+        if (cmd.kind === 'DescribePlacementGroups') {
+          return { PlacementGroups: precisionTimeGroup ? [{ GroupName: precisionTimeGroup }] : [] };
         }
         if (cmd.kind === 'DescribeSecurityGroups') return { SecurityGroups: [{ GroupId: 'sg-1' }] };
         events.push(cmd.kind);
         if (cmd.kind === 'RunInstances') {
           if (runInstancesError) throw runInstancesError;
+          const failure = runInstancesErrors.shift();
+          if (failure) throw failure;
           return { Instances: [{ InstanceId: 'i-123', Placement: { AvailabilityZone: 'us-east-1b' } }] };
         }
         return {};
@@ -30,10 +41,22 @@ jest.mock('@aws-sdk/client-ec2', () => {
     })),
     DescribeSubnetsCommand: command('DescribeSubnets'),
     DescribeSecurityGroupsCommand: command('DescribeSecurityGroups'),
+    DescribePlacementGroupsCommand: command('DescribePlacementGroups'),
     RunInstancesCommand: command('RunInstances'),
     TerminateInstancesCommand: command('TerminateInstances'),
   };
 });
+jest.mock('@aws-sdk/client-dynamodb', () => ({
+  DynamoDBClient: jest.fn().mockImplementation(() => ({
+    send: async (cmd: any) => {
+      const id: string = cmd.input.Key.service_id.S;
+      events.push(`GetItem ${id}`);
+      const ip = gatewayIps[id.replace(/^order-gateway#/, '')];
+      return ip ? { Item: { private_ip: { S: ip } } } : {};
+    },
+  })),
+  GetItemCommand: jest.fn().mockImplementation((input) => ({ input })),
+}));
 jest.mock('@aws-sdk/client-ssm', () => ({
   SSMClient: jest.fn().mockImplementation(() => ({
     send: async (cmd: any) => {
@@ -61,6 +84,7 @@ jest.mock('@aws-sdk/client-secrets-manager', () => ({
   SecretsManagerClient: jest.fn().mockImplementation(() => ({
     send: async (cmd: any) => {
       events.push(`Secret ${cmd.input.SecretId}`);
+      if (cmd.input.SecretId === 'gnomepy/gh-token') return { SecretString: JSON.stringify({ token: 'gh-test' }) };
       return { SecretString: marketDataSecret };
     },
   })),
@@ -106,6 +130,32 @@ let leaseDeleteStatus = 200;
 let knownStreams: number[] = [];
 let inactiveStreams: number[] = [];
 let listingStreams: { stream_id: number; listing_id: number; family: string; active?: boolean }[] = [];
+
+// What GitHub holds: the SHA each repo's refs name (a SHA names itself) and the files at each SHA.
+const STRATEGIES_SHA = 'a'.repeat(40);
+const RESEARCH_SHA = 'b'.repeat(40);
+let githubRefs: Record<string, string> = {};
+let githubFiles: Record<string, string> = {};
+let githubCalls: { url: string; headers: any }[] = [];
+
+function pom(orchestrator: string) {
+  return `<project>\n  <properties>\n    <platform.orchestrator>${orchestrator}</platform.orchestrator>\n`
+    + `  </properties>\n</project>\n`;
+}
+
+function githubResponse(url: string, headers: any) {
+  githubCalls.push({ url, headers });
+  const [, repo, kind, rest] = /^https:\/\/api\.github\.com\/repos\/gnome-trading-group\/([^/]+)\/(commits|contents)\/(.+)$/.exec(url)!;
+  events.push(`GitHub ${repo} ${kind}`);
+  if (kind === 'commits') {
+    const ref = decodeURIComponent(rest);
+    const sha = githubRefs[`${repo}@${ref}`] ?? (/^[0-9a-f]{40}$/.test(ref) && githubFiles[`${repo}@${ref}:`] !== undefined ? ref : undefined);
+    return sha ? { ok: true, status: 200, text: async () => sha } : { ok: false, status: 422, text: async () => 'No commit found' };
+  }
+  const [path, query] = rest.split('?');
+  const text = githubFiles[`${repo}@${new URLSearchParams(query).get('ref')}:${path}`];
+  return text !== undefined ? { ok: true, status: 200, text: async () => text } : { ok: false, status: 404, text: async () => 'Not Found' };
+}
 
 function jsonResponse(body: unknown, status = 200) {
   return { ok: status >= 200 && status < 300, status, json: async () => body, text: async () => JSON.stringify(body) };
@@ -170,6 +220,9 @@ beforeEach(() => {
   ensured = [];
   ensureStatus = 200;
   runInstancesError = null;
+  runInstancesErrors = [];
+  precisionTimeGroup = 'gnome-precision-time-pg';
+  for (const key of Object.keys(gatewayIps)) delete gatewayIps[key];
   marketDataCalls = [];
   leaseStatusQueue = [];
   leaseDeleteStatus = 200;
@@ -178,18 +231,25 @@ beforeEach(() => {
   inactiveStreams = [];
   listingStreams = [{ stream_id: 101, listing_id: 1, family: 'book', active: true }];
   sessionRow = { session_id: 's1', strategy_id: 7, instance_id: 'i-123', launch_region: 'eu-west-1' };
+  githubCalls = [];
+  githubRefs = {
+    'gnome-strategies@main': STRATEGIES_SHA,
+    'gnomepy-research@main': RESEARCH_SHA,
+  };
+  githubFiles = {
+    [`gnome-strategies@${STRATEGIES_SHA}:`]: '',
+    [`gnome-strategies@${STRATEGIES_SHA}:strategies/pom.xml`]: pom('1.12.2'),
+    [`gnomepy-research@${RESEARCH_SHA}:`]: '',
+    [`gnomepy-research@${RESEARCH_SHA}:platform.properties`]: '# The platform\norchestrator=1.12.2\ngnomepy=2.20.2\n',
+  };
   Object.assign(ssmParams, {
-    '/gnome/orchestrator/latest-version': '1.12.2',
     '/gnome/orchestrator/ami/16core': 'ami-16',
     '/gnome/orchestrator/ami/32core': 'ami-32',
     '/gnome/orchestrator/ami/standard': 'ami-std',
     '/gnome/market-data/api-url': 'https://md.test/api/',
   });
   (global as any).fetch = jest.fn(async (url: string, init: any = {}) => {
-    if (url.startsWith('https://pypi.org/')) {
-      events.push('PyPI');
-      return jsonResponse({ info: { version: '2.20.2' } });
-    }
+    if (url.startsWith('https://api.github.com/')) return githubResponse(url, init.headers);
     const method = init.method ?? 'GET';
     if (url.startsWith('https://md.test/api/')) {
       const mdPath = url.replace('https://md.test/api', '');
@@ -259,7 +319,10 @@ describe('POST /strategy-sessions/launch', () => {
 
     expect(response.statusCode).toBe(200);
     expect(events).toEqual([
-      'SSM /gnome/orchestrator/latest-version',
+      // Read once per container.
+      'Secret gnomepy/gh-token',
+      'GitHub gnome-strategies commits',
+      'GitHub gnome-strategies contents',
       'GET /listings',
       'GET /exchanges',
       'GET /simulation-parameters',
@@ -267,7 +330,6 @@ describe('POST /strategy-sessions/launch', () => {
       // Read once per container.
       'SSM /gnome/market-data/api-url',
       'Secret gnome/api-keys/market-data',
-      'PyPI',
       'SSM /gnome/orchestrator/ami/16core',
       // Read once per container.
       'SSM /gnome/alerting/api-url',
@@ -283,8 +345,9 @@ describe('POST /strategy-sessions/launch', () => {
       instanceType: 'c7i.4xlarge',
       launchRegion: 'us-east-1',
       orchestratorVersion: '1.12.2',
-      gnomepyVersion: '2.20.2',
+      strategyCommit: STRATEGIES_SHA,
     });
+    expect(postBodies[0].researchCommit).toBeUndefined();
     expect(patchBodies[0]).toEqual({ instanceId: 'i-123', availabilityZone: 'us-east-1b' });
   });
 
@@ -307,7 +370,7 @@ describe('POST /strategy-sessions/launch', () => {
     expect(input.InstanceType).toBe('c7i.4xlarge');
     expect(input.SubnetId).toBe('subnet-a');
     expect(input.SecurityGroupIds).toEqual(['sg-1']);
-    expect(input.Placement).toBeUndefined();
+    expect(input.Placement).toEqual({ GroupName: 'gnome-precision-time-pg' });
     expect(input.TagSpecifications.map((t: any) => t.ResourceType)).toEqual(['instance', 'volume']);
     expect(input.TagSpecifications[0].Tags).toContainEqual({ Key: 'gnome:purpose', Value: 'orchestrator-ec2' });
   });
@@ -335,36 +398,87 @@ describe('POST /strategy-sessions/launch', () => {
       STAGE: 'dev',
       REGISTRY_API_KEY_ID: 'key-id',
       ORCHESTRATOR_VERSION: '1.12.2',
-      GNOMEPY_VERSION: '2.20.2',
+      STRATEGY_COMMIT: STRATEGIES_SHA,
     });
     const script = Buffer.from(runInstancesInput().UserData, 'base64').toString();
     expect(script).toContain("trap 'shutdown -h now' ERR");
     expect(script).not.toContain('EXIT');
   });
 
-  it('uses a typed orchestrator version verbatim without reading the latest', async () => {
-    await launcher.handler(apiEvent('/strategy-sessions/launch', launchBody({ orchestratorVersion: '1.10.8' })));
+  it('runs a java session on the releases its strategy commit pins, recording the full SHA', async () => {
+    const old = 'c'.repeat(40);
+    githubRefs['gnome-strategies@strategy/maker'] = old;
+    githubFiles[`gnome-strategies@${old}:strategies/pom.xml`] = pom('1.10.8');
+    await launcher.handler(apiEvent('/strategy-sessions/launch', launchBody({ strategyCommit: 'strategy/maker' })));
 
-    expect(events).not.toContain('SSM /gnome/orchestrator/latest-version');
-    expect(sessionEnv().ORCHESTRATOR_VERSION).toBe('1.10.8');
-    expect(postBodies[0].orchestratorVersion).toBe('1.10.8');
+    expect(githubCalls.map((c) => c.url)).toEqual([
+      'https://api.github.com/repos/gnome-trading-group/gnome-strategies/commits/strategy%2Fmaker',
+      `https://api.github.com/repos/gnome-trading-group/gnome-strategies/contents/strategies/pom.xml?ref=${old}`,
+    ]);
+    expect(githubCalls[0].headers.Authorization).toBe('Bearer gh-test');
+    expect(sessionEnv()).toMatchObject({ ORCHESTRATOR_VERSION: '1.10.8', STRATEGY_COMMIT: old });
+    // A java session runs the orchestrator jar alone, its JVM options included.
+    expect(sessionEnv().GNOMEPY_VERSION).toBeUndefined();
+    expect(sessionEnv().RESEARCH_COMMIT).toBeUndefined();
+    expect(postBodies[0]).toMatchObject({ orchestratorVersion: '1.10.8', strategyCommit: old });
+    expect(postBodies[0].gnomepyVersion).toBeUndefined();
   });
 
-  it('pins the latest gnomepy from PyPI for python strategies', async () => {
+  it('runs a python session on the releases its research commit pins', async () => {
     await launcher.handler(apiEvent('/strategy-sessions/launch',
-      launchBody({ researchCommit: 'abc123' }, { 'strategy.type': 'python' })));
+      launchBody({ researchCommit: 'main', strategyCommit: 'ignored' }, { 'strategy.type': 'python' })));
 
-    expect(events).toContain('PyPI');
-    expect(sessionEnv()).toMatchObject({ GNOMEPY_VERSION: '2.20.2', RESEARCH_COMMIT: 'abc123' });
-    expect(postBodies[0].gnomepyVersion).toBe('2.20.2');
+    expect(events).toContain('GitHub gnomepy-research contents');
+    expect(events).not.toContain('GitHub gnome-strategies commits');
+    expect(sessionEnv()).toMatchObject({ GNOMEPY_VERSION: '2.20.2', RESEARCH_COMMIT: RESEARCH_SHA });
+    expect(sessionEnv().STRATEGY_COMMIT).toBeUndefined();
+    expect(postBodies[0]).toMatchObject({ researchCommit: RESEARCH_SHA, gnomepyVersion: '2.20.2' });
+    expect(postBodies[0].strategyCommit).toBeUndefined();
   });
 
-  it('uses a typed gnomepy version without asking PyPI', async () => {
+  it('ignores versions a caller still sends: only the commit decides what runs', async () => {
     await launcher.handler(apiEvent('/strategy-sessions/launch',
-      launchBody({ gnomepyVersion: '2.18.1' }, { 'strategy.type': 'python' })));
+      launchBody({ orchestratorVersion: '1.0.0', gnomepyVersion: '1.0.0' },
+        {
+          orchestrator_version: '1.0.0', gnomepy_version: '1.0.0', strategy_classes: '/tmp/other',
+          strategy_commit: 'f'.repeat(40),
+        })));
 
-    expect(events).not.toContain('PyPI');
-    expect(sessionEnv().GNOMEPY_VERSION).toBe('2.18.1');
+    expect(sessionEnv()).toMatchObject({ ORCHESTRATOR_VERSION: '1.12.2', STRATEGY_COMMIT: STRATEGIES_SHA });
+    expect(sessionEnv().GNOMEPY_VERSION).toBeUndefined();
+    expect(sessionEnv().STRATEGY_CLASSES).toBeUndefined();
+    expect(postBodies[0].orchestratorVersion).toBe('1.12.2');
+  });
+
+  it.each([
+    ['an unknown commit', () => { delete githubRefs['gnome-strategies@main']; }, 'has no commit main'],
+    ['a commit without the pom', () => { delete githubFiles[`gnome-strategies@${STRATEGIES_SHA}:strategies/pom.xml`]; },
+      'has no strategies/pom.xml'],
+    ['a pom pinning no orchestrator', () => {
+      githubFiles[`gnome-strategies@${STRATEGIES_SHA}:strategies/pom.xml`] = '<project/>';
+    }, 'pins no orchestrator version'],
+    ['a snapshot pin', () => {
+      githubFiles[`gnome-strategies@${STRATEGIES_SHA}:strategies/pom.xml`] = pom('1.13.0-SNAPSHOT');
+    }, 'not a release'],
+  ])('refuses %s before anything is recorded', async (_name, arrange, message) => {
+    arrange();
+    const response = await launcher.handler(apiEvent('/strategy-sessions/launch', launchBody()));
+
+    expect(response.statusCode).toBe(400);
+    expect(JSON.parse(response.body).message).toContain(message);
+    expect(postBodies).toHaveLength(0);
+    expect(ec2Calls.filter((c) => c.kind === 'RunInstances')).toHaveLength(0);
+  });
+
+  it('refuses a python commit whose platform.properties pins no gnomepy', async () => {
+    githubFiles[`gnomepy-research@${RESEARCH_SHA}:platform.properties`] = 'orchestrator=1.12.2\n';
+    const response = await launcher.handler(apiEvent('/strategy-sessions/launch',
+      launchBody({}, { 'strategy.type': 'python' })));
+
+    expect(response.statusCode).toBe(400);
+    expect(JSON.parse(response.body).message).toContain('pins no gnomepy version');
+    expect(postBodies).toHaveLength(0);
+    expect(ec2Calls.filter((c) => c.kind === 'RunInstances')).toHaveLength(0);
   });
 
   it.each(['paper', 'live'])('runs a standard-profile %s session on the standard AMI, defaulting to t3.small', async (mode) => {
@@ -659,18 +773,20 @@ describe('orchestrator overrides', () => {
   });
 
   it("checks a pinned session against its own version's list, not latest", async () => {
+    githubFiles[`gnome-strategies@${STRATEGIES_SHA}:strategies/pom.xml`] = pom('1.10.0');
     ssmParams['/gnome/orchestrator/properties/1.10.0'] = props('1.10.0', ['journal.enabled']);
     ssmParams['/gnome/orchestrator/properties/latest'] = props('1.12.2', ['journal.enabled', 'risk.stale.after.ms']);
     const response = await launcher.handler(apiEvent('/strategy-sessions/launch',
-      launchBody({ orchestratorVersion: '1.10.0' }, { 'overrides.risk.stale.after.ms': '5000' })));
+      launchBody({}, { 'overrides.risk.stale.after.ms': '5000' })));
     expect(response.statusCode).toBe(400);
     expect(JSON.parse(response.body).message).toContain('not in orchestrator 1.10.0');
   });
 
   it('falls back to latest for versions published before per-version lists', async () => {
+    githubFiles[`gnome-strategies@${STRATEGIES_SHA}:strategies/pom.xml`] = pom('1.9.0');
     ssmParams['/gnome/orchestrator/properties/latest'] = props('1.12.2', ['journal.enabled']);
     const response = await launcher.handler(apiEvent('/strategy-sessions/launch',
-      launchBody({ orchestratorVersion: '1.9.0' }, { 'overrides.journal.enabled': 'true' })));
+      launchBody({}, { 'overrides.journal.enabled': 'true' })));
     expect(response.statusCode).toBe(200);
   });
 
@@ -1173,5 +1289,118 @@ describe('POST /strategy-sessions/stop releases the session lease', () => {
     sessionRow = { ...sessionRow, mode: 'live' };
     await stop();
     expect(deletes()).toEqual(['/collection/leases/s1']);
+  });
+});
+
+describe('placement', () => {
+  const capacity = () => Object.assign(new Error('no capacity'), { name: 'InsufficientInstanceCapacity' });
+  const tried = () => ec2Calls.filter((c) => c.kind === 'RunInstances')
+    .map((c) => [c.input.SubnetId, c.input.Placement?.GroupName ?? null]);
+  const launch = (overrides: Record<string, unknown> = {}, config: Record<string, unknown> = {}) =>
+    launcher.handler(apiEvent('/strategy-sessions/launch', launchBody(overrides, config)));
+
+  it('finds the precision-time group in the platform network, by its tag and strategy', async () => {
+    await launch();
+
+    const call = ec2Calls.find((c) => c.kind === 'DescribePlacementGroups')!;
+    expect(call.input.Filters).toEqual([
+      { Name: 'tag:gnome:network', Values: ['platform'] },
+      { Name: 'strategy', Values: ['precision-time'] },
+    ]);
+  });
+
+  it('puts a live low-latency session in the zone its region\'s gateway runs in', async () => {
+    gatewayIps['live:kalshi:main'] = '10.144.17.40';
+
+    const res = await launch({ mode: 'live' });
+
+    expect(res.statusCode).toBe(200);
+    expect(events).toContain('GetItem order-gateway#live:kalshi:main');
+    expect(tried()).toEqual([['subnet-b', 'gnome-precision-time-pg']]);
+  });
+
+  it('starts in the first zone when its gateway isn\'t running yet', async () => {
+    const res = await launch({ mode: 'live' });
+
+    expect(res.statusCode).toBe(200);
+    expect(tried()).toEqual([['subnet-a', 'gnome-precision-time-pg']]);
+  });
+
+  it('keeps the gateway\'s zone before the hardware clock, then tries the other zone, on no capacity', async () => {
+    gatewayIps['live:kalshi:main'] = '10.144.17.40';
+    runInstancesErrors = [capacity(), capacity(), capacity()];
+
+    const res = await launch({ mode: 'live' });
+
+    expect(res.statusCode).toBe(200);
+    expect(tried()).toEqual([
+      ['subnet-b', 'gnome-precision-time-pg'],
+      ['subnet-b', null],
+      ['subnet-a', 'gnome-precision-time-pg'],
+      ['subnet-a', null],
+    ]);
+    expect(patchBodies).toContainEqual(expect.objectContaining({ instanceId: 'i-123' }));
+  });
+
+  it('fails the session with 503 once every placement had no capacity', async () => {
+    runInstancesErrors = [capacity(), capacity(), capacity(), capacity()];
+
+    const res = await launch();
+
+    expect(res.statusCode).toBe(503);
+    expect(tried()).toHaveLength(4);
+    expect(patchBodies).toContainEqual(expect.objectContaining({ status: 'FAILED' }));
+  });
+
+  it('tries nothing else after an error that isn\'t capacity', async () => {
+    runInstancesErrors = [Object.assign(new Error('bad'), { name: 'InvalidParameterValue' })];
+
+    const res = await launch();
+
+    expect(res.statusCode).toBe(500);
+    expect(tried()).toHaveLength(1);
+  });
+
+  it('stays in a zone the caller named, inside the group then outside it', async () => {
+    runInstancesErrors = [capacity(), capacity()];
+
+    const res = await launch({ availabilityZone: 'us-east-1b' });
+
+    expect(res.statusCode).toBe(503);
+    expect(tried()).toEqual([['subnet-b', 'gnome-precision-time-pg'], ['subnet-b', null]]);
+  });
+
+  it('puts a standard session in its gateway\'s zone too, outside the group', async () => {
+    gatewayIps['live:kalshi:main'] = '10.144.17.40';
+
+    const res = await launch({ mode: 'live', instanceType: 't3.small' }, { 'latency.profile': 'standard' });
+
+    expect(res.statusCode).toBe(200);
+    expect(tried()).toEqual([['subnet-b', null]]);
+  });
+
+  it('reads no gateway zone for a session that trades through no gateway', async () => {
+    const res = await launch({ instanceType: 't3.small' }, { 'latency.profile': 'standard' });
+
+    expect(res.statusCode).toBe(200);
+    expect(tried()).toEqual([['subnet-a', null]]);
+    expect(events.some((e) => e.startsWith('GetItem'))).toBe(false);
+  });
+
+  it('launches outside any group in a region that has none', async () => {
+    precisionTimeGroup = null;
+
+    await launch();
+
+    expect(tried()).toEqual([['subnet-a', null]]);
+  });
+});
+
+describe('cidrContains', () => {
+  it('places an address in its /20 only', () => {
+    expect(launcher.cidrContains('10.144.16.0/20', '10.144.17.40')).toBe(true);
+    expect(launcher.cidrContains('10.144.16.0/20', '10.144.32.1')).toBe(false);
+    expect(launcher.cidrContains('10.144.0.0/20', '10.144.15.255')).toBe(true);
+    expect(launcher.cidrContains('10.144.0.0/20', 'not-an-ip')).toBe(false);
   });
 });

@@ -12,6 +12,7 @@ interface ISession {
   mode: string;
   config: Record<string, unknown>;
   researchCommit?: string;
+  strategyCommit?: string;
   instanceId?: string;
   instanceType?: string;
   launchRegion?: string;
@@ -203,11 +204,12 @@ export class StrategySessionHandler extends ResourceHandler {
         }
         const result = await client.query(sql`
           INSERT INTO strategy.session (
-            session_id, strategy_id, status, mode, config, research_commit,
+            session_id, strategy_id, status, mode, config, research_commit, strategy_commit,
             instance_id, instance_type, launch_region, availability_zone, orchestrator_version, gnomepy_version
           )
           VALUES (
             ${s.sessionId}, ${s.strategyId}, ${s.status}, ${s.mode}, ${JSON.stringify(s.config)}, ${s.researchCommit ?? null},
+            ${s.strategyCommit ?? null},
             ${s.instanceId ?? null}, ${s.instanceType ?? null}, ${s.launchRegion ?? null}, ${s.availabilityZone ?? null},
             ${s.orchestratorVersion ?? null}, ${s.gnomepyVersion ?? null}
           )

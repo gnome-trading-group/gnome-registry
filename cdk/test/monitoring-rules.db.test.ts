@@ -137,6 +137,23 @@ describeDb('monitoring rules against Postgres', () => {
     expect(await hostKinds(host(), journal({ pendingSegments: 1, oldestPendingMs: 300_000 }))).toEqual(['JOURNAL_BACKLOG']);
   });
 
+  it('reads the host clock: no source, a wide bound or a stopped status writer; nothing from an older image', async () => {
+    const clockKinds = async (clock: unknown) => {
+      await client.query('TRUNCATE strategy.session CASCADE');
+      await session('s1', { health: { ...HEALTHY, host: host(), journal: journal(), clock } });
+      return (await runRules(client, now)).map(f => f.kind);
+    };
+    const clock = (f: Record<string, unknown> = {}) =>
+      ({ source: 'PHC', errorBoundNanos: 23_617, offsetNanos: -5, ageMs: 4_000, ...f });
+    expect(await clockKinds(clock())).toEqual([]);
+    expect(await clockKinds(clock({ source: 'NTP', errorBoundNanos: 1_000_000 }))).toEqual([]);
+    expect(await clockKinds(clock({ source: 'NTP', errorBoundNanos: 1_000_001 }))).toEqual(['CLOCK_UNSYNCED']);
+    expect(await clockKinds(clock({ source: 'UNSYNCED', errorBoundNanos: null }))).toEqual(['CLOCK_UNSYNCED']);
+    expect(await clockKinds(clock({ ageMs: 60_001 }))).toEqual(['CLOCK_UNSYNCED']);
+    expect(await clockKinds(clock({ source: 'UNKNOWN', errorBoundNanos: null, ageMs: null }))).toEqual([]);
+    expect(await clockKinds(undefined)).toEqual([]);
+  });
+
   it('skips what a session can\'t read or doesn\'t send', async () => {
     const unread = host({ cpuBusyPermille: -1, cpuStealPermille: -1, memAvailableBytes: -1, memTotalBytes: -1,
       processRssBytes: -1 });
@@ -217,14 +234,15 @@ describeDb('monitoring rules against Postgres', () => {
       'REBALANCE_DRIFT', 'ALLOCATION_EXCEEDS_BALANCE',
       'DRAINING_EXPOSURE', 'ACCOUNT_DUE_FOR_ROTATION', 'ACCOUNT_READY_TO_RETIRE', 'FEE_MISMATCH',
       'FEE_SCHEDULE_MISSING', 'FEE_SCHEDULE_CHANGED', 'FEE_TYPE_UNSUPPORTED', 'HOST_CPU_HIGH', 'HOST_MEMORY_LOW',
-      'DISK_LOW', 'JOURNAL_BACKLOG', 'VENUE_CREDIT_UNCLASSIFIED', 'REWARD_UNALLOCATED'];
+      'DISK_LOW', 'JOURNAL_BACKLOG', 'CLOCK_UNSYNCED', 'VENUE_CREDIT_UNCLASSIFIED', 'REWARD_UNALLOCATED'];
     const rulesDir = path.join(__dirname, '..', 'lambda', 'monitoring', 'rules');
     const source = fs.readdirSync(rulesDir).filter(f => f.endsWith('.ts'))
       .map(f => fs.readFileSync(path.join(rulesDir, f), 'utf8')).join('\n');
     const produced = new Set([...source.matchAll(/'([A-Z][A-Z_]+[A-Z])'/g)].map(m => m[1])
       .filter(k => !['SUBMITTED', 'STARTING', 'RUNNING', 'STOPPING', 'FAILED_', 'KILL_SWITCH', 'DRAINING', 'ACTIVE',
         'RETIRED', 'BREAK', 'UNKNOWN_VENUE_POSITION', 'ERROR', 'OPEN', 'KALSHI', 'POLYMARKET_US', 'VENUE', 'MAKER',
-        'TAKER', 'VENUE_API', 'INSUFFICIENT_FUNDS', 'REJECTED', 'UNCLASSIFIED'].includes(k)));
+        'TAKER', 'VENUE_API', 'INSUFFICIENT_FUNDS', 'REJECTED', 'UNCLASSIFIED', 'PHC', 'NTP', 'UNSYNCED',
+        'UNKNOWN'].includes(k)));
     for (const kind of produced) expect(kinds).toContain(kind);
     for (const kind of kinds) expect(ALERT_TYPES[kind]).toBeDefined();
   });

@@ -40,3 +40,8 @@ export const DISK_FREE_MIN_SEGMENTS = 2;
 // shipper that has stopped or can't reach S3.
 export const JOURNAL_BACKLOG_SEGMENTS = 3;
 export const JOURNAL_BACKLOG_AGE_MS = 5 * 60_000;
+// The host's clock from the heartbeat (the orchestrator's ClockReadings). Amazon Time Sync keeps a healthy host within
+// ~0.1 ms of UTC (~0.5 ms on a burstable type) and the hardware clock within ~20 µs; past 1 ms, latency measured
+// against another host is mostly clock error. The status is rewritten every 10 s, so a minute old is a stopped writer.
+export const CLOCK_ERROR_BOUND_MAX_NANOS = 1_000_000;
+export const CLOCK_STATUS_MAX_AGE_MS = 60_000;

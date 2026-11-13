@@ -187,15 +187,15 @@ describe('ApiStack auth', () => {
     });
   });
 
-  it('lets the launcher read only the market-data API key mirror, to lease and release streams', () => {
+  it('lets the launcher read only the market-data API key mirror and the GitHub token, to lease streams and read commits', () => {
     const launcher = Object.values(template.findResources('AWS::Lambda::Function'))
       .find((f: any) => f.Properties.Environment?.Variables?.MARKET_DATA_API_KEY_SECRET);
     expect(launcher!.Properties.Environment.Variables.MARKET_DATA_API_KEY_SECRET).toBe('gnome/api-keys/market-data');
     const statements = Object.values(template.findResources('AWS::IAM::Policy'))
       .flatMap((p: any) => p.Properties.PolicyDocument.Statement)
       .filter((s: any) => [s.Action].flat().includes('secretsmanager:GetSecretValue'));
-    expect(statements).toHaveLength(1);
-    expect(JSON.stringify(statements[0].Resource)).toContain('secret:gnome/api-keys/market-data-*');
+    expect(statements.map((s: any) => JSON.stringify(s.Resource).match(/secret:([^"]+)/)![1]).sort())
+      .toEqual(['gnome/api-keys/market-data-*', 'gnomepy/gh-token-*']);
   });
 
   it('stays well under the CloudFormation limit of 500 resources per stack', () => {

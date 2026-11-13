@@ -3,10 +3,13 @@ import {
   EC2Client,
   DescribeSubnetsCommand,
   DescribeSecurityGroupsCommand,
+  DescribePlacementGroupsCommand,
   RunInstancesCommand,
   TerminateInstancesCommand,
 } from '@aws-sdk/client-ec2';
-import { PLATFORM_NETWORK_TAG } from '@gnome-trading-group/gnome-shared-cdk/dist/regions';
+import { PLATFORM_NETWORK_TAG, supportsPrecisionTime } from '@gnome-trading-group/gnome-shared-cdk/dist/regions';
+import { SERVICE_ENDPOINTS } from '@gnome-trading-group/gnome-shared-cdk/dist/service-endpoints';
+import { DynamoDBClient, GetItemCommand } from '@aws-sdk/client-dynamodb';
 import { SSMClient, GetParameterCommand } from '@aws-sdk/client-ssm';
 import { APIGatewayClient, GetApiKeyCommand } from '@aws-sdk/client-api-gateway';
 import { CloudWatchLogsClient, GetLogEventsCommand } from '@aws-sdk/client-cloudwatch-logs';
@@ -14,6 +17,7 @@ import { EventBridgeClient, PutEventsCommand } from '@aws-sdk/client-eventbridge
 import { GetSecretValueCommand, SecretsManagerClient } from '@aws-sdk/client-secrets-manager';
 import { ISessionSimulation, PAPER_BLOCKS, validateSessionSimulation } from '../simulation/parameters';
 import { ALERT_BUS_NAME, ALERT_DETAIL_TYPE, ALERT_EVENT_SOURCE, AlertEvent } from '../alerts/model';
+import { DEFAULT_REF, resolveStrategySource, StrategySource, StrategySourceError } from './strategy-platform';
 
 const REGISTRY_API_URL = (process.env.REGISTRY_API_URL ?? '').replace(/\/$/, '');
 const REGISTRY_API_KEY_ID = process.env.REGISTRY_API_KEY_ID ?? '';
@@ -31,7 +35,6 @@ const INSTANCE_PURPOSE = 'orchestrator-ec2';
 const LAUNCH_TEMPLATE_NAME = 'gnome-orchestrator';
 const LIVE_LAUNCH_TEMPLATE_NAME = 'gnome-orchestrator-live';
 const AMI_PARAMETER_PREFIX = '/gnome/orchestrator/ami';
-const LATEST_ORCHESTRATOR_PARAMETER = '/gnome/orchestrator/latest-version';
 const ENDED_SESSION_STATUSES = ['STOPPED', 'FAILED'];
 const ENDED_SESSION_LOGS_GRACE_MS = 5 * 60 * 1000;
 // Published by gnome-orchestrator per release as <prefix>/<version>, plus <prefix>/latest:
@@ -40,7 +43,6 @@ const ORCHESTRATOR_PROPERTIES_PREFIX = '/gnome/orchestrator/properties';
 // Session config keys under this prefix override an orchestrator property of the same name for that session only.
 export const OVERRIDE_PREFIX = 'overrides.';
 const VERSION_PARAMETER_REGION = 'us-east-1';
-const PYPI_GNOMEPY_URL = 'https://pypi.org/pypi/gnomepy/json';
 // EC2's limit on raw (pre-base64) user data.
 const MAX_USER_DATA_BYTES = 16 * 1024;
 // Aeron stream ids are int32 (md.stream.stream_id doubles as one).
@@ -248,26 +250,101 @@ export async function simulationProblem(
     + ' record them in the Security Master, or set every block for those listings in simulation';
 }
 
+interface PlatformSubnet {
+  subnetId: string;
+  availabilityZone: string;
+  cidrBlock: string;
+}
+
 interface NetworkConfig {
-  subnets: { subnetId: string; availabilityZone: string }[];
+  subnets: PlatformSubnet[];
   securityGroupId: string;
+  // The region's precision-time placement group, where an instance's clock can follow the Nitro hardware clock.
+  precisionTimeGroup?: string;
 }
 
 async function discoverNetworkConfig(region: string): Promise<NetworkConfig> {
   const ec2 = new EC2Client({ region });
-  const [subnetsRes, sgsRes] = await Promise.all([
-    ec2.send(new DescribeSubnetsCommand({
-      Filters: [{ Name: `tag:${NETWORK_TAG_KEY}`, Values: [NETWORK_TAG_VALUE] }],
-    })),
-    ec2.send(new DescribeSecurityGroupsCommand({
-      Filters: [{ Name: `tag:${NETWORK_TAG_KEY}`, Values: [NETWORK_TAG_VALUE] }],
-    })),
+  const platform = { Name: `tag:${NETWORK_TAG_KEY}`, Values: [NETWORK_TAG_VALUE] };
+  const [subnetsRes, sgsRes, groupsRes] = await Promise.all([
+    ec2.send(new DescribeSubnetsCommand({ Filters: [platform] })),
+    ec2.send(new DescribeSecurityGroupsCommand({ Filters: [platform] })),
+    ec2.send(new DescribePlacementGroupsCommand({ Filters: [platform, { Name: 'strategy', Values: ['precision-time'] }] }))
+      .catch((error) => {
+        // Without it a session still launches, its clock on Amazon Time Sync.
+        console.warn(`No precision-time placement group found in ${region}`, error);
+        return { PlacementGroups: [] };
+      }),
   ]);
-  const subnets = (subnetsRes.Subnets ?? []).map(s => ({ subnetId: s.SubnetId!, availabilityZone: s.AvailabilityZone! }));
+  const subnets = (subnetsRes.Subnets ?? []).map(s => ({
+    subnetId: s.SubnetId!, availabilityZone: s.AvailabilityZone!, cidrBlock: s.CidrBlock ?? '',
+  }));
   if (subnets.length === 0) throw new Error(`No platform network subnets found in ${region}`);
   const sg = sgsRes.SecurityGroups?.[0];
   if (!sg?.GroupId) throw new Error(`No platform network security group found in ${region}`);
-  return { subnets, securityGroupId: sg.GroupId };
+  return { subnets, securityGroupId: sg.GroupId, precisionTimeGroup: groupsRes.PlacementGroups?.[0]?.GroupName };
+}
+
+function ipv4ToNumber(ip: string): number {
+  return ip.split('.').reduce((value, octet) => value * 256 + Number(octet), 0);
+}
+
+export function cidrContains(cidr: string, ip: string): boolean {
+  const [base, bits] = cidr.split('/');
+  if (!base || bits === undefined || !/^\d+\.\d+\.\d+\.\d+$/.test(ip)) return false;
+  const size = 2 ** (32 - Number(bits));
+  const start = ipv4ToNumber(base);
+  const address = ipv4ToNumber(ip);
+  return address >= start && address < start + size;
+}
+
+const serviceEndpoints = new DynamoDBClient({ region: SERVICE_ENDPOINTS.region });
+
+/**
+ * The zone of the first of these gateways running in the network, from the private IP it advertises in
+ * `service-endpoints`; undefined when none runs yet (each scales from zero, so one ensured a moment ago is still
+ * booting). A session in its gateway's zone saves a cross-zone hop on every order and report.
+ */
+async function gatewayZone(gatewayKeys: string[], network: NetworkConfig): Promise<string | undefined> {
+  for (const key of gatewayKeys) {
+    try {
+      const res = await serviceEndpoints.send(new GetItemCommand({
+        TableName: SERVICE_ENDPOINTS.tableName,
+        Key: { [SERVICE_ENDPOINTS.partitionKey]: { S: `order-gateway#${key}` } },
+        ProjectionExpression: 'private_ip',
+      }));
+      const ip = res.Item?.private_ip?.S;
+      const subnet = ip ? network.subnets.find((s) => cidrContains(s.cidrBlock, ip)) : undefined;
+      if (subnet) return subnet.availabilityZone;
+    } catch (error) {
+      console.warn(`Could not read where gateway ${key} runs; launching without its zone`, error);
+    }
+  }
+  return undefined;
+}
+
+export interface Placement {
+  subnet: PlatformSubnet;
+  placementGroup?: string;
+}
+
+/**
+ * Where to try launching, in order, each tried only when the one before had no capacity: the preferred zone first,
+ * then the others; in each, inside the precision-time group first when the session gets one, then outside it. A zone
+ * named by the caller is the only zone tried. Trading latency outranks the clock: a session keeps its gateway's zone
+ * and loses the hardware clock before it loses the zone.
+ */
+export function placements(
+  subnets: PlatformSubnet[],
+  preferredZone: string | undefined,
+  precisionTimeGroup: string | undefined,
+  onlyPreferred: boolean,
+): Placement[] {
+  const preferred = subnets.find((s) => s.availabilityZone === preferredZone) ?? subnets[0];
+  const zones = onlyPreferred ? [preferred] : [preferred, ...subnets.filter((s) => s !== preferred)];
+  return zones.flatMap((subnet) => precisionTimeGroup
+    ? [{ subnet, placementGroup: precisionTimeGroup }, { subnet }]
+    : [{ subnet }]);
 }
 
 async function getParameter(region: string, name: string): Promise<string> {
@@ -389,30 +466,26 @@ async function releaseLease(sessionId: string): Promise<void> {
   }
 }
 
-async function resolveLatestOrchestratorVersion(): Promise<string> {
-  return getParameter(VERSION_PARAMETER_REGION, LATEST_ORCHESTRATOR_PARAMETER);
-}
-
-// Kept behind one function so moving gnomepy's "latest" into SSM later is a one-line change.
-async function resolveLatestGnomepyVersion(): Promise<string> {
-  const res = await fetch(PYPI_GNOMEPY_URL);
-  if (!res.ok) throw new Error(`PyPI lookup for gnomepy failed (${res.status})`);
-  const json = (await res.json()) as { info?: { version?: string } };
-  if (!json.info?.version) throw new Error('PyPI response for gnomepy has no version');
-  return json.info.version;
-}
-
 interface ICreateSession {
   sessionId: string;
   strategyId: number;
   mode: string;
   config: Record<string, unknown>;
+  // The commit a python strategy runs from (gnomepy-research), or a java one (gnome-strategies); a branch or tag is
+  // resolved to its SHA at launch. Each pins the orchestrator and gnomepy releases its session runs on.
   researchCommit?: string;
+  strategyCommit?: string;
   region?: string;
   availabilityZone?: string;
   instanceType?: string;
-  orchestratorVersion?: string;
+}
+
+/** What a session runs, all read from its commit at launch. */
+export interface SessionPlatform {
+  orchestratorVersion: string;
   gnomepyVersion?: string;
+  researchCommit?: string;
+  strategyCommit?: string;
 }
 
 const CORS_HEADERS = {
@@ -476,7 +549,7 @@ export function overrideKeys(config: Record<string, unknown>): string[] {
 
 export function buildSessionEnvironment(
   s: ICreateSession,
-  versions: { orchestratorVersion: string; gnomepyVersion: string },
+  platform: SessionPlatform,
   alertsUrl?: string,
   marketDataApiUrl?: string,
 ): Record<string, string> {
@@ -506,6 +579,12 @@ export function buildSessionEnvironment(
   }
   // The streams leased for the session: an override must not point it at streams no lease keeps collected.
   delete env.STREAMS;
+  // What runs comes from the commit alone: config can't swap in other code, releases or a precompiled strategy.
+  delete env.RESEARCH_COMMIT;
+  delete env.STRATEGY_COMMIT;
+  delete env.STRATEGY_CLASSES;
+  delete env.ORCHESTRATOR_VERSION;
+  delete env.GNOMEPY_VERSION;
   if (Array.isArray(s.config.streams)) env.STREAMS = JSON.stringify(s.config.streams);
   if (Object.keys(args).length > 0) env.STRATEGY_ARGS_JSON = JSON.stringify(args);
   env.STRATEGY_ID = String(s.strategyId);
@@ -513,15 +592,16 @@ export function buildSessionEnvironment(
   env.SESSION_ID = s.sessionId;
   env.STAGE = STAGE;
   env.REGISTRY_API_KEY_ID = REGISTRY_API_KEY_ID;
-  env.ORCHESTRATOR_VERSION = versions.orchestratorVersion;
-  env.GNOMEPY_VERSION = versions.gnomepyVersion;
+  env.ORCHESTRATOR_VERSION = platform.orchestratorVersion;
+  if (platform.gnomepyVersion) env.GNOMEPY_VERSION = platform.gnomepyVersion;
+  if (platform.researchCommit) env.RESEARCH_COMMIT = platform.researchCommit;
+  if (platform.strategyCommit) env.STRATEGY_COMMIT = platform.strategyCommit;
   if (alertsUrl) env.ALERTS_API_URL = alertsUrl;
   // The session polls its lease (GET /collection/leases/{sessionId}) for where its streams are published.
   if (marketDataApiUrl) {
     env.MARKET_DATA_API_URL = marketDataApiUrl;
     env.MARKET_DATA_API_KEY_SECRET = MARKET_DATA_API_KEY_SECRET;
   }
-  if (s.researchCommit) env.RESEARCH_COMMIT = s.researchCommit;
   return env;
 }
 
@@ -538,6 +618,10 @@ export function buildUserData(env: Record<string, string>): string {
     'systemctl start gnome-strategy.service',
     '',
   ].join('\n');
+}
+
+function isCapacityError(error: any): boolean {
+  return (error?.name ?? error?.Code) === 'InsufficientInstanceCapacity';
 }
 
 function launchErrorResponse(error: any) {
@@ -598,7 +682,22 @@ async function handleLaunch(body: string | null) {
     return createResponse(400, { message: `${instanceType} is too small to isolate cores; use latency.profile=standard` });
   }
 
-  const orchestratorVersion = s.orchestratorVersion || await resolveLatestOrchestratorVersion();
+  const isPython = String(s.config['strategy.type'] ?? '') === 'python';
+  // Only the commit of the strategy's own language is read; the other names code this session never runs.
+  let source: StrategySource;
+  try {
+    source = await resolveStrategySource(
+      isPython ? 'python' : 'java', (isPython ? s.researchCommit : s.strategyCommit)?.trim() || DEFAULT_REF);
+  } catch (e) {
+    if (e instanceof StrategySourceError) return createResponse(400, { message: e.message });
+    throw e;
+  }
+  const platform: SessionPlatform = {
+    orchestratorVersion: source.platform.orchestrator,
+    gnomepyVersion: source.platform.gnomepy,
+    ...(isPython ? { researchCommit: source.commit } : { strategyCommit: source.commit }),
+  };
+  const { orchestratorVersion } = platform;
 
   const overridden = overrideKeys(s.config);
   if (overridden.length > 0) {
@@ -683,23 +782,16 @@ async function handleLaunch(body: string | null) {
 
   const region = s.region ?? resolveRegion(exchanges);
   const network = await discoverNetworkConfig(region);
-  const subnet = s.availabilityZone
-    ? network.subnets.find(n => n.availabilityZone === s.availabilityZone)
-    : network.subnets[0];
-  if (!subnet) {
+  if (s.availabilityZone && !network.subnets.some(n => n.availabilityZone === s.availabilityZone)) {
     return createResponse(400, {
       message: `No platform network subnet in ${s.availabilityZone}; available: ${network.subnets.map(n => n.availabilityZone).join(', ')}`,
     });
   }
 
-  const isPython = String(s.config['strategy.type'] ?? '') === 'python';
-  // Java sessions need gnomepy too: the instance reads the JVM flags from it, so both strategy types launch the
-  // JVM identically.
-  const gnomepyVersion = s.gnomepyVersion || await resolveLatestGnomepyVersion();
   const imageId = await getParameter(region, amiParameterName(profile, instanceType));
 
   const userData = buildUserData(
-    buildSessionEnvironment(s, { orchestratorVersion, gnomepyVersion }, await resolveAlertsApiUrl(), marketData.url));
+    buildSessionEnvironment(s, platform, await resolveAlertsApiUrl(), marketData.url));
   if (Buffer.byteLength(userData) > MAX_USER_DATA_BYTES) {
     return createResponse(400, { message: `Session config too large for EC2 user data (${Buffer.byteLength(userData)} bytes)` });
   }
@@ -713,11 +805,12 @@ async function handleLaunch(body: string | null) {
     status: 'SUBMITTED',
     mode: s.mode,
     config: s.config,
-    researchCommit: s.researchCommit,
+    researchCommit: platform.researchCommit,
+    strategyCommit: platform.strategyCommit,
     instanceType,
     launchRegion: region,
-    orchestratorVersion,
-    gnomepyVersion,
+    orchestratorVersion: platform.orchestratorVersion,
+    gnomepyVersion: platform.gnomepyVersion,
   });
   if (created.status >= 400 && created.status < 500) {
     return createResponse(created.status, created.body);
@@ -762,34 +855,56 @@ async function handleLaunch(body: string | null) {
     { Key: 'Name', Value: `orchestrator-${s.sessionId.substring(0, 8)}` },
   ];
 
-  let instanceId: string;
+  // Every session goes beside its own region's gateway, saving a cross-zone hop on each order and report. A
+  // low-latency session also goes into the precision-time group, so what it measures against other hosts is good to
+  // microseconds.
+  const localGateways = gatewayKeyOf
+    ? [...exchanges.values()].filter((e) => e.region === region).map((e) => gatewayKeyOf(e.exchange_code))
+    : [];
+  const preferredZone = s.availabilityZone ?? await gatewayZone(localGateways, network);
+  const group = profile === LOW_LATENCY && supportsPrecisionTime(instanceType) ? network.precisionTimeGroup : undefined;
+  const attempts = placements(network.subnets, preferredZone, group, s.availabilityZone !== undefined);
+
+  let instanceId: string | undefined;
   let availabilityZone: string | undefined;
-  try {
-    const result = await new EC2Client({ region }).send(new RunInstancesCommand({
-      LaunchTemplate: {
-        LaunchTemplateName: s.mode === 'live' ? LIVE_LAUNCH_TEMPLATE_NAME : LAUNCH_TEMPLATE_NAME, Version: '$Latest',
-      },
-      ImageId: imageId,
-      InstanceType: instanceType as any,
-      SubnetId: subnet.subnetId,
-      SecurityGroupIds: [network.securityGroupId],
-      MinCount: 1,
-      MaxCount: 1,
-      UserData: Buffer.from(userData).toString('base64'),
-      TagSpecifications: [
-        { ResourceType: 'instance', Tags: tags },
-        { ResourceType: 'volume', Tags: tags },
-      ],
-    }));
-    const instance = result.Instances?.[0];
-    if (!instance?.InstanceId) throw new Error('RunInstances returned no instance');
-    instanceId = instance.InstanceId;
-    availabilityZone = instance.Placement?.AvailabilityZone ?? subnet.availabilityZone;
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    await markLaunchFailed(s.sessionId, `Launch failed: ${message}`);
-    await releaseLease(s.sessionId);
-    return launchErrorResponse(error);
+  const ec2 = new EC2Client({ region });
+  for (let i = 0; i < attempts.length && !instanceId; i++) {
+    const attempt = attempts[i];
+    try {
+      const result = await ec2.send(new RunInstancesCommand({
+        LaunchTemplate: {
+          LaunchTemplateName: s.mode === 'live' ? LIVE_LAUNCH_TEMPLATE_NAME : LAUNCH_TEMPLATE_NAME, Version: '$Latest',
+        },
+        ImageId: imageId,
+        InstanceType: instanceType as any,
+        SubnetId: attempt.subnet.subnetId,
+        ...(attempt.placementGroup ? { Placement: { GroupName: attempt.placementGroup } } : {}),
+        SecurityGroupIds: [network.securityGroupId],
+        MinCount: 1,
+        MaxCount: 1,
+        UserData: Buffer.from(userData).toString('base64'),
+        TagSpecifications: [
+          { ResourceType: 'instance', Tags: tags },
+          { ResourceType: 'volume', Tags: tags },
+        ],
+      }));
+      const instance = result.Instances?.[0];
+      if (!instance?.InstanceId) throw new Error('RunInstances returned no instance');
+      instanceId = instance.InstanceId;
+      availabilityZone = instance.Placement?.AvailabilityZone ?? attempt.subnet.availabilityZone;
+    } catch (error) {
+      if (isCapacityError(error) && i + 1 < attempts.length) {
+        const next = attempts[i + 1];
+        console.warn(`No ${instanceType} capacity in ${attempt.subnet.availabilityZone}`
+          + `${attempt.placementGroup ? ' in the precision-time group' : ''}; trying ${next.subnet.availabilityZone}`
+          + `${next.placementGroup ? ' in the group' : ' outside the group'}`);
+        continue;
+      }
+      const message = error instanceof Error ? error.message : String(error);
+      await markLaunchFailed(s.sessionId, `Launch failed: ${message}`);
+      await releaseLease(s.sessionId);
+      return launchErrorResponse(error);
+    }
   }
 
   const session = await registryFetch('/strategy-sessions', 'PATCH', {
