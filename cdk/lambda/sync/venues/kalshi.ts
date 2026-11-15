@@ -251,8 +251,9 @@ export async function readKalshiIncentivePages(status: string, startedAfter?: Da
 }
 
 export async function readKalshiIncentivePrograms(paidSince?: Date): Promise<IncentiveProgramReading[]> {
-  const rows: Record<string, any>[] = [];
-  for (const status of UNPAID_INCENTIVE_STATUSES) rows.push(...await readKalshiIncentivePages(status));
-  if (paidSince) rows.push(...await readKalshiIncentivePages('paid_out', paidSince));
+  // A sweep can hold hundreds of thousands of programs, past the argument count push(...rows) can spread.
+  let rows: Record<string, any>[] = [];
+  for (const status of UNPAID_INCENTIVE_STATUSES) rows = rows.concat(await readKalshiIncentivePages(status));
+  if (paidSince) rows = rows.concat(await readKalshiIncentivePages('paid_out', paidSince));
   return rows.map(parseKalshiIncentiveProgram).filter((p): p is IncentiveProgramReading => p !== null);
 }

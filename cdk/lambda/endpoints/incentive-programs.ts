@@ -143,27 +143,26 @@ const LISTING_PROGRAMS = `
     AND ($3::timestamptz IS NULL OR ip.effective_from < $3)
   ORDER BY p.listing_id, ip.venue_program_id, ip.effective_from, ip.recorded_at DESC`;
 
-// Each program's latest version, where that version hasn't ended by $2; candidates come from the open-period index.
+// Each program's latest version, where that version hasn't ended by $2. Most of a venue's programs have ended while
+// older versions of them still look open, so the latest versions are walked in program order straight off the lookup
+// index (which carries period_end and the row id) and the walk stops at a full page; only that page reads the table.
 const OPEN_PROGRAMS = `
-  WITH candidates AS (
-    SELECT DISTINCT venue_program_id FROM sm.incentive_program
-    WHERE exchange_id = $1 AND COALESCE(period_end, 'infinity'::timestamptz) > $2
-      AND ($3::timestamptz IS NULL OR recorded_at <= $3) AND ($4::text IS NULL OR venue_program_id > $4)
+  WITH latest AS (
+    SELECT DISTINCT ON (venue_program_id) venue_program_id, period_end, incentive_program_id
+    FROM sm.incentive_program
+    WHERE exchange_id = $1 AND ($3::timestamptz IS NULL OR recorded_at <= $3)
+      AND ($4::text IS NULL OR venue_program_id > $4)
+    ORDER BY venue_program_id, effective_from DESC, recorded_at DESC
+  ), page AS (
+    SELECT incentive_program_id FROM latest
+    WHERE COALESCE(period_end, 'infinity'::timestamptz) > $2
+    ORDER BY venue_program_id
+    LIMIT $5
   )
-  SELECT * FROM (
-    SELECT latest.* FROM candidates c
-    CROSS JOIN LATERAL (
-      SELECT ip.venue_program_id, ip.program, ip.venue_market, ip.period_start, ip.period_end, ip.reward::text,
-        ip.reward_per, ip.definition, ip.paid_out, ip.effective_from
-      FROM sm.incentive_program ip
-      WHERE ip.exchange_id = $1 AND ip.venue_program_id = c.venue_program_id
-        AND ($3::timestamptz IS NULL OR ip.recorded_at <= $3)
-      ORDER BY ip.effective_from DESC, ip.recorded_at DESC LIMIT 1
-    ) latest
-  ) v
-  WHERE COALESCE(v.period_end, 'infinity'::timestamptz) > $2
-  ORDER BY v.venue_program_id
-  LIMIT $5`;
+  SELECT ip.venue_program_id, ip.program, ip.venue_market, ip.period_start, ip.period_end, ip.reward::text,
+    ip.reward_per, ip.definition, ip.paid_out, ip.effective_from
+  FROM page JOIN sm.incentive_program ip USING (incentive_program_id)
+  ORDER BY ip.venue_program_id`;
 
 export interface ProgramVersion {
   venueProgramId: string;

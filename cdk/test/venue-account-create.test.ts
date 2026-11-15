@@ -98,13 +98,14 @@ describe('venue account credentials', () => {
       ReplicationStatus: Object.entries(statuses).map(([Region, Status]) => ({ Region, Status: Status as 'InSync' })),
     });
     const name = 'gnome/market-data/kalshi/md-1';
-    const synced = secretStatus(name, described({ 'ap-northeast-1': 'InSync', 'eu-west-1': 'InSync' }));
+    const synced = secretStatus(name, described({ 'ap-northeast-1': 'InSync', 'eu-west-1': 'InSync', 'us-east-2': 'InSync' }));
     expect(synced).toMatchObject({
       secretName: name, exists: true, apiKeyId: 'f054773a-1', updatedBy: 'ops@example.com',
       lastChangedAt: '2026-10-14T12:00:00.000Z', inSync: true,
     });
-    expect(secretStatus(name, described({ 'ap-northeast-1': 'InSync', 'eu-west-1': 'Failed' })).inSync).toBe(false);
-    const missingReplica = secretStatus(name, described({ 'ap-northeast-1': 'InSync' }));
+    expect(secretStatus(name, described({ 'ap-northeast-1': 'InSync', 'eu-west-1': 'Failed', 'us-east-2': 'InSync' })).inSync)
+      .toBe(false);
+    const missingReplica = secretStatus(name, described({ 'ap-northeast-1': 'InSync', 'us-east-2': 'InSync' }));
     expect(missingReplica.inSync).toBe(false);
     expect(missingReplica.replicas).toContainEqual({ region: 'eu-west-1', status: 'Missing', message: null });
     expect(secretStatus('gnome/market-data/polymarket-us/md-1', null)).toMatchObject({

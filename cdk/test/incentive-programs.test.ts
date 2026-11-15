@@ -4,7 +4,7 @@ import { ValidationError } from '../lambda/endpoints/base';
 import { dollars, parseProgram, ProgramVersion, trimToWindow } from '../lambda/endpoints/incentive-programs';
 import { validateIncentiveDefinition } from '../lambda/incentives/definition';
 import { isKalshiPayoutRun, postInChunks, syncVenue, unlistedEnded } from '../lambda/sync/incentive-sync';
-import { parseKalshiIncentiveProgram } from '../lambda/sync/venues/kalshi';
+import { parseKalshiIncentiveProgram, readKalshiIncentivePrograms, UNPAID_INCENTIVE_STATUSES } from '../lambda/sync/venues/kalshi';
 import { parsePolymarketIntlRewardMarket } from '../lambda/sync/venues/polymarket-intl';
 import { IncentiveProgramReading } from '../lambda/sync/venues/types';
 
@@ -51,6 +51,24 @@ describe('Kalshi incentive programs', () => {
     expect(isKalshiPayoutRun(new Date('2026-11-12T11:07:00Z'))).toBe(true);
     expect(isKalshiPayoutRun(new Date('2026-11-12T11:15:00Z'))).toBe(false);
     expect(isKalshiPayoutRun(new Date('2026-11-12T10:59:00Z'))).toBe(false);
+  });
+
+  it('reads a payout sweep of hundreds of thousands of programs', async () => {
+    const PAGES = 300;
+    const program = byTicker('KXRT-VIO-60');
+    const page = Array.from({ length: 1000 }, () => program);
+    jest.spyOn(global, 'fetch').mockImplementation(async (url) => {
+      const params = new URL(String(url)).searchParams;
+      const n = Number(params.get('cursor') ?? 0) + 1;
+      const last = params.get('status') !== 'paid_out' || n === PAGES;
+      return new Response(JSON.stringify({ incentive_programs: page, next_cursor: last ? '' : String(n) }));
+    });
+    try {
+      const read = await readKalshiIncentivePrograms(new Date('2026-01-01T00:00:00Z'));
+      expect(read).toHaveLength((UNPAID_INCENTIVE_STATUSES.length + PAGES) * 1000);
+    } finally {
+      jest.restoreAllMocks();
+    }
   });
 });
 

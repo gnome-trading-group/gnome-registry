@@ -145,11 +145,14 @@ describeDb('Incentive programs, against Postgres', () => {
       definition: { minSize: 20, maxSpreadCents: 4.5, asset: '0xC011a7E12a19f7B1f670d46F03B03f3342E82DFB' },
     });
     await post([pm('a', null), pm('b', null), pm('c', '2026-11-12T00:00:00Z'), pm('d', iso(Date.now() + DAY))]);
+    const beforeBEnded = new Date().toISOString();
+    await new Promise(resolve => setTimeout(resolve, 5));
     // b ended since: its latest version is what counts.
     await post([pm('b', '2026-11-12T00:00:00Z')]);
-    const page = async (after?: string) => JSON.parse((await handler.get({
-      exchangeCode: 'POLYMARKET_INTL', limit: '1', ...(after ? { after } : {}),
+    const page = async (after?: string, knownAsOf?: string) => JSON.parse((await handler.get({
+      exchangeCode: 'POLYMARKET_INTL', limit: '1', ...(after ? { after } : {}), ...(knownAsOf ? { knownAsOf } : {}),
     })).body) as { programs: any[]; next: string | null };
+    expect((await page('a', beforeBEnded)).programs.map(p => p.venueProgramId)).toEqual(['b']);
     const first = await page();
     expect(first.programs.map(p => p.venueProgramId)).toEqual(['a']);
     const second = await page(first.next!);

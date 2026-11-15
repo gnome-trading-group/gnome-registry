@@ -55,7 +55,9 @@ describe('market-data accounts', () => {
     expect(kinds()).toEqual(['CreateSecretCommand', 'TagResourceCommand', 'DescribeSecretCommand']);
     const create = sent[0] as CreateSecretCommand;
     expect(create.input.Name).toBe('gnome/market-data/kalshi/md-1');
-    expect(create.input.AddReplicaRegions).toEqual([{ Region: 'ap-northeast-1' }, { Region: 'eu-west-1' }]);
+    expect(create.input.AddReplicaRegions).toEqual([
+      { Region: 'ap-northeast-1' }, { Region: 'eu-west-1' }, { Region: 'us-east-2' },
+    ]);
     expect(registryPost).toHaveBeenCalledWith('/sources/accounts', 'POST', 'api-key', expect.objectContaining({
       sourceCode: 'KALSHI', label: 'md-1', secretName: 'gnome/market-data/kalshi/md-1', connectionBudget: 150,
       actor: 'ops@example.com',
