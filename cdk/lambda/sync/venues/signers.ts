@@ -1,4 +1,4 @@
-import { constants, createHmac, createPrivateKey, KeyObject, sign } from 'crypto';
+import { createHmac, createPrivateKey, KeyObject, sign } from 'crypto';
 
 // Request signing for the venues' account APIs, matching the gateways' Java signers: each signs the timestamp in
 // milliseconds, the method and the path without its query string.
@@ -8,14 +8,14 @@ function signedPath(path: string): string {
   return query < 0 ? path : path.slice(0, query);
 }
 
-// Kalshi: RSASSA-PSS with SHA-256 and a 32-byte salt (KalshiAuthSigner).
+// Kalshi: Ed25519 (KalshiAuthSigner). Accounts hold Ed25519 keys only, as the gateway signs with nothing else.
 export function kalshiHeaders(apiKey: string, privateKeyPem: string, method: string, path: string, nowMs: number) {
+  const key = createPrivateKey(privateKeyPem);
+  if (key.asymmetricKeyType !== 'ed25519') {
+    throw new Error(`Kalshi private key must be Ed25519, got ${key.asymmetricKeyType}`);
+  }
   const timestamp = String(nowMs);
-  const signature = sign('sha256', Buffer.from(`${timestamp}${method}${signedPath(path)}`), {
-    key: createPrivateKey(privateKeyPem),
-    padding: constants.RSA_PKCS1_PSS_PADDING,
-    saltLength: 32,
-  });
+  const signature = sign(null, Buffer.from(`${timestamp}${method}${signedPath(path)}`), key);
   return {
     'KALSHI-ACCESS-KEY': apiKey,
     'KALSHI-ACCESS-TIMESTAMP': timestamp,

@@ -6,7 +6,7 @@ import {
 import * as registryClient from '../lambda/sync/registry-client';
 import { accountSecretName, CreateError, setMarketDataAccount } from '../lambda/endpoints/venue-account-create';
 
-const pem = generateKeyPairSync('rsa', { modulusLength: 2048 }).privateKey
+const pem = generateKeyPairSync('ed25519').privateKey
   .export({ type: 'pkcs8', format: 'pem' }).toString();
 const kalshi = { apiKey: 'key-1', privateKey: pem };
 

@@ -3,7 +3,7 @@ import {
   CreateSecretCommand, DeleteSecretCommand, DescribeSecretCommand, DescribeSecretCommandOutput, PutSecretValueCommand,
   ResourceExistsException, ResourceNotFoundException, SecretsManagerClient, TagResourceCommand,
 } from '@aws-sdk/client-secrets-manager';
-import { createPrivateKey } from 'crypto';
+import { createPrivateKey, KeyObject } from 'crypto';
 import { InvokeCommand, LambdaClient } from '@aws-sdk/client-lambda';
 import { platformRegions, replicaRegions } from '@gnome-trading-group/gnome-shared-cdk/dist/regions';
 import { registryFetch, resolveApiKey } from '../sync/registry-client';
@@ -53,16 +53,19 @@ export function credentialsFor(exchangeCode: string, fields: Fields, what: strin
 } {
   switch (exchangeCode) {
     case 'KALSHI': {
-      // Kalshi issues PKCS#1 keys (BEGIN RSA PRIVATE KEY), but the orchestrator reads only PKCS#8, so every key is
-      // stored as PKCS#8 whatever form it was uploaded in.
-      let privateKey: string;
+      // Only Ed25519: the gateways refuse RSA, which costs ~0.5 ms a signature on the order path. Stored as PKCS#8,
+      // the one form the orchestrator reads, whatever form it was uploaded in.
+      let key: KeyObject;
       try {
-        privateKey = createPrivateKey(text(fields, 'privateKey', what))
-          .export({ type: 'pkcs8', format: 'pem' }).toString().trim();
+        key = createPrivateKey(text(fields, 'privateKey', what));
       } catch (error) {
         if (error instanceof CreateError) throw error;
         throw new CreateError(400, `${what}: privateKey isn't a readable PEM private key`);
       }
+      if (key.asymmetricKeyType !== 'ed25519') {
+        throw new CreateError(400, `${what}: privateKey must be an Ed25519 key (Kalshi's default), not ${key.asymmetricKeyType}`);
+      }
+      const privateKey = key.export({ type: 'pkcs8', format: 'pem' }).toString().trim();
       const secret: Record<string, string> = { apiKey: text(fields, 'apiKey', what), privateKey };
       const subaccount = fields.subaccount;
       if (subaccount !== undefined && subaccount !== null && String(subaccount).trim() !== '') {

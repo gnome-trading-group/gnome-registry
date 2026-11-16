@@ -5,7 +5,7 @@ import {
   secretStatus,
 } from '../lambda/endpoints/venue-account-create';
 
-const pem = generateKeyPairSync('rsa', { modulusLength: 2048 }).privateKey
+const pem = generateKeyPairSync('ed25519').privateKey
   .export({ type: 'pkcs8', format: 'pem' }).toString();
 
 const polymarket = {
@@ -26,13 +26,12 @@ describe('venue account credentials', () => {
       .toThrow(/readable PEM/);
   });
 
-  it('stores a Kalshi key as PKCS#8, the only form the orchestrator reads, even when uploaded as PKCS#1', () => {
+  it('refuses an RSA Kalshi key, PKCS#1 or PKCS#8: the gateways sign with Ed25519 only', () => {
     const { privateKey } = generateKeyPairSync('rsa', { modulusLength: 2048 });
-    const pkcs1 = privateKey.export({ type: 'pkcs1', format: 'pem' }).toString();
-    expect(pkcs1).toContain('BEGIN RSA PRIVATE KEY');
-    const { secret } = credentialsFor('KALSHI', { apiKey: 'key', privateKey: pkcs1 }, 'credentials');
-    expect(secret.privateKey).toBe(privateKey.export({ type: 'pkcs8', format: 'pem' }).toString().trim());
-    expect(secret.privateKey.startsWith('-----BEGIN PRIVATE KEY-----')).toBe(true);
+    for (const type of ['pkcs1', 'pkcs8'] as const) {
+      const rsaPem = privateKey.export({ type, format: 'pem' }).toString();
+      expect(() => credentialsFor('KALSHI', { apiKey: 'key', privateKey: rsaPem }, 'credentials')).toThrow(/Ed25519/);
+    }
   });
 
   it('takes a Polymarket wallet\'s public addresses from the very credentials it signs with', () => {

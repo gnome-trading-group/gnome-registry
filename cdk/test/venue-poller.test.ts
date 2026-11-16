@@ -1,4 +1,4 @@
-import { constants, createPublicKey, generateKeyPairSync, verify } from 'crypto';
+import { createPublicKey, generateKeyPairSync, verify } from 'crypto';
 import { readFileSync } from 'fs';
 import { join } from 'path';
 import { fetchWithRetry } from '../lambda/sync/venues/http';
@@ -10,15 +10,20 @@ import { scaleDecimal } from '../lambda/sync/venues/types';
 import { venueKeyOf } from '../lambda/endpoints/treasury';
 
 describe('venue request signing', () => {
-  it('signs a Kalshi request over the timestamp, method and path without its query, with RSA-PSS', () => {
-    const { privateKey, publicKey } = generateKeyPairSync('rsa', { modulusLength: 2048 });
+  it('signs a Kalshi request over the timestamp, method and path without its query, with Ed25519', () => {
+    const { privateKey, publicKey } = generateKeyPairSync('ed25519');
     const pem = privateKey.export({ type: 'pkcs8', format: 'pem' }).toString();
     const headers = kalshiHeaders('key-id', pem, 'GET', '/trade-api/v2/portfolio/positions?limit=1000', 1_700_000_000_000);
     expect(headers['KALSHI-ACCESS-KEY']).toBe('key-id');
     expect(headers['KALSHI-ACCESS-TIMESTAMP']).toBe('1700000000000');
-    expect(verify('sha256', Buffer.from('1700000000000GET/trade-api/v2/portfolio/positions'), {
-      key: publicKey, padding: constants.RSA_PKCS1_PSS_PADDING, saltLength: 32,
-    }, Buffer.from(headers['KALSHI-ACCESS-SIGNATURE'], 'base64'))).toBe(true);
+    expect(verify(null, Buffer.from('1700000000000GET/trade-api/v2/portfolio/positions'), publicKey,
+      Buffer.from(headers['KALSHI-ACCESS-SIGNATURE'], 'base64'))).toBe(true);
+  });
+
+  it('refuses an RSA Kalshi key', () => {
+    const { privateKey } = generateKeyPairSync('rsa', { modulusLength: 2048 });
+    const pem = privateKey.export({ type: 'pkcs8', format: 'pem' }).toString();
+    expect(() => kalshiHeaders('key-id', pem, 'GET', '/trade-api/v2/portfolio/balance', 1)).toThrow(/Ed25519/);
   });
 
   it('signs a Polymarket US request with the Ed25519 seed, whether or not the public key follows it', () => {
@@ -79,7 +84,7 @@ describe('venue readers on captured answers', () => {
     return respond({ market_positions: [], cursor: '' });
   };
   const kalshiCredentials = () => {
-    const { privateKey } = generateKeyPairSync('rsa', { modulusLength: 2048 });
+    const { privateKey } = generateKeyPairSync('ed25519');
     return { apiKey: 'k', privateKey: privateKey.export({ type: 'pkcs8', format: 'pem' }).toString() };
   };
 
