@@ -247,7 +247,6 @@ beforeEach(() => {
   Object.assign(ssmParams, {
     '/gnome/orchestrator/ami/8core': 'ami-8',
     '/gnome/orchestrator/ami/16core': 'ami-16',
-    '/gnome/orchestrator/ami/4core-nosmt': 'ami-4-nosmt',
     '/gnome/orchestrator/ami/8core-nosmt': 'ami-8-nosmt',
     '/gnome/orchestrator/ami/standard': 'ami-std',
     '/gnome/market-data/api-url': 'https://md.test/api/',
@@ -490,29 +489,89 @@ describe('POST /strategy-sessions/launch', () => {
     expect(ec2Calls.filter((c) => c.kind === 'RunInstances')).toHaveLength(0);
   });
 
-  it.each(['paper', 'live'])('runs a standard-profile %s session on the standard AMI, defaulting to t3.small', async (mode) => {
+  it.each(['paper', 'live'])('runs a standard-profile %s session on the standard AMI, sized c7a.medium', async (mode) => {
     const body = launchBody({ mode }, { 'latency.profile': 'standard' });
     delete (body as any).instanceType;
 
     await launcher.handler(apiEvent('/strategy-sessions/launch', body));
 
     expect(runInstancesInput().ImageId).toBe('ami-std');
-    expect(runInstancesInput().InstanceType).toBe('t3.small');
+    expect(runInstancesInput().InstanceType).toBe('c7a.medium');
     expect(sessionEnv().LATENCY_PROFILE).toBe('standard');
+    expect(postBodies[0].config['sizing.tier']).toBe('standard');
   });
 
-  it.each([
-    ['paper', 'standard', 'ami-std'],
-    ['live', 'low_latency', 'ami-16'],
-  ])('defaults a %s session without a profile to %s and records it', async (mode, profile, ami) => {
+  it.each(['paper', 'live'])('defaults a %s session without a profile or tier to standard and records both', async (mode) => {
     const body = launchBody({ mode }) as any;
     delete body.config['latency.profile'];
 
     await launcher.handler(apiEvent('/strategy-sessions/launch', body));
 
-    expect(sessionEnv().LATENCY_PROFILE).toBe(profile);
-    expect(runInstancesInput().ImageId).toBe(ami);
-    expect(postBodies[0].config['latency.profile']).toBe(profile);
+    expect(sessionEnv().LATENCY_PROFILE).toBe('standard');
+    expect(runInstancesInput().ImageId).toBe('ami-std');
+    expect(postBodies[0].config['latency.profile']).toBe('standard');
+    expect(postBodies[0].config['sizing.tier']).toBe('standard');
+  });
+
+  it('sizes a quiet slow-tier session on t3.small, on the standard profile', async () => {
+    const body = launchBody({}, { 'sizing.tier': 'slow' }) as any;
+    delete body.instanceType;
+    delete body.config['latency.profile'];
+
+    await launcher.handler(apiEvent('/strategy-sessions/launch', body));
+
+    expect(runInstancesInput().InstanceType).toBe('t3.small');
+    expect(runInstancesInput().ImageId).toBe('ami-std');
+    expect(postBodies[0].config['latency.profile']).toBe('standard');
+    expect(postBodies[0].config['sizing.tier']).toBe('slow');
+  });
+
+  it('sizes a standard session reading more streams than c7a.medium holds on c7a.large', async () => {
+    knownStreams = Array.from({ length: 120 }, (_, i) => 1000 + i);
+    const body = launchBody({}, { 'latency.profile': 'standard', streams: knownStreams }) as any;
+    delete body.instanceType;
+
+    await launcher.handler(apiEvent('/strategy-sessions/launch', body));
+
+    expect(runInstancesInput().InstanceType).toBe('c7a.large');
+  });
+
+  it('sizes a low-latency tier session on c7i.2xlarge from its isolated-core AMI', async () => {
+    const body = launchBody({}, { 'sizing.tier': 'low_latency' }) as any;
+    delete body.instanceType;
+    delete body.config['latency.profile'];
+
+    await launcher.handler(apiEvent('/strategy-sessions/launch', body));
+
+    expect(runInstancesInput().InstanceType).toBe('c7i.2xlarge');
+    expect(runInstancesInput().ImageId).toBe('ami-8');
+    expect(postBodies[0].config['latency.profile']).toBe('low_latency');
+  });
+
+  it('keeps an instance type the launch names, whatever the tier would choose', async () => {
+    await launcher.handler(apiEvent('/strategy-sessions/launch',
+      launchBody({ instanceType: 'c7i.xlarge' }, { 'latency.profile': undefined, 'sizing.tier': 'slow' })));
+
+    expect(runInstancesInput().InstanceType).toBe('c7i.xlarge');
+  });
+
+  it.each([
+    [{ 'sizing.tier': 'fast' }, 'Unknown sizing.tier'],
+    [{ 'sizing.tier': 'slow', 'latency.profile': 'low_latency' }, 'runs latency.profile standard'],
+  ])('refuses a launch whose tier is unknown or contradicts its profile (%j)', async (config, message) => {
+    const response = await launcher.handler(apiEvent('/strategy-sessions/launch', launchBody({}, config)));
+
+    expect(response.statusCode).toBe(400);
+    expect(JSON.parse(response.body).message).toContain(message);
+    expect(ec2Calls.filter((c) => c.kind === 'RunInstances')).toHaveLength(0);
+  });
+
+  it('no longer offers c7a.xlarge, which starves a session on its one housekeeping core', async () => {
+    const response = await launcher.handler(apiEvent('/strategy-sessions/launch',
+      launchBody({ instanceType: 'c7a.xlarge' }, { 'latency.profile': 'low_latency' })));
+
+    expect(response.statusCode).toBe(400);
+    expect(JSON.parse(response.body).message).toContain('Unsupported instanceType c7a.xlarge');
   });
 
   it('runs c7i.large on the standard AMI', async () => {
@@ -525,7 +584,6 @@ describe('POST /strategy-sessions/launch', () => {
 
   it.each([
     ['c7i.2xlarge', 'ami-8'],
-    ['c7a.xlarge', 'ami-4-nosmt'],
     ['c7a.2xlarge', 'ami-8-nosmt'],
   ])('runs a low-latency session on %s from its isolated-core AMI, in the precision-time group', async (instanceType, ami) => {
     await launcher.handler(apiEvent('/strategy-sessions/launch',
@@ -537,7 +595,7 @@ describe('POST /strategy-sessions/launch', () => {
   });
 
   it.each([
-    'c7a.medium', 'c6a.large', 't3.medium', 'c7a.large', 'c7a.xlarge', 'c7a.2xlarge', 'c7i.2xlarge',
+    'c7a.medium', 'c6a.large', 't3.medium', 'c7a.large', 'c7a.2xlarge', 'c7i.2xlarge',
   ])('runs %s on the standard AMI', async (instanceType) => {
     await launcher.handler(apiEvent('/strategy-sessions/launch',
       launchBody({ instanceType }, { 'latency.profile': 'standard' })));

@@ -1,4 +1,5 @@
 import { APIGatewayProxyEvent } from 'aws-lambda';
+import { TIERS, Tier, defaultInstanceType, isTier, predictLoad, profileForTier, tierForProfile } from './session-sizing';
 import {
   EC2Client,
   DescribeSubnetsCommand,
@@ -74,7 +75,6 @@ export const INSTANCE_TYPES: Record<string, { lowLatencyAmi?: string }> = {
   't3.medium': {},
   'c7a.medium': {},
   'c7a.large': {},
-  'c7a.xlarge': { lowLatencyAmi: '4core-nosmt' },
   'c7a.2xlarge': { lowLatencyAmi: '8core-nosmt' },
   'c6a.large': {},
   'c7i.large': {},
@@ -82,14 +82,19 @@ export const INSTANCE_TYPES: Record<string, { lowLatencyAmi?: string }> = {
   'c7i.2xlarge': { lowLatencyAmi: '8core' },
   'c7i.4xlarge': { lowLatencyAmi: '16core' },
 };
-// t3.small ran a live one-listing session at ~9% CPU (under its 20% baseline, so credits grew) and ~630 MB used of
-// 1.9 GB (2026-10-16). Sessions that care about latency run the low-latency profile on dedicated cores instead.
-const DEFAULT_INSTANCE_TYPE: Record<string, string> = {
-  [STANDARD]: 't3.small',
-  [LOW_LATENCY]: 'c7i.4xlarge',
-};
 
 export const ACTIVE_STATUSES = ['SUBMITTED', 'STARTING', 'RUNNING'];
+
+/** Why a session can't run on {@code instanceType} with {@code profile}, or null when it can. */
+export function instanceTypeProblem(instanceType: string, profile: string): string | null {
+  if (!(instanceType in INSTANCE_TYPES)) {
+    return `Unsupported instanceType ${instanceType}; expected one of ${Object.keys(INSTANCE_TYPES).join(', ')}`;
+  }
+  if (profile === LOW_LATENCY && !INSTANCE_TYPES[instanceType].lowLatencyAmi) {
+    return `${instanceType} is too small to isolate cores; use latency.profile=standard`;
+  }
+  return null;
+}
 
 const DEFAULT_STOP_GRACE_MS = 5000;
 // Stays well under API Gateway's 29s integration timeout once the lookups, halt and termination are added.
@@ -686,22 +691,31 @@ async function handleLaunch(body: string | null) {
     return createResponse(400, { message: 'config.listings must be a non-empty array of listing IDs' });
   }
 
-  // Paper fills come from a simulated exchange that models its own latency, so isolated cores buy it nothing.
-  const profile = String(s.config['latency.profile'] ?? (s.mode === 'live' ? LOW_LATENCY : STANDARD)).toLowerCase();
+  // The sizing tier (slow, standard, low_latency) and the orchestrator's latency profile it implies; either may be
+  // given, and neither means standard, live or paper: a session that needs dedicated cores asks for them.
+  const rawTier = s.config['sizing.tier'];
+  const rawProfile = s.config['latency.profile'];
+  const askedTier = rawTier === undefined ? undefined : String(rawTier).toLowerCase();
+  if (askedTier !== undefined && !isTier(askedTier)) {
+    return createResponse(400, { message: `Unknown sizing.tier: ${askedTier}; expected one of ${TIERS.join(', ')}` });
+  }
+  const profile = rawProfile === undefined
+    ? (askedTier !== undefined ? profileForTier(askedTier) : STANDARD)
+    : String(rawProfile).toLowerCase();
   if (profile !== STANDARD && profile !== LOW_LATENCY) {
     return createResponse(400, { message: `Unknown latency.profile: ${profile}` });
   }
-  // Written back so the instance, the stored session and a relaunch all see the profile actually chosen, rather
-  // than each applying its own default.
-  s.config['latency.profile'] = profile;
-  const instanceType = s.instanceType ?? DEFAULT_INSTANCE_TYPE[profile];
-  if (!(instanceType in INSTANCE_TYPES)) {
-    return createResponse(400, {
-      message: `Unsupported instanceType ${instanceType}; expected one of ${Object.keys(INSTANCE_TYPES).join(', ')}`,
-    });
+  if (askedTier !== undefined && profileForTier(askedTier) !== profile) {
+    return createResponse(400, { message: `sizing.tier ${askedTier} runs latency.profile ${profileForTier(askedTier)}, not ${profile}` });
   }
-  if (profile === LOW_LATENCY && !INSTANCE_TYPES[instanceType].lowLatencyAmi) {
-    return createResponse(400, { message: `${instanceType} is too small to isolate cores; use latency.profile=standard` });
+  const tier: Tier = askedTier ?? tierForProfile(profile);
+  // Written back so the instance, the stored session and a relaunch all see the tier and profile actually chosen,
+  // rather than each applying its own default.
+  s.config['latency.profile'] = profile;
+  s.config['sizing.tier'] = tier;
+  if (s.instanceType !== undefined) {
+    const problem = instanceTypeProblem(s.instanceType, profile);
+    if (problem) return createResponse(400, { message: problem });
   }
 
   const isPython = String(s.config['strategy.type'] ?? '') === 'python';
@@ -794,6 +808,8 @@ async function handleLaunch(body: string | null) {
       message: `A session reads at most ${MAX_LEASE_STREAMS} streams; this one needs ${leaseStreams.length}`,
     });
   }
+  // Named, the size is the caller's; else the tier's, for the load the session's streams are predicted to bring.
+  const instanceType = s.instanceType ?? defaultInstanceType(tier, predictLoad(leaseStreams.length), isPython);
   // Before the session is recorded, so a missing API URL or key refuses the launch instead of failing a session.
   let marketData: MarketDataApi;
   try {

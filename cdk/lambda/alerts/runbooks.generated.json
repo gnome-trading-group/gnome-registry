@@ -665,9 +665,9 @@
       "url": "https://github.com/gnome-trading-group/gnome-registry/blob/main/docs/runbooks/alerts/SHARD_LOG_DIGEST.md"
     },
     "SHARD_OVER_CAPACITY": {
-      "summary": "A market-data shard has carried more published streams or collected records per second than its tier's cap for 10 minutes; its latency tail may be past target.",
+      "summary": "A market-data shard's load (published streams and collected records per second together) has been over its tier's caps for 10 minutes; its latency tail may be past target.",
       "firstSteps": [
-        "Read the title: published and records/s against the tier's caps (labels `published`, `max_published`, `records_per_second`, `max_records_per_second`).",
+        "Read the title: its load as a percentage, and the published streams and records/s behind it (labels `load_percent`, `published`, `max_published`, `records_per_second`, `max_records_per_second`).",
         "Check the reconciler's log for \"Relieving shard\" or \"Would relieve shard\" (dry run) lines about it.",
         "If relief can't move anything (\"no stream free to move\", or every stream with no room), look at the partition's `max_shards`."
       ],

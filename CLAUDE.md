@@ -121,6 +121,14 @@ synth step, so run `npm test` yourself before handing off.
     `GNOMEPY_VERSION` (python only) and `RESEARCH_COMMIT` or `STRATEGY_COMMIT`, none of which config can set, and the
     row records the SHA and the versions. An unknown commit, a missing file or a non-release pin is a 400 before anything is recorded. Callers
     name no versions.
+  - How big an instance: the request's `instanceType` if it names one (from `INSTANCE_TYPES` in the launcher), else
+    the size for its tier (`endpoints/session-sizing.ts`). Config `sizing.tier` is `slow`, `standard` or
+    `low_latency`; it implies `latency.profile` (only `low_latency` isolates cores), either may be given, a mismatch
+    is a 400, and neither means standard, live or paper; both are written back to the config. The size follows the
+    load the session's streams (traded and data-only) are predicted to bring, each at one busy listing's rate
+    (`RECORDS_PER_SECOND_PER_STREAM`, 20/s): slow sessions go on t3.small up to 500 records/s (a Python one 300/s),
+    else like standard; standard on c7a.medium up to 100 streams and 4,000 records/s (a Python one 1,000/s), else
+    c7a.large; low latency on c7i.2xlarge.
   - Where the launcher puts an instance: every session goes in the zone of the first of its region's gateways already
     running (from the `private_ip` that gateway advertises in `service-endpoints`; the first zone when none runs yet,
     or when the session trades through none). A `low_latency` session on a type that supports it also goes in the
