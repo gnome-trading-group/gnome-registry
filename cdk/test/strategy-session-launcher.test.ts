@@ -120,6 +120,7 @@ let patchStatus = 200;
 let postStatus = 200;
 // The gateways a launch asked to start, and how the route answers.
 let ensured: string[] = [];
+let paperInstanceAsks: any[] = [];
 let ensureStatus = 200;
 let sleeps: number[] = [];
 // Market-data API calls: each request, and the statuses successive lease POSTs answer with (then 200).
@@ -218,6 +219,7 @@ beforeEach(() => {
   patchStatusQueue = [];
   postStatus = 200;
   ensured = [];
+  paperInstanceAsks = [];
   ensureStatus = 200;
   runInstancesError = null;
   runInstancesErrors = [];
@@ -266,6 +268,11 @@ beforeEach(() => {
     }
     const path = url.replace('https://registry.test/api', '').split('?')[0];
     events.push(`${method} ${path}`);
+    if (path === '/gateways/paper-instance') {
+      paperInstanceAsks.push(Object.fromEntries(new URL(url).searchParams));
+      return ensureStatus === 200 ? jsonResponse({ gatewayKey: 'paper:kalshi:2' })
+        : jsonResponse({ message: 'endpoints down' }, ensureStatus);
+    }
     if (path === '/gateways/ensure') {
       ensured.push(new URL(url).searchParams.get('gatewayKey')!);
       return ensureStatus === 200 ? jsonResponse({ action: 'created' }) : jsonResponse({ message: 'ecs down' }, ensureStatus);
@@ -1155,11 +1162,49 @@ describe('market-data streams and leases', () => {
     }
   });
 
+  it('asks which paper gateway a session goes to on a release whose sessions ask too, and places it beside that one',
+    async () => {
+      ssmParams['/gnome/orchestrator/properties/1.12.2'] = JSON.stringify({
+        version: '1.12.2',
+        properties: { 'order.gateway.paper': 'true', 'order.gateway.paper.resolve': 'true' },
+      });
+      gatewayIps['paper:kalshi:2'] = gatewayIps['paper:kalshi:main'] ?? '10.0.1.20';
+      try {
+        const res = await launch();
+
+        expect(res.statusCode).toBe(200);
+        expect(ensured).toEqual([]);
+        expect(paperInstanceAsks).toEqual([{ sessionId: expect.any(String), exchange: 'kalshi', listings: '1' }]);
+        expect(events).toContain('GetItem order-gateway#paper:kalshi:2');
+        expect(events.indexOf('GET /gateways/paper-instance')).toBeLessThan(events.indexOf('RunInstances'));
+      } finally {
+        delete ssmParams['/gnome/orchestrator/properties/1.12.2'];
+        delete gatewayIps['paper:kalshi:2'];
+      }
+    });
+
+  it('fails a paper session, launching nothing, when no paper gateway can be chosen for it', async () => {
+    ssmParams['/gnome/orchestrator/properties/1.12.2'] = JSON.stringify({
+      version: '1.12.2',
+      properties: { 'order.gateway.paper': 'true', 'order.gateway.paper.resolve': 'true' },
+    });
+    ensureStatus = 502;
+    try {
+      const res = await launch();
+
+      expect(res.statusCode).toBe(502);
+      expect(events).not.toContain('RunInstances');
+      expect(patchBodies[0].failureReason).toContain('Order gateway start failed');
+    } finally {
+      delete ssmParams['/gnome/orchestrator/properties/1.12.2'];
+    }
+  });
+
   it('decides a release\'s paper path from its own property list, never the latest one', async () => {
     ssmParams['/gnome/orchestrator/properties/latest'] =
       JSON.stringify({ version: '1.13.0', properties: { 'order.gateway.paper': 'true' } });
     try {
-      expect(await launcher.tradesPaperThroughGateways('1.12.2')).toBe(false);
+      expect(await launcher.paperGateways('1.12.2')).toBe('none');
       await launch();
       expect(ensured).toEqual([]);
     } finally {

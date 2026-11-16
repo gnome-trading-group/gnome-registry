@@ -149,6 +149,10 @@ export const ALERT_TYPES: Record<string, AlertType> = {
     debounce: 1,
   },
   GATEWAY_VENUE_RATE_LIMITED: { severity: 'WARNING', debounce: 1 },
+  // A paper gateway past its caps refuses new paper sessions until others leave or another instance takes them.
+  PAPER_GATEWAY_FULL: { severity: 'WARNING', debounce: 1 },
+  // Raised by the gateway itself after five minutes over, so it isn't debounced again here.
+  PAPER_GATEWAY_OVERLOADED: { severity: 'WARNING', debounce: 1 },
   // A polling source that failed has stopped polling however it was started, so it pages like a scheduled run.
   PIPELINE_FAILED: {
     severity: e => e.labels?.trigger === 'scheduled' || e.labels?.kind === 'source' ? 'ERROR' : 'INFO',

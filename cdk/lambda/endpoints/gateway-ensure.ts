@@ -56,7 +56,7 @@ async function registryApiKey(): Promise<string> {
 
 const sqs = new SQSClient({});
 
-const lambdaDeps: EnsureDeps = {
+export const lambdaDeps: EnsureDeps = {
   async markWanted(gatewayKey) {
     // Through the API: this Lambda runs outside the VPC to reach the queue, so it can't reach the database itself.
     const res = await fetch(`${REGISTRY_API_URL}gateways?${new URLSearchParams({ gatewayKey })}`, {

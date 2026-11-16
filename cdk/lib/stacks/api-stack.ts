@@ -245,6 +245,37 @@ export class ApiStack extends cdk.Stack {
     }));
     this.route('gateways/ensure', new apigw.LambdaIntegration(gatewayWanted, { scopePermissionToMethod: false }),
       { POST: [SERVICE, PERSON] });
+    // Which paper gateway a paper session links to on its venue, a venue running as many as its sessions need: the
+    // launcher and a paper session about to say hello ask it. It reads the venue's paper gateways' endpoint items and
+    // marks the chosen one wanted, as ensure does; outside the VPC, for the endpoints table and the reconciler's queue.
+    const paperInstance = new lambda.NodejsFunction(this, 'gateway-paper-instance-lambda', {
+      entry: join(__dirname, '..', '..', 'lambda', 'endpoints', 'gateway-paper-instance.ts'),
+      ...this.nodeJsProps,
+      bundling: {
+        externalModules: ['pg-native', '@aws-sdk/*'],
+      },
+      environment: {
+        REGISTRY_API_URL: `https://${this.api.restApiId}.execute-api.${this.region}.${this.urlSuffix}/${ApiStack.STAGE_NAME}/`,
+        REGISTRY_API_KEY_ID: this.apiKey.keyId,
+        RECONCILER_QUEUE_URL: `https://sqs.${this.region}.${this.urlSuffix}/${this.account}/${RECONCILER_QUEUE}`,
+        SERVICE_ENDPOINTS_REGION: SERVICE_ENDPOINTS.region,
+      },
+    });
+    paperInstance.addToRolePolicy(new iam.PolicyStatement({
+      actions: ['apigateway:GET'],
+      resources: [`arn:aws:apigateway:${this.region}::/apikeys/${this.apiKey.keyId}`],
+    }));
+    paperInstance.addToRolePolicy(new iam.PolicyStatement({
+      actions: ['sqs:SendMessage'],
+      resources: [reconcilerQueueArn],
+    }));
+    paperInstance.addToRolePolicy(new iam.PolicyStatement({
+      actions: ['dynamodb:BatchGetItem'],
+      resources: [`arn:aws:dynamodb:${SERVICE_ENDPOINTS.region}:${this.account}:table/${SERVICE_ENDPOINTS.tableName}`],
+      conditions: { 'ForAllValues:StringLike': { 'dynamodb:LeadingKeys': ['order-gateway#paper:*'] } },
+    }));
+    this.route('gateways/paper-instance',
+      new apigw.LambdaIntegration(paperInstance, { scopePermissionToMethod: false }), { GET: [SERVICE] });
     // Every gateway as it stands, for the controller: its row, and what it writes of itself in `service-endpoints`
     // (gnome-shared-infra's table, primary region). Outside the VPC, to reach DynamoDB; reads only gateways' items.
     const gatewayStatus = new lambda.NodejsFunction(this, 'gateway-status-lambda', {

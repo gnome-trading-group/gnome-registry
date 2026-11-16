@@ -519,15 +519,30 @@ export interface OrchestratorProperties {
 // session pinned to an earlier release simulates its venues itself and wants no gateway.
 const PAPER_GATEWAY_PROPERTY = 'order.gateway.paper';
 
-/** Whether a release's paper sessions trade through paper gateways: its own property list says so, never the latest. */
-export async function tradesPaperThroughGateways(version: string): Promise<boolean> {
+// Published (true) by the releases whose paper sessions ask /gateways/paper-instance which of a venue's paper gateways
+// to link to; an earlier release's sessions link to paper:<venue>:main.
+const PAPER_RESOLVE_PROPERTY = 'order.gateway.paper.resolve';
+
+/** How a release's paper sessions reach their venues: themselves, paper:<venue>:main, or the instance chosen for them. */
+export type PaperGateways = 'none' | 'main' | 'resolved';
+
+/** A release's own property list says how its paper sessions trade, never the latest's. */
+export async function paperGateways(version: string): Promise<PaperGateways> {
   try {
     const known = JSON.parse(
       await getParameter(VERSION_PARAMETER_REGION, `${ORCHESTRATOR_PROPERTIES_PREFIX}/${version}`)) as OrchestratorProperties;
-    return known.properties?.[PAPER_GATEWAY_PROPERTY] === 'true';
+    if (known.properties?.[PAPER_GATEWAY_PROPERTY] !== 'true') return 'none';
+    return known.properties?.[PAPER_RESOLVE_PROPERTY] === 'true' ? 'resolved' : 'main';
   } catch {
-    return false;
+    return 'none';
   }
+}
+
+/** How many of the session's listings are on each exchange: a paper gateway's books for it, and at most its streams. */
+export function listingsPerExchange(exchangeOf: Map<number, number>): Map<number, number> {
+  const counts = new Map<number, number>();
+  for (const exchangeId of exchangeOf.values()) counts.set(exchangeId, (counts.get(exchangeId) ?? 0) + 1);
+  return counts;
 }
 
 // Releases from before per-version publishing have no list of their own, so they're checked against the latest one.
@@ -839,12 +854,26 @@ async function handleLaunch(body: string | null) {
   // A live session trades through its venues' order gateways, and a paper one through gateways simulating them (on a
   // release that does), each running only while wanted: started here, so each boots while the session's instance
   // does. The session asks again while it waits for them.
-  const gatewayKeyOf = s.mode === 'live' ? liveGatewayKey
-    : await tradesPaperThroughGateways(orchestratorVersion) ? paperGatewayKey : null;
-  if (gatewayKeyOf) {
+  // A paper session on a release that asks which of a venue's paper gateways to use is given one here too, so it boots
+  // with the session; the session asks again whenever it links, and may land elsewhere then.
+  const paperMode = s.mode === 'paper' ? await paperGateways(orchestratorVersion) : 'none';
+  const gatewayKeys = new Map<number, string>();
+  if (s.mode === 'live' || paperMode !== 'none') {
     try {
-      for (const exchange of exchanges.values()) {
-        await registryFetch('/gateways/ensure', 'POST', {}, { gatewayKey: gatewayKeyOf(exchange.exchange_code) });
+      const listingsOn = listingsPerExchange(exchangeOf);
+      for (const [exchangeId, exchange] of exchanges) {
+        if (paperMode === 'resolved') {
+          const chosen = await registryFetch('/gateways/paper-instance', 'GET', undefined, {
+            sessionId: s.sessionId,
+            exchange: exchange.exchange_code.toLowerCase(),
+            listings: String(listingsOn.get(exchangeId) ?? 0),
+          });
+          gatewayKeys.set(exchangeId, chosen.gatewayKey);
+          continue;
+        }
+        const gatewayKey = s.mode === 'live' ? liveGatewayKey(exchange.exchange_code) : paperGatewayKey(exchange.exchange_code);
+        await registryFetch('/gateways/ensure', 'POST', {}, { gatewayKey });
+        gatewayKeys.set(exchangeId, gatewayKey);
       }
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -865,9 +894,9 @@ async function handleLaunch(body: string | null) {
   // Every session goes beside its own region's gateway, saving a cross-zone hop on each order and report. A
   // low-latency session also goes into the precision-time group, so what it measures against other hosts is good to
   // microseconds.
-  const localGateways = gatewayKeyOf
-    ? [...exchanges.values()].filter((e) => e.region === region).map((e) => gatewayKeyOf(e.exchange_code))
-    : [];
+  const localGateways = [...exchanges].filter(([, e]) => e.region === region)
+    .map(([exchangeId]) => gatewayKeys.get(exchangeId))
+    .filter((key): key is string => key !== undefined);
   const preferredZone = s.availabilityZone ?? await gatewayZone(localGateways, network);
   const group = profile === LOW_LATENCY && supportsPrecisionTime(instanceType) ? network.precisionTimeGroup : undefined;
   const attempts = placements(network.subnets, preferredZone, group, s.availabilityZone !== undefined);

@@ -481,6 +481,22 @@
       ],
       "url": "https://github.com/gnome-trading-group/gnome-registry/blob/main/docs/runbooks/alerts/ORDER_GATEWAY_UNLINKED.md"
     },
+    "PAPER_GATEWAY_FULL": {
+      "summary": "A paper order gateway is refusing new paper sessions because it holds as many books or distinct streams as its caps allow.",
+      "firstSteps": [
+        "Read the label `load` for the books and streams it holds against its caps.",
+        "Check the venue's other paper gateways (controller, Gateways page) for one with room."
+      ],
+      "url": "https://github.com/gnome-trading-group/gnome-registry/blob/main/docs/runbooks/alerts/PAPER_GATEWAY_FULL.md"
+    },
+    "PAPER_GATEWAY_OVERLOADED": {
+      "summary": "A paper order gateway's books have lagged the market by more than 5 ms at p99 for five minutes running.",
+      "firstSteps": [
+        "Read the labels for records/s, streams and books.",
+        "Check whether the venue's markets are unusually busy (a game going live) or the gateway's host is saturated."
+      ],
+      "url": "https://github.com/gnome-trading-group/gnome-registry/blob/main/docs/runbooks/alerts/PAPER_GATEWAY_OVERLOADED.md"
+    },
     "PIPELINE_FAILED": {
       "summary": "A data or research pipeline run failed, or a polling source crashed too often and stopped.",
       "firstSteps": [

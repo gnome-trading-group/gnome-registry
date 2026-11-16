@@ -44,6 +44,19 @@ export interface GatewayEndpoint {
   canHandOver: boolean;
   // Stopping for a roll, its orders left resting for the next process on its host.
   handover: boolean;
+  // When its process started, so a restart is told apart from one still running; null from an older release.
+  startedAt: string | null;
+  // A paper gateway's load against its caps; null for a live one or an older release.
+  paper: PaperLoad | null;
+}
+
+/** What a paper gateway carries against its caps: books (a session's listing each) and distinct streams. */
+export interface PaperLoad {
+  books: number;
+  streams: number;
+  recordsPerSecond: number;
+  maxBooks: number;
+  maxStreams: number;
 }
 
 // The phases a roll goes through; the first three are a roll under way.
@@ -97,7 +110,7 @@ const isoOfMs = (item: Item, name: string) => (item[name]?.N ? new Date(Number(i
 // Written in epoch nanoseconds; milliseconds keep every digit a timestamp needs within a double.
 const writtenAtMs = (item: Item) => Number(BigInt(item.written_at_ns?.N ?? '0') / 1_000_000n);
 
-function endpointOf(item: Item | undefined, nowMs: number): GatewayEndpoint | null {
+export function endpointOf(item: Item | undefined, nowMs: number): GatewayEndpoint | null {
   if (!item) return null;
   const written = writtenAtMs(item);
   if (nowMs - written > ENDPOINT_FRESH_MS) return null;
@@ -112,6 +125,16 @@ function endpointOf(item: Item | undefined, nowMs: number): GatewayEndpoint | nu
     workingOrders: num(item, 'working_orders'),
     canHandOver: item.can_hand_over?.BOOL === true,
     handover: item.handover?.BOOL === true,
+    startedAt: isoOfMs(item, 'started_at_ms'),
+    paper: item.paper_max_books?.N
+      ? {
+        books: num(item, 'paper_books'),
+        streams: num(item, 'paper_streams'),
+        recordsPerSecond: num(item, 'paper_records_per_second'),
+        maxBooks: num(item, 'paper_max_books'),
+        maxStreams: num(item, 'paper_max_streams'),
+      }
+      : null,
   };
 }
 
@@ -193,7 +216,7 @@ const dynamo = new DynamoDBClient({ region: process.env.SERVICE_ENDPOINTS_REGION
 const ssm = new SSMClient({ region: process.env.SERVICE_ENDPOINTS_REGION });
 const LATEST_VERSION_PARAMETER = process.env.LATEST_VERSION_PARAMETER ?? '';
 
-const lambdaDeps: StatusDeps = {
+export const lambdaDeps: StatusDeps = {
   async rows() {
     const res = await fetch(`${REGISTRY_API_URL}gateways`, { headers: { 'x-api-key': await registryApiKey() } });
     if (!res.ok) throw new Error(`Couldn't read the gateways (${res.status})`);
