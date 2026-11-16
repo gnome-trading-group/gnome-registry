@@ -21,6 +21,19 @@ describe('gateways', () => {
     expect(() => handler.generateModifyQuery(live, JSON.stringify({ wanted: false }))).toThrow('wanted');
   });
 
+  it('records a roll request from the roll route only, stamped by the database clock', () => {
+    const fromPerson = new GatewayHandler();
+    expect(() => fromPerson.generateModifyQuery(live, JSON.stringify({ rollRequestedBy: 'a@b.c' })))
+      .toThrow('POST /gateways/roll');
+
+    const fromService = new GatewayHandler();
+    (fromService as unknown as { fromService: boolean }).fromService = true;
+    const update = fromService.generateModifyQuery(live, JSON.stringify({ rollRequestedBy: 'a@b.c' }));
+    expect(update.text).toContain('roll_requested_at = NOW()');
+    expect(update.values).toEqual(['a@b.c', 'live:kalshi:main']);
+    expect(() => fromService.generateModifyQuery(live, JSON.stringify({ rollRequestedBy: '' }))).toThrow('rollRequestedBy');
+  });
+
   it('creates a paper gateway on its exchange the first time it is wanted, and only marks it after', () => {
     const query = generateWantPaperQuery('paper:polymarket_intl:main');
     expect(query.text).toContain('INSERT INTO account_master.gateway');

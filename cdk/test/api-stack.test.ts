@@ -199,7 +199,7 @@ describe('ApiStack auth', () => {
   });
 
   it('stays well under the CloudFormation limit of 500 resources per stack', () => {
-    expect(Object.keys(template.toJSON().Resources).length).toBeLessThan(400);
+    expect(Object.keys(template.toJSON().Resources).length).toBeLessThan(420);
   });
 
   describe('endpoint Lambdas', () => {

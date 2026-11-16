@@ -10,6 +10,9 @@ import * as cognito from 'aws-cdk-lib/aws-cognito';
 import * as ssm from 'aws-cdk-lib/aws-ssm';
 import { join } from 'path';
 import { RECONCILER_QUEUE } from '../../lambda/endpoints/gateway-reconciler-queue';
+
+// Where gnome-orchestrator publishes its latest release (its StorageStack), in the primary region.
+const ORCHESTRATOR_LATEST_VERSION_PARAMETER = '/gnome/orchestrator/latest-version';
 import { Runtime } from 'aws-cdk-lib/aws-lambda';
 import {
   API_KEY_SECRET_NAMES, ApiKeySecret, CallerKind, GnomeApiAuthorizer, platformRegions, RouteMethods, SERVICE_ENDPOINTS,
@@ -254,8 +257,13 @@ export class ApiStack extends cdk.Stack {
         REGISTRY_API_URL: `https://${this.api.restApiId}.execute-api.${this.region}.${this.urlSuffix}/${ApiStack.STAGE_NAME}/`,
         REGISTRY_API_KEY_ID: this.apiKey.keyId,
         SERVICE_ENDPOINTS_REGION: SERVICE_ENDPOINTS.region,
+        LATEST_VERSION_PARAMETER: ORCHESTRATOR_LATEST_VERSION_PARAMETER,
       },
     });
+    gatewayStatus.addToRolePolicy(new iam.PolicyStatement({
+      actions: ['ssm:GetParameter'],
+      resources: [`arn:aws:ssm:${SERVICE_ENDPOINTS.region}:${this.account}:parameter${ORCHESTRATOR_LATEST_VERSION_PARAMETER}`],
+    }));
     gatewayStatus.addToRolePolicy(new iam.PolicyStatement({
       actions: ['apigateway:GET'],
       resources: [`arn:aws:apigateway:${this.region}::/apikeys/${this.apiKey.keyId}`],
@@ -267,6 +275,37 @@ export class ApiStack extends cdk.Stack {
     }));
     this.route('gateways/status', new apigw.LambdaIntegration(gatewayStatus, { scopePermissionToMethod: false }),
       { GET: [SERVICE, PERSON, BOT] });
+    // An operator asking for a running gateway to be rolled onto another release without cancelling its orders. People
+    // only, so a roll names who asked. It records the request on the row (through `PATCH /gateways`) and wakes the
+    // reconciler, which does the roll; outside the VPC, to read the gateway's roll item and reach the queue.
+    const gatewayRoll = new lambda.NodejsFunction(this, 'gateway-roll-lambda', {
+      entry: join(__dirname, '..', '..', 'lambda', 'endpoints', 'gateway-roll.ts'),
+      ...this.nodeJsProps,
+      bundling: {
+        externalModules: ['pg-native', '@aws-sdk/*'],
+      },
+      environment: {
+        REGISTRY_API_URL: `https://${this.api.restApiId}.execute-api.${this.region}.${this.urlSuffix}/${ApiStack.STAGE_NAME}/`,
+        REGISTRY_API_KEY_ID: this.apiKey.keyId,
+        RECONCILER_QUEUE_URL: `https://sqs.${this.region}.${this.urlSuffix}/${this.account}/${RECONCILER_QUEUE}`,
+        SERVICE_ENDPOINTS_REGION: SERVICE_ENDPOINTS.region,
+      },
+    });
+    gatewayRoll.addToRolePolicy(new iam.PolicyStatement({
+      actions: ['apigateway:GET'],
+      resources: [`arn:aws:apigateway:${this.region}::/apikeys/${this.apiKey.keyId}`],
+    }));
+    gatewayRoll.addToRolePolicy(new iam.PolicyStatement({
+      actions: ['sqs:SendMessage'],
+      resources: [reconcilerQueueArn],
+    }));
+    gatewayRoll.addToRolePolicy(new iam.PolicyStatement({
+      actions: ['dynamodb:GetItem'],
+      resources: [`arn:aws:dynamodb:${SERVICE_ENDPOINTS.region}:${this.account}:table/${SERVICE_ENDPOINTS.tableName}`],
+      conditions: { 'ForAllValues:StringLike': { 'dynamodb:LeadingKeys': ['order-gateway#*#roll'] } },
+    }));
+    this.route('gateways/roll', new apigw.LambdaIntegration(gatewayRoll, { scopePermissionToMethod: false }),
+      { POST: [PERSON] });
 
     new ssm.StringParameter(this, 'RegistryApiUrl', {
       parameterName: ApiStack.API_URL_PARAMETER,

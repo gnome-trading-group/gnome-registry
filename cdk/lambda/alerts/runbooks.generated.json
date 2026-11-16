@@ -280,6 +280,15 @@
       ],
       "url": "https://github.com/gnome-trading-group/gnome-registry/blob/main/docs/runbooks/alerts/GATEWAY_RESTARTED.md"
     },
+    "GATEWAY_ROLL_FAILED": {
+      "summary": "A roll an operator asked for didn't bring the order gateway up on its target release; it was rolled back (ERROR) or the rollback failed too (CRITICAL).",
+      "firstSteps": [
+        "Find the gateway in the alert key (`GATEWAY_ROLL_FAILED:<live|paper>:<exchange>:<instance>`) and the from/to releases in the labels.",
+        "Read its roll item `order-gateway#<key>#roll` in `service-endpoints` (us-east-1), or the gateway's page in the controller, for the phase it reached and why.",
+        "CRITICAL: check whether orders still rest at the venue (`working orders` on the gateway page, or `procedures/check-venue-orders.md`) and whether sessions still quote."
+      ],
+      "url": "https://github.com/gnome-trading-group/gnome-registry/blob/main/docs/runbooks/alerts/GATEWAY_ROLL_FAILED.md"
+    },
     "GATEWAY_START_STUCK": {
       "summary": "An order gateway that sessions want hasn't become READY 6 minutes after the reconciler started it.",
       "firstSteps": [

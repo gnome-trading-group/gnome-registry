@@ -23,6 +23,9 @@ export const MARKET_DATA_BAD_AFTER_MS = 60_000;
 // A planned gateway stop cancels a session's orders before it goes, and a restart is back in about a minute; a link
 // down this long with orders still working is a gateway that crashed or a session that can't find it again.
 export const ORDER_GATEWAY_UNLINKED_AFTER_MS = 60_000;
+// A roll stops a gateway without cancelling and starts it again on its host, so links are down with orders working
+// on purpose: about a minute, or a few if it rolls back. Past this the roll has gone wrong, and the alert is due.
+export const ORDER_GATEWAY_ROLL_HOLD_MS = 6 * 60_000;
 export const MARKET_DATA_BAD_HELD_AFTER_MS = 5 * 60_000;
 // Orders with a fill in this window have their venue fees checked against the registry's schedules; a cent per order
 // covers the one Polymarket US rounding we couldn't explain (2026-10-15).

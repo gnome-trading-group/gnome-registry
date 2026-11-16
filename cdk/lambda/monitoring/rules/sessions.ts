@@ -3,7 +3,8 @@ import { Finding, finding, Mode, seconds } from './types';
 import {
   BOOK_RESYNCS_PER_5M, CLOCK_ERROR_BOUND_MAX_NANOS, CLOCK_STATUS_MAX_AGE_MS, DISK_FREE_MIN_BYTES, DISK_FREE_MIN_SEGMENTS, HOST_CPU_BUSY_PERMILLE, HOST_CPU_STEAL_PERMILLE,
   HOST_MEM_AVAILABLE_MIN_PERCENT, HOT_PATH_STALL_MS, JOURNAL_BACKLOG_AGE_MS, JOURNAL_BACKLOG_SEGMENTS,
-  MARKET_DATA_BAD_AFTER_MS, MARKET_DATA_BAD_HELD_AFTER_MS, NO_HEARTBEAT_AFTER_MS, ORDER_GATEWAY_UNLINKED_AFTER_MS,
+  MARKET_DATA_BAD_AFTER_MS, MARKET_DATA_BAD_HELD_AFTER_MS, NO_HEARTBEAT_AFTER_MS, ORDER_GATEWAY_ROLL_HOLD_MS,
+  ORDER_GATEWAY_UNLINKED_AFTER_MS,
   SILENT_AFTER_MS,
 } from './thresholds';
 
@@ -42,6 +43,7 @@ export async function sessions(client: PoolClient, now: Date): Promise<Finding[]
     SELECT s.session_id, s.strategy_id, st.name AS strategy_name, s.mode, s.started_at, s.last_heartbeat_at, s.health
     FROM strategy.session s JOIN strategy.strategy st ON st.strategy_id = s.strategy_id
     WHERE s.status = 'RUNNING'`)).rows;
+  const rolling = running.length ? await rollingGateways(client, now) : new Set<string>();
   for (const s of running) {
     const mode: Mode = s.mode;
     const fields = { strategyId: s.strategy_id, strategyName: s.strategy_name, sessionId: s.session_id };
@@ -103,6 +105,7 @@ export async function sessions(client: PoolClient, now: Date): Promise<Finding[]
     }
     for (const link of health.orderGateways ?? []) {
       if (link.linked || link.workingOrders === 0 || link.unlinkedMs < ORDER_GATEWAY_UNLINKED_AFTER_MS) continue;
+      if (rolling.has(link.key)) continue;
       on('critical', 'ORDER_GATEWAY_UNLINKED', link.key,
         `Unlinked from ${link.key} for ${seconds(link.unlinkedMs)} with ${link.workingOrders} order(s) working`,
         { facts: { unlinkedMs: link.unlinkedMs, workingOrders: link.workingOrders } });
@@ -122,6 +125,14 @@ export async function sessions(client: PoolClient, now: Date): Promise<Finding[]
     hostFindings(health, on);
   }
   return findings;
+}
+
+// Gateways an operator asked to roll recently enough that their links are expected to be down.
+async function rollingGateways(client: PoolClient, now: Date): Promise<Set<string>> {
+  const rows = (await client.query(
+    'SELECT gateway_key FROM account_master.gateway WHERE roll_requested_at > $1',
+    [new Date(now.getTime() - ORDER_GATEWAY_ROLL_HOLD_MS)])).rows;
+  return new Set(rows.map((row) => row.gateway_key as string));
 }
 
 async function holds(client: PoolClient, strategyId: number, listingId: number, mode: Mode): Promise<boolean> {

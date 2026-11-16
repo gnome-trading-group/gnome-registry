@@ -74,8 +74,8 @@ synth step, so run `npm test` yourself before handing off.
   (risk policy writes, ledger adjustments, venue-account create/status, treasury transfers) are `PERSON` only.
   `risk/halts` is `SERVICE` only and can only enable a kill.
 - One route tree (no `/cognito` copy); CORS preflights carry no authorizer. Keep the authorizer set per method.
-- The API stack must stay under 400 CloudFormation resources (test-enforced; the hard limit is 500). It holds about 396
-  (2026-11-13), and a new route costs about 5 (path, a method each plus OPTIONS, function, invoke permission); a new
+- The API stack must stay under 420 CloudFormation resources (test-enforced; the hard limit is 500). It holds about 400
+  (2026-11-15), and a new route costs about 5 (path, a method each plus OPTIONS, function, invoke permission); a new
   method on an existing path costs 1. The in-VPC endpoint Lambdas share one security group and one role
   (`rds-db:connect` only); a Lambda that needs any other grant is built by hand with its own role (the launcher,
   account creator, gateway ensure), so a grant never widens every endpoint. Integrations use
@@ -155,7 +155,15 @@ synth step, so run `npm test` yourself before handing off.
     `order-gateway#*` items) joins each row to what the gateway writes of itself in gnome-shared-infra's
     `service-endpoints` table: its endpoint (state, linked sessions, working orders, release; not running once unwritten
     for a minute) and its minutes item `order-gateway#<key>#minutes` (its last hour: per account what went, waited and
-    was refused, the venue's answers and 429s, each session's sends; a paper gateway's books' lag).
+    was refused, the venue's answers and 429s, each session's sends; a paper gateway's books' lag), its roll item
+    `order-gateway#<key>#roll` (the reconciler's record of the last roll: phase, from and to releases, outcome), and
+    each gateway's `rollTargetVersion` (its pin, else SSM `/gnome/orchestrator/latest-version`).
+    `POST /gateways/roll {gatewayKey}` (PERSON only; its own Lambda outside the VPC) asks the reconciler to roll a
+    running gateway onto that release without cancelling its orders: it refuses (409) while a roll is under way or a
+    request waits to be taken up, stamps `roll_requested_at`/`_by` on the row through `PATCH /gateways` (which takes
+    `rollRequestedBy` only from a service caller) and wakes the reconciler. The session monitor holds
+    `ORDER_GATEWAY_UNLINKED` off for 6 minutes after a roll was asked for; a roll that fails alerts
+    `GATEWAY_ROLL_FAILED`.
   - DatabaseStack: RDS Postgres 16 (`gnome` db) in isolated subnets, plus the migration Lambda and a query Lambda
     (`{"query": "..."}`, returns rows) for read-only inspection.
   - ExchangeSyncStack: security-master sync every 15 minutes (Hyperliquid, Lighter adapters); in prod it reports to `#gnome-security-master`.

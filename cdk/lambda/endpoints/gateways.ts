@@ -1,6 +1,6 @@
 import { APIGatewayProxyEvent, APIGatewayProxyEventQueryStringParameters } from 'aws-lambda';
 import { PoolClient } from 'pg';
-import { getActor, ResourceHandler, ValidationError, withTransaction } from './base';
+import { getActor, isService, ResourceHandler, ValidationError, withTransaction } from './base';
 import { connectLedgerDatabase, createResponse, isPositiveInt } from './ledger-common';
 import { NOW, set, Sql, sql, where } from './sql';
 
@@ -19,6 +19,9 @@ interface IUpdateGateway {
   orchestratorVersion?: string | null;
   // Records that a session wants the gateway now; the registry's clock stamps it, not the caller's.
   wanted?: boolean;
+  // Asks the gateway reconciler to roll the gateway, for this person; the registry's clock stamps it. Only the roll
+  // route sends it (as a service), after checking no roll is under way, so a person's PATCH can't skip that check.
+  rollRequestedBy?: string;
 }
 
 export class AssignmentError extends Error {
@@ -71,6 +74,13 @@ function wantsPaper(params: APIGatewayProxyEventQueryStringParameters | null, bo
 }
 
 export class GatewayHandler extends ResourceHandler {
+  private fromService = false;
+
+  async handleEvent(event: APIGatewayProxyEvent) {
+    this.fromService = isService(event);
+    return super.handleEvent(event);
+  }
+
   async modifyOne(params: APIGatewayProxyEventQueryStringParameters | null, body: string | null) {
     if (!wantsPaper(params, body)) return super.modifyOne(params, body);
     return this.runWrite(async () => {
@@ -98,10 +108,18 @@ export class GatewayHandler extends ResourceHandler {
   generateModifyQuery(row: any, body: string): Sql {
     const g = JSON.parse(body) as IUpdateGateway;
     if (g.wanted !== undefined && g.wanted !== true) throw new ValidationError('wanted can only be true');
+    if (g.rollRequestedBy !== undefined) {
+      if (!this.fromService) throw new ValidationError('a roll is asked for through POST /gateways/roll');
+      if (typeof g.rollRequestedBy !== 'string' || !g.rollRequestedBy) {
+        throw new ValidationError('rollRequestedBy must name who asked for the roll');
+      }
+    }
     return sql`UPDATE account_master.gateway SET ${set({
       profile: profile(row, g.profile),
       orchestrator_version: orchestratorVersion(g.orchestratorVersion),
       wanted_at: g.wanted ? NOW : undefined,
+      roll_requested_at: g.rollRequestedBy ? NOW : undefined,
+      roll_requested_by: g.rollRequestedBy,
       date_modified: NOW,
     })} WHERE gateway_key = ${row['gateway_key']} RETURNING *`;
   }

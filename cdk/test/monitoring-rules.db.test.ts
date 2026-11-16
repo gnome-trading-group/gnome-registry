@@ -108,6 +108,25 @@ describeDb('monitoring rules against Postgres', () => {
     ]);
   });
 
+  it('holds the unlinked alert off for a few minutes after a roll of the gateway was asked for', async () => {
+    await session('s1', { mode: 'live', health: { ...HEALTHY, orderGateways: [
+      { key: 'live:kalshi:main', linked: false, unlinkedMs: 90_000, workingOrders: 2 },
+    ] } });
+    await client.query(`INSERT INTO account_master.gateway (gateway_key, mode, exchange_id, region, profile)
+      VALUES ('live:kalshi:main', 'live', 1, 'us-east-1', 'standard') ON CONFLICT DO NOTHING`);
+    const unlinked = async (rollAskedMsAgo: number) => {
+      await client.query('UPDATE account_master.gateway SET roll_requested_at = $1 WHERE gateway_key = $2',
+        [new Date(now.getTime() - rollAskedMsAgo), 'live:kalshi:main']);
+      return (await runRules(client, now)).filter(f => f.kind === 'ORDER_GATEWAY_UNLINKED').length;
+    };
+    try {
+      expect(await unlinked(2 * 60_000)).toBe(0);
+      expect(await unlinked(7 * 60_000)).toBe(1);
+    } finally {
+      await client.query(`DELETE FROM account_master.gateway WHERE gateway_key = 'live:kalshi:main'`);
+    }
+  });
+
   const GB = 1024 ** 3;
   const host = (f: Record<string, number> = {}) => ({
     cpuBusyPermille: 400, cpuStealPermille: 0, memAvailableBytes: GB, memTotalBytes: 2 * GB,

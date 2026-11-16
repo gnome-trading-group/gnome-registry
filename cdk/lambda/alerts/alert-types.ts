@@ -140,6 +140,12 @@ export const ALERT_TYPES: Record<string, AlertType> = {
   GATEWAY_SWEEP_FAILED: { severity: 'CRITICAL', debounce: 1 },
   // From the gateway reconciler: a gateway's task was replaced without being asked to while orders worked.
   GATEWAY_RESTARTED: { severity: 'ERROR', debounce: 1 },
+  // From the gateway reconciler: a roll an operator asked for didn't end on its target. Rolled back to the release it
+  // was on, it errs; a rollback that failed too leaves orders resting behind a gateway that isn't up, and pages.
+  GATEWAY_ROLL_FAILED: {
+    severity: e => e.labels?.rolledBack === 'true' ? 'ERROR' : 'CRITICAL',
+    debounce: 1,
+  },
   GATEWAY_VENUE_RATE_LIMITED: { severity: 'WARNING', debounce: 1 },
   // A polling source that failed has stopped polling however it was started, so it pages like a scheduled run.
   PIPELINE_FAILED: {
