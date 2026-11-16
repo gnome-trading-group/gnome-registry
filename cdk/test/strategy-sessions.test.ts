@@ -1,3 +1,7 @@
+import { PoolClient } from 'pg';
+import { hasTopLevelOrderBy, ResourceHandler } from '../lambda/endpoints/base';
+import { EventHandler } from '../lambda/endpoints/events';
+import { RiskPolicyHandler } from '../lambda/endpoints/risk-policies';
 import { StrategySessionHandler, parseStatuses } from '../lambda/endpoints/strategy-sessions';
 
 const handler = new StrategySessionHandler();
@@ -76,5 +80,49 @@ describe('strategy session queries', () => {
     expect(parseStatuses(['A', 'B'])).toEqual(['A', 'B']);
     expect(parseStatuses(' A, B ,')).toEqual(['A', 'B']);
     expect(parseStatuses(undefined)).toEqual([]);
+  });
+});
+
+// The query a handler's GET would run, read from a client that only records it.
+async function listQuery(resource: ResourceHandler, params: Record<string, string>): Promise<string> {
+  const queries: string[] = [];
+  resource.client = { query: async (q: { text: string }) => { queries.push(q.text); return { rows: [] }; } } as unknown as PoolClient;
+  await resource.get(params);
+  return queries[0];
+}
+
+describe('strategy session list ordering', () => {
+  it('orders by creation time, then session id, despite the ORDER BYs in its subqueries', async () => {
+    const text = await listQuery(new StrategySessionHandler(), { sortBy: 'date_created', sortOrder: 'desc', limit: '50' });
+    expect(text).toMatch(/ORDER BY date_created DESC, session_id DESC LIMIT/);
+  });
+
+  it('sorts by strategy and session id', async () => {
+    expect(await listQuery(new StrategySessionHandler(), { sortBy: 'strategy_id', sortOrder: 'asc' }))
+      .toMatch(/ORDER BY strategy_id ASC, session_id ASC LIMIT/);
+    expect(await listQuery(new StrategySessionHandler(), { sortBy: 'session_id', sortOrder: 'desc' }))
+      .toMatch(/ORDER BY session_id DESC LIMIT/);
+  });
+
+  it('ignores a column it does not sort by', async () => {
+    expect(await listQuery(new StrategySessionHandler(), { sortBy: 'config' })).toMatch(/ORDER BY 1 LIMIT/);
+  });
+
+  it('leaves the order of a handler that orders its own rows', async () => {
+    const events = await listQuery(new EventHandler(), { sortBy: 'volume_24h', sortOrder: 'desc' });
+    expect(events.match(/ORDER BY/g)).toHaveLength(1);
+    const policies = await listQuery(new RiskPolicyHandler(), { sortBy: 'policy_id' });
+    expect(policies.match(/ORDER BY/g)).toHaveLength(1);
+  });
+});
+
+describe('hasTopLevelOrderBy', () => {
+  it('sees only an ORDER BY outside parentheses and string literals', () => {
+    expect(hasTopLevelOrderBy('SELECT * FROM t ORDER BY a')).toBe(true);
+    expect(hasTopLevelOrderBy('SELECT * FROM t\n      ORDER BY a')).toBe(true);
+    expect(hasTopLevelOrderBy('SELECT array_agg(x ORDER BY x) FROM t')).toBe(false);
+    expect(hasTopLevelOrderBy('WITH v AS (SELECT * FROM t ORDER BY a) SELECT * FROM v')).toBe(false);
+    expect(hasTopLevelOrderBy("SELECT ')' AS p, 'x ORDER BY y' FROM t")).toBe(false);
+    expect(hasTopLevelOrderBy('SELECT recorder_by FROM t')).toBe(false);
   });
 });

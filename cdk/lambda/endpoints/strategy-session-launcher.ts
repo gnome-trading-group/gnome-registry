@@ -62,20 +62,25 @@ const LEASE_RELEASE_TIMEOUT_MS = 2000;
 const STANDARD = 'standard';
 const LOW_LATENCY = 'low_latency';
 
-// vCPUs per supported size. Each low-latency size has an AMI whose isolcpus range matches it; sizes up to
-// c7i.xlarge have too few cores to isolate any, so they only run the standard profile. t3.small is burstable (2 GB):
-// for paper sessions that mostly wait, at about a quarter of c7i.large's price, but a busy session runs it out of
-// credits and its two vCPUs share one core. c7a.medium is one whole core (no SMT, 2 GB) at about what a busy t3.small
-// costs with its surplus credits; c6a.large is two unthrottled vCPUs (4 GB) for a little less than c7i.large.
-export const INSTANCE_VCPUS: Record<string, number> = {
-  't3.small': 2,
-  'c7a.medium': 1,
-  'c6a.large': 2,
-  'c7i.large': 2,
-  'c7i.xlarge': 4,
-  'c7i.4xlarge': 16,
-  'c7i.8xlarge': 32,
-  'c7i.12xlarge': 48,
+// Every size a session may run on, and for each that can run the low-latency profile, its AMI variant: an isolcpus
+// layout for that size (gnome-orchestrator ami-stack.ts), `<vcpus>core` where a core has two hardware threads (c7i)
+// and `<vcpus>core-nosmt` where it has one (c7a). Sizes without one have too few cores to isolate any and only run the
+// standard profile. t3.small and t3.medium are burstable (2 and 4 GB): for paper sessions that mostly wait, but a
+// busy session runs them out of credits and their two vCPUs share one core. c7a sizes are whole cores (no SMT);
+// c7a.medium is one, at about what a busy t3.small costs with its surplus credits; c6a.large is two unthrottled vCPUs
+// (4 GB) for a little less than c7i.large.
+export const INSTANCE_TYPES: Record<string, { lowLatencyAmi?: string }> = {
+  't3.small': {},
+  't3.medium': {},
+  'c7a.medium': {},
+  'c7a.large': {},
+  'c7a.xlarge': { lowLatencyAmi: '4core-nosmt' },
+  'c7a.2xlarge': { lowLatencyAmi: '8core-nosmt' },
+  'c6a.large': {},
+  'c7i.large': {},
+  'c7i.xlarge': {},
+  'c7i.2xlarge': { lowLatencyAmi: '8core' },
+  'c7i.4xlarge': { lowLatencyAmi: '16core' },
 };
 // t3.small ran a live one-listing session at ~9% CPU (under its 20% baseline, so credits grew) and ~630 MB used of
 // 1.9 GB (2026-10-16). Sessions that care about latency run the low-latency profile on dedicated cores instead.
@@ -357,7 +362,9 @@ async function getParameter(region: string, name: string): Promise<string> {
 
 export function amiParameterName(profile: string, instanceType: string): string {
   if (profile === STANDARD) return `${AMI_PARAMETER_PREFIX}/standard`;
-  return `${AMI_PARAMETER_PREFIX}/${INSTANCE_VCPUS[instanceType]}core`;
+  const variant = INSTANCE_TYPES[instanceType]?.lowLatencyAmi;
+  if (!variant) throw new Error(`${instanceType} has no low-latency AMI`);
+  return `${AMI_PARAMETER_PREFIX}/${variant}`;
 }
 
 // Where a session reports a fatal error (published by the alerting stack). Read once per container, and optional:
@@ -673,12 +680,12 @@ async function handleLaunch(body: string | null) {
   // than each applying its own default.
   s.config['latency.profile'] = profile;
   const instanceType = s.instanceType ?? DEFAULT_INSTANCE_TYPE[profile];
-  if (!(instanceType in INSTANCE_VCPUS)) {
+  if (!(instanceType in INSTANCE_TYPES)) {
     return createResponse(400, {
-      message: `Unsupported instanceType ${instanceType}; expected one of ${Object.keys(INSTANCE_VCPUS).join(', ')}`,
+      message: `Unsupported instanceType ${instanceType}; expected one of ${Object.keys(INSTANCE_TYPES).join(', ')}`,
     });
   }
-  if (profile === LOW_LATENCY && INSTANCE_VCPUS[instanceType] <= 4) {
+  if (profile === LOW_LATENCY && !INSTANCE_TYPES[instanceType].lowLatencyAmi) {
     return createResponse(400, { message: `${instanceType} is too small to isolate cores; use latency.profile=standard` });
   }
 

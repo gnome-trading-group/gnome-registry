@@ -5,6 +5,30 @@ import { raw, Sql, sql } from './sql';
 
 const DEFAULT_PAGE_SIZE = 5000;
 
+/**
+ * Whether a select already orders its rows. An ORDER BY inside parentheses (a subquery, an aggregate, a CTE) orders
+ * something else, and taking one for the select's own would leave its pages unordered.
+ */
+export function hasTopLevelOrderBy(text: string): boolean {
+  let depth = 0;
+  let inString = false;
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (inString) {
+      if (c === "'") inString = false;
+    } else if (c === "'") {
+      inString = true;
+    } else if (c === '(') {
+      depth++;
+    } else if (c === ')') {
+      depth--;
+    } else if (depth === 0 && /^ORDER\s+BY\b/i.test(text.slice(i, i + 12)) && (i === 0 || /\s/.test(text[i - 1]))) {
+      return true;
+    }
+  }
+  return false;
+}
+
 const CORS_HEADERS = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Credentials': 'true',
@@ -269,7 +293,6 @@ export class ResourceHandler {
   sortTieBreaker(): string | null {
     return null;
   }
-
   async get(params: APIGatewayProxyEventQueryStringParameters | null) {
     if (params?.count === 'true') {
       const result = await this.client.query(sql`SELECT COUNT(*) FROM (${this.generateSelectQuery(params)}) t`);
@@ -281,7 +304,7 @@ export class ResourceHandler {
 
     let query = this.generateSelectQuery(params);
 
-    if (!query.text.toUpperCase().includes('ORDER BY')) {
+    if (!hasTopLevelOrderBy(query.text)) {
       const allowed = this.allowedSortColumns();
       const sortBy = params?.sortBy && allowed.includes(params.sortBy) ? params.sortBy : null;
       const sortOrder = params?.sortOrder === 'desc' ? 'DESC' : 'ASC';

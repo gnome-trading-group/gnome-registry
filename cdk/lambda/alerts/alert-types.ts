@@ -108,6 +108,8 @@ export const ALERT_TYPES: Record<string, AlertType> = {
   COLLECTOR_SHARD_DOWN: { severity: 'ERROR', debounce: 1 },
   // A shard's unexpected errors (3+ in an hour; the reconciler waits that long itself): worth a look, never a page.
   SHARD_ERRORS: { severity: 'WARNING', debounce: 1 },
+  // A market-data shard over its tier's published or records-per-second cap for 10 minutes (the reconciler waits).
+  SHARD_OVER_CAPACITY: { severity: 'WARNING', debounce: 1 },
   // gnome-market-data's daily count of every shard's unexpected errors; posted only on a day with some.
   SHARD_LOG_DIGEST: { severity: 'INFO', debounce: 1 },
   STREAM_NOT_LIVE: { severity: 'WARNING', debounce: 1 },

@@ -139,9 +139,12 @@ export class StrategySessionHandler extends ResourceHandler {
   }
 
   allowedSortColumns(): string[] {
-    return ['started_at', 'date_created', 'date_modified', 'status'];
+    return ['started_at', 'date_created', 'date_modified', 'status', 'strategy_id', 'session_id'];
   }
 
+  sortTieBreaker(): string {
+    return 'session_id';
+  }
   // Overridden to tell "no such session" (404) apart from "session exists but is no longer in an expected
   // status" (409), which callers treat as a normal outcome of a race rather than an error.
   async modifyOne(params: APIGatewayProxyEventQueryStringParameters | null, body: string | null) {

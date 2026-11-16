@@ -22,7 +22,7 @@ Those streams aren't collected until there is room; they count as uncovered from
 ## Diagnose
 
 - Accounts: the source's accounts and their budgets (Market Data → Credentials, `md.source_account`), and how many streams the rules want for the source, against `max_per_connection` × connections.
-- Shard cap: the partition's shards and how full they are (`max_streams_per_shard`), and whether a roll is in progress (`roll_to_version`).
+- Shard cap: the partition's shards and how full they are against their tier's `shard_caps`, and whether a roll is in progress (`roll_to_version`).
 
 ## Resolve
 

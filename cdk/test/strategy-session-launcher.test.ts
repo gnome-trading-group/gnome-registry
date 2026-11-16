@@ -243,8 +243,10 @@ beforeEach(() => {
     [`gnomepy-research@${RESEARCH_SHA}:platform.properties`]: '# The platform\norchestrator=1.12.2\ngnomepy=2.20.2\n',
   };
   Object.assign(ssmParams, {
+    '/gnome/orchestrator/ami/8core': 'ami-8',
     '/gnome/orchestrator/ami/16core': 'ami-16',
-    '/gnome/orchestrator/ami/32core': 'ami-32',
+    '/gnome/orchestrator/ami/4core-nosmt': 'ami-4-nosmt',
+    '/gnome/orchestrator/ami/8core-nosmt': 'ami-8-nosmt',
     '/gnome/orchestrator/ami/standard': 'ami-std',
     '/gnome/market-data/api-url': 'https://md.test/api/',
   });
@@ -514,7 +516,22 @@ describe('POST /strategy-sessions/launch', () => {
     expect(runInstancesInput().InstanceType).toBe('c7i.large');
   });
 
-  it.each(['c7a.medium', 'c6a.large'])('runs %s on the standard AMI', async (instanceType) => {
+  it.each([
+    ['c7i.2xlarge', 'ami-8'],
+    ['c7a.xlarge', 'ami-4-nosmt'],
+    ['c7a.2xlarge', 'ami-8-nosmt'],
+  ])('runs a low-latency session on %s from its isolated-core AMI, in the precision-time group', async (instanceType, ami) => {
+    await launcher.handler(apiEvent('/strategy-sessions/launch',
+      launchBody({ instanceType }, { 'latency.profile': 'low_latency' })));
+
+    expect(runInstancesInput().ImageId).toBe(ami);
+    expect(runInstancesInput().InstanceType).toBe(instanceType);
+    expect(runInstancesInput().Placement).toEqual({ GroupName: 'gnome-precision-time-pg' });
+  });
+
+  it.each([
+    'c7a.medium', 'c6a.large', 't3.medium', 'c7a.large', 'c7a.xlarge', 'c7a.2xlarge', 'c7i.2xlarge',
+  ])('runs %s on the standard AMI', async (instanceType) => {
     await launcher.handler(apiEvent('/strategy-sessions/launch',
       launchBody({ instanceType }, { 'latency.profile': 'standard' })));
 
@@ -541,6 +558,8 @@ describe('POST /strategy-sessions/launch', () => {
     [{ instanceType: 'c7i.large' }, {}, 'too small to isolate'],
     [{ instanceType: 't3.small' }, {}, 'too small to isolate'],
     [{ instanceType: 'c7a.medium' }, {}, 'too small to isolate'],
+    [{ instanceType: 'c7a.large' }, {}, 'too small to isolate'],
+    [{ instanceType: 't3.medium' }, {}, 'too small to isolate'],
     [{}, { 'latency.profile': 'turbo' }, 'Unknown latency.profile'],
     [{ availabilityZone: 'us-east-1z' }, {}, 'No platform network subnet'],
   ])('rejects %p %p before creating anything', async (overrides, config, message) => {
