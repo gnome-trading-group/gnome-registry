@@ -2,7 +2,7 @@ import { fetchWithRetry } from './http';
 import { polymarketIntlHeaders } from './signers';
 import {
   BreakdownMarket, CreditBreakdown, CreditKind, CreditProgram, DAY_MS, isoDate, payoutDay, PendingCredit, PollTarget,
-  PRICE_SCALE, scaleDecimal, VenueCredit, VenueReading,
+  PRICE_SCALE, scaleDecimal, SETTLEMENT_LOOKBACK_MS, SIZE_SCALE, VenueCredit, VenueReading, VenueSettlement,
 } from './types';
 import { IncentiveProgramReading } from './types';
 
@@ -104,9 +104,45 @@ export async function readPolymarketIntl(target: PollTarget): Promise<VenueReadi
   } while (cursor !== null);
   const balances = await tokenBalances(funder, positions.map(p => p.venueKey));
   positions.forEach((p, i) => { p.quantity = balances[i]; });
+  // Without them recon only waits for the classifier, as it always could; that's no reason to lose the reading.
+  let settlementsError: string | undefined;
+  const settlements = await readPolymarketIntlRedemptions(funder).catch((error: unknown) => {
+    settlementsError = error instanceof Error ? error.message : String(error);
+    console.error(`Reading ${target.label} redemptions failed: ${settlementsError}`);
+    return undefined;
+  });
   return {
-    cashTotal: cash, cashAvailable: cash, portfolioValue, redeemableValue, positions, raw: { positions: rows },
+    cashTotal: cash, cashAvailable: cash, portfolioValue, redeemableValue, positions, settlements,
+    raw: { positions: rows, ...(settlementsError ? { settlementsError } : {}) },
   };
+}
+
+// A wallet that redeems resolved tokens as soon as it can holds them for seconds, so they leave the positions list
+// long before the classifier records the market's value. Each redemption names the token and how many paid how much,
+// which is the market's settlement for that token. Its price field reads 0 even for a winner, so it isn't used.
+export function parsePolymarketIntlRedemption(row: Record<string, any>): VenueSettlement | null {
+  if (row.type !== 'REDEEM' || typeof row.token_id !== 'string' || row.token_id === '') return null;
+  const size = scaleDecimal(row.size, SIZE_SCALE);
+  const settledAt = new Date(Number(row.timestamp) * 1000);
+  if (size <= 0n || row.usdc_size == null || Number.isNaN(settledAt.getTime())) return null;
+  return { venueKey: row.token_id, settledAt, price: scaleDecimal(row.usdc_size, PRICE_SCALE) * SIZE_SCALE / size };
+}
+
+async function readPolymarketIntlRedemptions(funder: string): Promise<VenueSettlement[]> {
+  // Like the credits, activity wants the user on every page, cursor or not.
+  const filters = `user=${funder}&limit=${PAGE_LIMIT}&type=REDEEM`
+    + `&start=${Math.floor((Date.now() - SETTLEMENT_LOOKBACK_MS) / 1000)}`;
+  const settlements: VenueSettlement[] = [];
+  let cursor: string | null = null;
+  do {
+    const page = cursor === null ? filters : `${filters}&cursor=${encodeURIComponent(cursor)}`;
+    const res = await fetchWithRetry(`${DATA_API}/activity?${page}`, () => ({ headers: { 'User-Agent': USER_AGENT } }));
+    if (!res.ok) throw new Error(`Polymarket redemptions failed: ${res.status} ${await res.text()}`);
+    const body = await res.json() as { data: Record<string, any>[] | null; pagination?: { next_cursor: string | null } };
+    settlements.push(...(body.data ?? []).map(parsePolymarketIntlRedemption).filter((s): s is VenueSettlement => s !== null));
+    cursor = body.pagination?.next_cursor ?? null;
+  } while (cursor !== null);
+  return settlements;
 }
 
 // What Polymarket pays a wallet on its own, and its deposits and withdrawals, as the public activity feed lists them.

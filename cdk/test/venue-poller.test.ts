@@ -3,7 +3,7 @@ import { readFileSync } from 'fs';
 import { join } from 'path';
 import { fetchWithRetry } from '../lambda/sync/venues/http';
 import { parseKalshiSettlement, readKalshi } from '../lambda/sync/venues/kalshi';
-import { readPolymarketIntl } from '../lambda/sync/venues/polymarket-intl';
+import { parsePolymarketIntlRedemption, readPolymarketIntl } from '../lambda/sync/venues/polymarket-intl';
 import { kalshiHeaders, polymarketUsHeaders, polymarketUsKey } from '../lambda/sync/venues/signers';
 import {
   parseBalances, parsePolymarketUsResolution, parsePositions, readPolymarketUs,
@@ -306,6 +306,46 @@ describe('venue readers on captured answers', () => {
     expect(reading.positions?.map(p => [p.venueKey, p.quantity])).toEqual(tokens.map(t => [t, held[t]]));
     const batches = fetch.mock.calls.filter(([, init]) => String(init?.body).includes('0x4e1273f4'));
     expect(batches).toHaveLength(2);
+  });
+
+  it('takes what each redeemed Polymarket Intl token paid as its market\'s settlement', async () => {
+    jest.spyOn(Date, 'now').mockReturnValue(Date.parse('2026-11-17T20:00:00Z'));
+    polygonEnv();
+    const fetch = jest.spyOn(global, 'fetch').mockImplementation(async (url, init) => {
+      const target = String(url);
+      if (target.includes('rpc.example')) return polygon(init, 0n);
+      if (target.includes('/activity')) return respond(fixture('polymarket-intl-redemptions.json'));
+      return respond({ data: [], pagination: { next_cursor: null } });
+    });
+    const reading = await readPolymarketIntl(PM_INTL_TARGET);
+    const at = new Date('2026-11-17T19:40:14Z');
+    expect(reading.settlements).toEqual([
+      { venueKey: '25397772689856692521177086195415743785253983472342784040401081626454033239387', settledAt: at, price: 0n },
+      { venueKey: '43959191727198250058559629836183981196835546949851427041422675095666903217054', settledAt: at,
+        price: 1_000_000_000n },
+    ]);
+    const asked = new URL(String(fetch.mock.calls.find(([u]) => String(u).includes('/activity'))?.[0]));
+    expect(asked.searchParams.get('type')).toBe('REDEEM');
+    expect(asked.searchParams.get('user')).toBe('0xe65019f319d3b20a9883b43283c91ca9d8c81cfb');
+    expect(asked.searchParams.get('start')).toBe(String(Date.parse('2026-11-16T20:00:00Z') / 1000));
+    expect(parsePolymarketIntlRedemption({ type: 'TRADE', token_id: '1', price: 1, timestamp: 1 })).toBeNull();
+    expect(parsePolymarketIntlRedemption({ type: 'REDEEM', token_id: '1', size: 4, usdc_size: 2, timestamp: 1 })?.price)
+      .toBe(500_000_000n);
+  });
+
+  it('keeps a Polymarket Intl reading whose redemptions can\'t be read, saying why', async () => {
+    polygonEnv();
+    jest.spyOn(console, 'error').mockImplementation(() => undefined);
+    jest.spyOn(global, 'fetch').mockImplementation(async (url, init) => {
+      const target = String(url);
+      if (target.includes('rpc.example')) return polygon(init, 0xf4240n);
+      if (target.includes('/activity')) return new Response('bad request', { status: 400 });
+      return respond({ data: [], pagination: { next_cursor: null } });
+    });
+    const reading = await readPolymarketIntl(PM_INTL_TARGET);
+    expect(reading.cashTotal).toBe(1_000_000_000n);
+    expect(reading.settlements).toBeUndefined();
+    expect((reading.raw as { settlementsError: string }).settlementsError).toBe('Polymarket redemptions failed: 400 bad request');
   });
 
   it('fails a Polymarket Intl read whose token balances don\'t answer every token asked', async () => {

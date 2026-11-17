@@ -1,0 +1,39 @@
+{
+  "data": [
+    {
+      "proxy_wallet": "0xc82adea49e8d480fcaeb577d066fa8e68e778eb0",
+      "timestamp": 1794944414,
+      "condition_id": "0x43b7680c432df7814b47a56bfa3e0380772f8843b01cc6ca44ba8dfeab2247d0",
+      "type": "REDEEM",
+      "size": 20.0,
+      "usdc_size": 0.0,
+      "transaction_hash": "0x547df2a0dc0acfcf6a368761250208dfd3feb85a2dc844d3ffd497cbf823885b",
+      "price": 0.0,
+      "token_id": "25397772689856692521177086195415743785253983472342784040401081626454033239387",
+      "side": "",
+      "outcome_index": 1,
+      "title": "Counter-Strike: BBL vs Phantom (BO3) - Tipsport RUSH Brno Group B",
+      "slug": "cs2-bbl1-pha-2026-11-17",
+      "outcome": "Phantom"
+    },
+    {
+      "proxy_wallet": "0xc82adea49e8d480fcaeb577d066fa8e68e778eb0",
+      "timestamp": 1794944414,
+      "condition_id": "0x43b7680c432df7814b47a56bfa3e0380772f8843b01cc6ca44ba8dfeab2247d0",
+      "type": "REDEEM",
+      "size": 57.866667,
+      "usdc_size": 57.866667,
+      "transaction_hash": "0x547df2a0dc0acfcf6a368761250208dfd3feb85a2dc844d3ffd497cbf823885b",
+      "price": 0.0,
+      "token_id": "43959191727198250058559629836183981196835546949851427041422675095666903217054",
+      "side": "",
+      "outcome_index": 0,
+      "title": "Counter-Strike: BBL vs Phantom (BO3) - Tipsport RUSH Brno Group B",
+      "slug": "cs2-bbl1-pha-2026-11-17",
+      "outcome": "BBL"
+    }
+  ],
+  "pagination": {
+    "next_cursor": null
+  }
+}

@@ -295,6 +295,24 @@ describeDb('treasury, against Postgres', () => {
     expect((await client.query(`SELECT 1 FROM treasury.position_check WHERE venue_key = 'T'`)).rowCount).toBe(0);
   });
 
+  it('expects a redeemed Polymarket Intl winner\'s pUSD, and no tokens, before the classifier records it', async () => {
+    const pm = await account(2, 'quiet-falcon-01');
+    await open(pm, 100);
+    await live('a', [600, 601]);
+    await trade('a', 600, 0, 10, 40, 10);
+    await trade('a', 601, 0, 5, 60, 5);
+    const redeemed = new Date();
+    const settlements = [
+      { venueKey: '111', settledAt: redeemed.toISOString(), price: String(DOLLAR) },
+      { venueKey: '222', settledAt: redeemed.toISOString(), price: '0' },
+    ];
+    for (const minutes of [1, 7]) {
+      const result = await snapshot(pm, 10300, new Date(redeemed.getTime() + minutes * MINUTE), { positions: [], settlements });
+      expect([result.cashStatus, result.positionBreaks]).toEqual(['OK', 0]);
+    }
+    expect((await client.query('SELECT 1 FROM treasury.position_check')).rowCount).toBe(0);
+  });
+
   it('holds a Polymarket Intl position to the unit: a 6-decimal fill agrees, one unit off breaks', async () => {
     const pm = await account(2, 'quiet-falcon-01');
     await open(pm, 100);
