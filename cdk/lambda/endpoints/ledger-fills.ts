@@ -21,14 +21,21 @@ function fillTime(alias: string): string {
     THEN to_timestamp(${alias}.event_time_ns::numeric / 1e9) ELSE ${alias}.recorded_at END`;
 }
 
-const SELECT_FILLS = `
+// A fill's order is in the session that sent it: the fill's own for a venue fill, its origin for a recovered one.
+// Looked up per fill by its key: joined, the planner hashes every order in the ledger to filter a page of fills.
+const orderOfFill = (session: string) => `LEFT JOIN LATERAL (
+    SELECT o.role, o.episode_id, o.client_oid_counter FROM ledger.order o
+    WHERE o.session_id = ${session} AND o.client_oid_counter = f.client_oid_counter
+  ) ord ON TRUE`;
+const ORDER_OF_FILL = orderOfFill(`CASE f.source WHEN 'VENUE' THEN f.session_id WHEN 'RECOVERY' THEN f.origin_session_id END`);
+
+const selectFills = (orderJoin: string) => `
   SELECT f.*, l.exchange_security_symbol AS symbol, l.exchange_id, spec.tick_size, spec.lot_size,
     mk.bid AS mark_bid, mk.ask AS mark_ask, mk.last_trade AS mark_last_trade,
     ord.role AS order_role, ord.episode_id AS order_episode_id
   FROM ledger.fill f
   ${listingColumns('f')}
-  LEFT JOIN ledger.order ord ON ord.client_oid_counter = f.client_oid_counter
-    AND ord.session_id = CASE f.source WHEN 'VENUE' THEN f.session_id WHEN 'RECOVERY' THEN f.origin_session_id END
+  ${orderJoin}
   LEFT JOIN LATERAL (
     SELECT bid, ask, last_trade FROM ledger.mark m
     WHERE m.listing_id = f.listing_id AND f.fill_price IS NOT NULL AND ${pricedMark('m')}
@@ -55,26 +62,38 @@ function orderFilter(params: Record<string, string | undefined>): { where: strin
 // the episode of the first hedge sent after it, since the strategy hedges whatever gap it holds with the episode
 // that is open. The opening order's own fills are taken by id rather than by time: fill times are the venue's clock
 // and order times the OMS's, so a fill hedged within the clocks' skew could look newer than its hedge.
-function episodeFilter(params: Record<string, string | undefined>): { where: string; values: unknown[] } | null {
+// Every fill here is of an order the session sent, so orders are found by their key rather than through the fill's
+// source. The session's hedges are read once, not once per quote fill.
+function episodeQuery(params: Record<string, string | undefined>): { text: string; values: unknown[] } | null {
   if (params.episodeId === undefined) return null;
   if (!params.sessionId || !isSessionId(params.sessionId)) throw new Error('episodeId needs a sessionId');
   if (!/^[1-9]\d*$/.test(params.episodeId)) throw new Error('episodeId must be a positive integer');
   return {
-    where: `((f.source = 'VENUE' AND f.session_id = $1) OR (f.source = 'RECOVERY' AND f.origin_session_id = $1))
-      AND ((ord.role = 'HEDGE' AND ord.episode_id = $2)
-        OR (ord.role = 'QUOTE' AND (ord.client_oid_counter = $2 OR (
-          ${fillTime('f')} <= (SELECT max(h.opened_at) FROM ledger.order h WHERE h.session_id = $1 AND h.episode_id = $2)
-          AND (SELECT h.episode_id FROM ledger.order h
-            WHERE h.session_id = $1 AND h.role = 'HEDGE' AND h.opened_at >= ${fillTime('f')}
-            ORDER BY h.opened_at LIMIT 1) = $2))))`,
+    text: `
+      WITH hedges AS MATERIALIZED (
+        SELECT episode_id, opened_at FROM ledger.order WHERE session_id = $1 AND role = 'HEDGE'
+      )
+      ${selectFills(orderOfFill('$1'))}
+      WHERE ((f.source = 'VENUE' AND f.session_id = $1) OR (f.source = 'RECOVERY' AND f.origin_session_id = $1))
+        AND ((ord.role = 'HEDGE' AND ord.episode_id = $2)
+          OR (ord.role = 'QUOTE' AND (ord.client_oid_counter = $2 OR (
+            ${fillTime('f')} <= (SELECT max(h.opened_at) FROM hedges h WHERE h.episode_id = $2)
+            AND (SELECT h.episode_id FROM hedges h WHERE h.opened_at >= ${fillTime('f')}
+              ORDER BY h.opened_at LIMIT 1) = $2))))
+      ORDER BY f.fill_id LIMIT ${ORDER_FILLS_LIMIT}`,
     values: [params.sessionId, params.episodeId],
   };
 }
 
 export function buildFillsQuery(params: Record<string, string | undefined>): { text: string; values: unknown[] } {
-  const order = orderFilter(params) ?? episodeFilter(params);
+  const episode = episodeQuery(params);
+  if (episode) return episode;
+  const order = orderFilter(params);
   if (order) {
-    return { text: `${SELECT_FILLS} WHERE ${order.where} ORDER BY f.fill_id LIMIT ${ORDER_FILLS_LIMIT}`, values: order.values };
+    return {
+      text: `${selectFills(ORDER_OF_FILL)} WHERE ${order.where} ORDER BY f.fill_id LIMIT ${ORDER_FILLS_LIMIT}`,
+      values: order.values,
+    };
   }
   const page = pageFilters(params, 'f', 'fill_id', 'recorded_at');
   if (params.source) {
@@ -85,7 +104,7 @@ export function buildFillsQuery(params: Record<string, string | undefined>): { t
   }
   roleFilter(params, page, 'ord.role');
   return {
-    text: `${SELECT_FILLS} WHERE ${page.where.join(' AND ')} ${pageOrder('f.fill_id', page)}`,
+    text: `${selectFills(ORDER_OF_FILL)} WHERE ${page.where.join(' AND ')} ${pageOrder('f.fill_id', page)}`,
     values: page.values,
   };
 }
