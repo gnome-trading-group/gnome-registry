@@ -10,7 +10,7 @@ import { handler as usage } from './risk-usage';
 import { handler as summary } from './pnl-summary';
 import { handler as series } from './pnl-series';
 import { handler as daily } from './pnl-daily';
-import { handler as events } from './pnl-events';
+import { handler as groups } from './pnl-groups';
 
 // The controller's ledger and PnL reads, served by one Lambda: each would otherwise bring its own function, role
 // and permissions, and the API stack has to stay under CloudFormation's 500-resource limit. Each read keeps its own
@@ -19,7 +19,7 @@ const ROUTES: Record<ControllerReadPath, (event: APIGatewayProxyEvent) => Promis
   'pnl/summary': summary,
   'pnl/series': series,
   'pnl/daily': daily,
-  'pnl/events': events,
+  'pnl/groups': groups,
   'monitoring/attention': attention,
   'monitoring/tables': tables,
   'risk/usage': usage,

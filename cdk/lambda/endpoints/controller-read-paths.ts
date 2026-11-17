@@ -3,7 +3,7 @@ export const CONTROLLER_READ_PATHS = [
   'pnl/summary',
   'pnl/series',
   'pnl/daily',
-  'pnl/events',
+  'pnl/groups',
   'monitoring/attention',
   'monitoring/tables',
   'risk/usage',
