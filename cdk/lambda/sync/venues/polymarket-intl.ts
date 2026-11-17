@@ -2,13 +2,15 @@ import { fetchWithRetry } from './http';
 import { polymarketIntlHeaders } from './signers';
 import {
   BreakdownMarket, CreditBreakdown, CreditKind, CreditProgram, DAY_MS, isoDate, payoutDay, PendingCredit, PollTarget,
-  PRICE_SCALE, scaleDecimal, SIZE_SCALE, VenueCredit, VenueReading,
+  PRICE_SCALE, scaleDecimal, VenueCredit, VenueReading,
 } from './types';
 import { IncentiveProgramReading } from './types';
 
 // Polymarket Intl holds everything on chain, so an account is read with no credentials: its collateral is the
-// funder wallet's pUSD balance on Polygon, its positions come from the public data API by that wallet's address.
-// Resolved positions stay as tokens until redeemed, worth their payout.
+// funder wallet's pUSD balance on Polygon, and the public data API lists the outcome tokens that wallet holds.
+// The API truncates each holding to 4 decimals while fills land at 6 (a maker filled by a taker's dollar amount gets
+// 5.555556), so how many of each token the wallet holds is read from the token contract itself, which the ledger
+// matches to the unit. Resolved positions stay as tokens until redeemed, worth their payout.
 
 const DATA_API = 'https://data-api.polymarket.com/v2';
 const PAGE_LIMIT = 1000;
@@ -20,20 +22,52 @@ const PUSD_TO_PRICE = PRICE_SCALE / 1_000_000n;
 // Public Polygon RPCs refuse requests without a browser-like user agent.
 const USER_AGENT = 'Mozilla/5.0 (compatible; gnome-venue-poller)';
 const BALANCE_OF = '0x70a08231';
+const BALANCE_OF_BATCH = '0x4e1273f4';
+// Public nodes rate-limit by request, so a wallet's tokens go in as few calls as fit.
+const BATCH_TOKENS = 100;
 
-async function collateral(funder: string): Promise<bigint> {
+function word(value: bigint | number | string): string {
+  return BigInt(value).toString(16).padStart(64, '0');
+}
+
+async function ethCall(to: string, data: string, what: string): Promise<string> {
   const rpc = process.env.POLYGON_RPC_URL;
-  const token = process.env.PUSD_TOKEN_ADDRESS;
-  if (!rpc || !token) throw new Error('POLYGON_RPC_URL and PUSD_TOKEN_ADDRESS must be set to read Polymarket Intl cash');
-  const data = `${BALANCE_OF}${funder.toLowerCase().replace(/^0x/, '').padStart(64, '0')}`;
+  if (!rpc) throw new Error('POLYGON_RPC_URL must be set to read Polymarket Intl');
   const res = await fetchWithRetry(rpc, () => ({
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'User-Agent': USER_AGENT },
-    body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'eth_call', params: [{ to: token, data }, 'latest'] }),
+    body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'eth_call', params: [{ to, data }, 'latest'] }),
   }), async answer => !(await answer.json().catch(() => ({})) as { result?: string }).result);
   const body = await res.json() as { result?: string; error?: { message: string } };
-  if (!res.ok || !body.result) throw new Error(`Polygon balanceOf failed: ${res.status} ${body.error?.message ?? ''}`);
-  return BigInt(body.result) * PUSD_TO_PRICE;
+  if (!res.ok || !body.result) throw new Error(`Polygon ${what} failed: ${res.status} ${body.error?.message ?? ''}`);
+  return body.result;
+}
+
+async function collateral(funder: string): Promise<bigint> {
+  const token = process.env.PUSD_TOKEN_ADDRESS;
+  if (!token) throw new Error('PUSD_TOKEN_ADDRESS must be set to read Polymarket Intl cash');
+  return BigInt(await ethCall(token, `${BALANCE_OF}${word(funder)}`, 'balanceOf')) * PUSD_TO_PRICE;
+}
+
+// The wallet's balance of each outcome token, in the token's own 6 decimals: size units.
+async function tokenBalances(funder: string, tokenIds: string[]): Promise<bigint[]> {
+  const ctf = process.env.CTF_TOKEN_ADDRESS;
+  if (!ctf) throw new Error('CTF_TOKEN_ADDRESS must be set to read Polymarket Intl positions');
+  const balances: bigint[] = [];
+  for (let i = 0; i < tokenIds.length; i += BATCH_TOKENS) {
+    const ids = tokenIds.slice(i, i + BATCH_TOKENS);
+    const n = ids.length;
+    // balanceOfBatch(address[] owners, uint256[] ids): two offsets, then each array as its length and items.
+    const data = BALANCE_OF_BATCH + word(64) + word(64 + 32 * (n + 1))
+      + word(n) + word(funder).repeat(n) + word(n) + ids.map(word).join('');
+    const result = (await ethCall(ctf, data, 'balanceOfBatch')).replace(/^0x/, '');
+    const words = result.match(/.{64}/g)?.map(w => BigInt(`0x${w}`)) ?? [];
+    if (words.length !== n + 2 || words[1] !== BigInt(n)) {
+      throw new Error(`Polygon balanceOfBatch answered ${words.length} words for ${n} tokens`);
+    }
+    balances.push(...words.slice(2));
+  }
+  return balances;
 }
 
 export async function readPolymarketIntl(target: PollTarget): Promise<VenueReading> {
@@ -61,15 +95,15 @@ export async function readPolymarketIntl(target: PollTarget): Promise<VenueReadi
     };
     for (const p of body.data ?? []) {
       const value = p.current_value == null ? null : scaleDecimal(p.current_value, PRICE_SCALE);
-      positions.push({
-        venueKey: p.token_id, quantity: scaleDecimal(p.current_size, SIZE_SCALE), redeemable: p.redeemable === true, value,
-      });
+      positions.push({ venueKey: p.token_id, quantity: 0n, redeemable: p.redeemable === true, value });
       if (value !== null) portfolioValue += value;
       if (p.redeemable === true && value !== null) redeemableValue += value;
     }
     rows.push(...(body.data ?? []));
     cursor = body.pagination.next_cursor;
   } while (cursor !== null);
+  const balances = await tokenBalances(funder, positions.map(p => p.venueKey));
+  positions.forEach((p, i) => { p.quantity = balances[i]; });
   return {
     cashTotal: cash, cashAvailable: cash, portfolioValue, redeemableValue, positions, raw: { positions: rows },
   };

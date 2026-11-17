@@ -69,6 +69,31 @@ describe('venue keys', () => {
 
 const UNMANAGED = { partition_targets: null, rebalance_reservation: 'sum', credits_since: null, pending_credits: [] };
 
+const word = (v: bigint) => v.toString(16).padStart(64, '0');
+
+// A Polygon node: balanceOf gives the wallet's pUSD, balanceOfBatch each token's balance (0 for one not listed).
+function polygon(init: RequestInit | undefined, cash: bigint, held: Record<string, bigint> = {}): Response {
+  const data: string = JSON.parse(String(init?.body)).params[0].data;
+  if (data.startsWith('0x70a08231')) return new Response(JSON.stringify({ result: `0x${word(cash)}` }));
+  const words = data.slice(10).match(/.{64}/g)!.map(w => BigInt(`0x${w}`));
+  const n = Number(words[2]);
+  const ids = words.slice(4 + n, 4 + 2 * n);
+  return new Response(JSON.stringify({
+    result: `0x${word(32n)}${word(BigInt(n))}${ids.map(id => word(held[id.toString()] ?? 0n)).join('')}`,
+  }));
+}
+
+function polygonEnv() {
+  process.env.POLYGON_RPC_URL = 'https://rpc.example';
+  process.env.PUSD_TOKEN_ADDRESS = '0xC011a7E12a19f7B1f670d46F03B03f3342E82DFB';
+  process.env.CTF_TOKEN_ADDRESS = '0x4D97DCd97eC945f40cF65F87097ACe5EA0476045';
+}
+
+const PM_INTL_TARGET = {
+  account_id: 2, exchange_id: 2, exchange_code: 'POLYMARKET_INTL', label: 'x', read_secret_name: null, ...UNMANAGED,
+  venue_ref: { funderAddress: '0xe65019f319d3b20a9883b43283c91ca9d8c81cfb' },
+};
+
 // Real answers captured in Phase 0 (Kalshi demo, the Polymarket Intl test wallet), replayed through the readers.
 describe('venue readers on captured answers', () => {
   const fixture = (name: string) =>
@@ -171,15 +196,12 @@ describe('venue readers on captured answers', () => {
   });
 
   it('reads Polymarket Intl positions keyed by token, with resolved losers worth nothing', async () => {
-    process.env.POLYGON_RPC_URL = 'https://rpc.example';
-    process.env.PUSD_TOKEN_ADDRESS = '0xC011a7E12a19f7B1f670d46F03B03f3342E82DFB';
-    jest.spyOn(global, 'fetch').mockImplementation(async (url) => respond(String(url).includes('rpc.example')
-      ? { result: '0x0000000000000000000000000000000000000000000000000000000000f38054' }
-      : fixture('polymarket-intl-positions.json')));
-    const reading = await readPolymarketIntl({
-      account_id: 2, exchange_id: 2, exchange_code: 'POLYMARKET_INTL', label: 'x', read_secret_name: null, ...UNMANAGED,
-      venue_ref: { funderAddress: '0xe65019f319d3b20a9883b43283c91ca9d8c81cfb' },
-    });
+    polygonEnv();
+    const token = '65859975054715735368129844287010108827814341883420891032920701239041923945418';
+    jest.spyOn(global, 'fetch').mockImplementation(async (url, init) => (String(url).includes('rpc.example')
+      ? polygon(init, 0xf38054n, { [token]: 10_000_000n })
+      : respond(fixture('polymarket-intl-positions.json'))));
+    const reading = await readPolymarketIntl(PM_INTL_TARGET);
     expect(reading.cashTotal).toBe(15_958_100_000n);
     expect(reading.positions?.[0]).toEqual({
       venueKey: '65859975054715735368129844287010108827814341883420891032920701239041923945418',
@@ -189,21 +211,17 @@ describe('venue readers on captured answers', () => {
   });
 
   it('walks every page of Polymarket Intl positions by cursor, keeping the wallet anchor and filters on each', async () => {
-    process.env.POLYGON_RPC_URL = 'https://rpc.example';
-    process.env.PUSD_TOKEN_ADDRESS = '0xC011a7E12a19f7B1f670d46F03B03f3342E82DFB';
+    polygonEnv();
     const row = (token: string, size: number, value: number | null) =>
       ({ token_id: token, current_size: size, current_value: value, redeemable: false });
-    const fetch = jest.spyOn(global, 'fetch').mockImplementation(async (url) => {
+    const fetch = jest.spyOn(global, 'fetch').mockImplementation(async (url, init) => {
       const target = String(url);
-      if (target.includes('rpc.example')) return respond({ result: '0x0' });
+      if (target.includes('rpc.example')) return polygon(init, 0n, { 1: 7_352_000n, 2: 50_000n });
       return respond(target.includes('cursor=')
         ? { data: [row('2', 0.05, null)], pagination: { next_cursor: null } }
         : { data: [row('1', 7.352, 0.0845)], pagination: { next_cursor: 'abc+/=' } });
     });
-    const reading = await readPolymarketIntl({
-      account_id: 2, exchange_id: 2, exchange_code: 'POLYMARKET_INTL', label: 'x', read_secret_name: null, ...UNMANAGED,
-      venue_ref: { funderAddress: '0xe65019f319d3b20a9883b43283c91ca9d8c81cfb' },
-    });
+    const reading = await readPolymarketIntl(PM_INTL_TARGET);
     expect(reading.positions).toEqual([
       { venueKey: '1', quantity: 7_352_000n, redeemable: false, value: 84_500_000n },
       { venueKey: '2', quantity: 50_000n, redeemable: false, value: null },
@@ -218,6 +236,51 @@ describe('venue readers on captured answers', () => {
       expect(page.searchParams.has('offset')).toBe(false);
     }
     expect(pages[1].searchParams.get('cursor')).toBe('abc+/=');
+  });
+
+  it('takes how much of each Polymarket Intl token the wallet holds from the chain, not the API\'s truncated size', async () => {
+    polygonEnv();
+    const token = '44377363509592949611216663191870729132225405225488635200448085432296358592146';
+    const fetch = jest.spyOn(global, 'fetch').mockImplementation(async (url, init) => (String(url).includes('rpc.example')
+      ? polygon(init, 0n, { [token]: 42_695_556n })
+      : respond({
+        data: [{ token_id: token, current_size: 42.6955, current_value: 27.3, redeemable: false }],
+        pagination: { next_cursor: null },
+      })));
+    const reading = await readPolymarketIntl(PM_INTL_TARGET);
+    expect(reading.positions).toEqual([{ venueKey: token, quantity: 42_695_556n, redeemable: false, value: 27_300_000_000n }]);
+    const call = JSON.parse(String(fetch.mock.calls.find(([, init]) =>
+      String(init?.body).includes('0x4e1273f4'))?.[1]?.body)).params[0];
+    expect(call.to).toBe('0x4D97DCd97eC945f40cF65F87097ACe5EA0476045');
+    expect(call.data).toContain(word(0xe65019f319d3b20a9883b43283c91ca9d8c81cfbn) + word(1n) + word(BigInt(token)));
+  });
+
+  it('reads a wallet\'s Polymarket Intl tokens in batches of 100, each balance against its own token', async () => {
+    polygonEnv();
+    const tokens = Array.from({ length: 150 }, (_, i) => String(1000 + i));
+    const held = Object.fromEntries(tokens.map((t, i) => [t, BigInt(i) * 1_000_001n]));
+    const fetch = jest.spyOn(global, 'fetch').mockImplementation(async (url, init) => (String(url).includes('rpc.example')
+      ? polygon(init, 0n, held)
+      : respond({
+        data: tokens.map(t => ({ token_id: t, current_size: 0, current_value: null, redeemable: false })),
+        pagination: { next_cursor: null },
+      })));
+    const reading = await readPolymarketIntl(PM_INTL_TARGET);
+    expect(reading.positions?.map(p => [p.venueKey, p.quantity])).toEqual(tokens.map(t => [t, held[t]]));
+    const batches = fetch.mock.calls.filter(([, init]) => String(init?.body).includes('0x4e1273f4'));
+    expect(batches).toHaveLength(2);
+  });
+
+  it('fails a Polymarket Intl read whose token balances don\'t answer every token asked', async () => {
+    polygonEnv();
+    jest.spyOn(global, 'fetch').mockImplementation(async (url, init) => {
+      if (!String(url).includes('rpc.example')) {
+        return respond({ data: [{ token_id: '7', current_size: 1, redeemable: false }], pagination: { next_cursor: null } });
+      }
+      const short = String(init?.body).includes('0x4e1273f4');
+      return respond({ result: short ? `0x${word(32n)}${word(0n)}` : `0x${word(0n)}` });
+    });
+    await expect(readPolymarketIntl(PM_INTL_TARGET)).rejects.toThrow('Polygon balanceOfBatch answered 2 words for 1 tokens');
   });
 });
 
@@ -301,8 +364,7 @@ describe('venue reads that fail transiently', () => {
   });
 
   it('retries a Polygon node that reports its fault inside a 200, and reads the cash it then gives', async () => {
-    process.env.POLYGON_RPC_URL = 'https://rpc.example';
-    process.env.PUSD_TOKEN_ADDRESS = '0xC011a7E12a19f7B1f670d46F03B03f3342E82DFB';
+    polygonEnv();
     const fetch = jest.spyOn(global, 'fetch').mockImplementation(async (target) => {
       if (!String(target).includes('rpc.example')) {
         return new Response(JSON.stringify({ data: [], pagination: { next_cursor: null } }));
@@ -312,23 +374,16 @@ describe('venue reads that fail transiently', () => {
         ? { jsonrpc: '2.0', id: 1, error: { message: 'header not found' } }
         : { jsonrpc: '2.0', id: 1, result: '0x00000000000000000000000000000000000000000000000000000000000f4240' }));
     });
-    const reading = await settle(readPolymarketIntl({
-      account_id: 2, exchange_id: 2, exchange_code: 'POLYMARKET_INTL', label: 'x', read_secret_name: null, ...UNMANAGED,
-      venue_ref: { funderAddress: '0xe65019f319d3b20a9883b43283c91ca9d8c81cfb' },
-    }));
+    const reading = await settle(readPolymarketIntl(PM_INTL_TARGET));
     expect(reading.cashTotal).toBe(1_000_000_000n);
   });
 
   it('fails a Polymarket Intl read with the venue\'s own error once retries run out', async () => {
-    process.env.POLYGON_RPC_URL = 'https://rpc.example';
-    process.env.PUSD_TOKEN_ADDRESS = '0xC011a7E12a19f7B1f670d46F03B03f3342E82DFB';
+    polygonEnv();
     jest.spyOn(global, 'fetch').mockImplementation(async (target) => String(target).includes('rpc.example')
       ? new Response(JSON.stringify({ result: '0x0' }))
       : new Response('{"error":"Too Many Requests"}', { status: 429 }));
-    const error = await settle(readPolymarketIntl({
-      account_id: 2, exchange_id: 2, exchange_code: 'POLYMARKET_INTL', label: 'x', read_secret_name: null, ...UNMANAGED,
-      venue_ref: { funderAddress: '0xe65019f319d3b20a9883b43283c91ca9d8c81cfb' },
-    }));
+    const error = await settle(readPolymarketIntl(PM_INTL_TARGET));
     expect((error as Error).message).toBe('Polymarket positions failed: 429 {"error":"Too Many Requests"}');
   });
 });

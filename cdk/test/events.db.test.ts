@@ -50,6 +50,7 @@ describeDb('events by volume, against Postgres', () => {
     expect(await ids({ exchangeIds: '1,2', resolved: 'false' })).toEqual([1, 2, 4]);
     expect(await ids({ categories: 'Sports,Weather' })).toEqual([1, 3, 4]);
     expect(await ids({ tags: 'nba,us' })).toEqual([2, 3]);
+    expect(await ids({ tags: 'NBA, US' })).toEqual([2, 3]);
     expect(await ids({ expiryFrom: '2026-11-02T00:00:00Z', expiryTo: '2026-12-01T00:00:00Z' })).toEqual([3, 4]);
     expect(await ids({ minVolume24h: '10000' })).toEqual([3, 4]);
     expect(await ids({ exchangeIds: '' })).toEqual([]);
@@ -94,6 +95,7 @@ describeDb('events by volume, against Postgres', () => {
     expect(await ids({ search: 'lakers', exchangeId: '2' })).toEqual([4]);
     expect(await ids({ search: 'lakers', tag: 'nfl', category: 'Sports', resolved: 'false' })).toEqual([1, 4]);
     expect(await ids({ tag: 'nba' })).toEqual([3]);
+    expect(await ids({ tag: ' NBA ' })).toEqual([3]);
     expect(await ids({ tag: 'nfl', resolved: 'false' })).toEqual([1, 4]);
   });
 

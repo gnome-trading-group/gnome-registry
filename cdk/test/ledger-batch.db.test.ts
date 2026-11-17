@@ -1,7 +1,7 @@
 import { Pool, PoolClient } from 'pg';
 import { connectExclusive, LOCK_TIMEOUT_MS, release, bindAccount } from './ledger-db';
 import { withTransaction } from '../lambda/endpoints/base';
-import { writeBatch } from '../lambda/endpoints/ledger-batch';
+import { writeBatch, validateBatch } from '../lambda/endpoints/ledger-batch';
 import { StrategySessionHandler } from '../lambda/endpoints/strategy-sessions';
 import { generateHaltUpsertQuery } from '../lambda/endpoints/risk-halts';
 import { buildOrdersQuery } from '../lambda/endpoints/ledger-orders';
@@ -109,6 +109,74 @@ describeDb('ledger batch against Postgres', () => {
     await post('s1', { orderOpens: [{ ...order, side: 0, price: 1, size: 5 }] });
     const row = (await client.query('SELECT status, exchange_order_id, size, filled_qty FROM ledger.order')).rows[0];
     expect(row).toEqual({ status: 'CLOSED', exchange_order_id: 'k-9', size: '5', filled_qty: '5' });
+  });
+
+  it('an order keeps what it was for, its episode and its intent; a bad role is refused', async () => {
+    const order = { clientOidCounter: 11, listingId: 500, exchangeId: 1, side: 1, price: 480_000_000, size: 5 };
+    await post('s1', { orderOpens: [{
+      ...order, timeInForce: 'IMMEDIATE_OR_CANCELED', role: 'HEDGE', episodeId: '812',
+      intentSequence: '55',
+    }] });
+    await post('s1', { orderOpens: [{ ...order, clientOidCounter: 12, role: null, episodeId: null }] });
+    const rows = (await client.query(`SELECT client_oid_counter, time_in_force, role, episode_id, intent_sequence
+      FROM ledger.order ORDER BY client_oid_counter`)).rows;
+    expect(rows).toEqual([
+      { client_oid_counter: '11', time_in_force: 'IMMEDIATE_OR_CANCELED', role: 'HEDGE', episode_id: '812',
+        intent_sequence: '55' },
+      { client_oid_counter: '12', time_in_force: null, role: null, episode_id: null, intent_sequence: null },
+    ]);
+    expect(() => validateBatch(JSON.stringify({ sessionId: 's1', orderOpens: [{ ...order, role: 'MAKER' }] })))
+      .toThrow(/order role must be one of/);
+  });
+
+  it('fills carry what their order was for, and both lists filter by it', async () => {
+    const open = (counter: number, extra: Record<string, unknown>) =>
+      ({ clientOidCounter: counter, listingId: 500, exchangeId: 1, side: 0, price: 400_000_000, size: 1_000_000, ...extra });
+    await post('s1', {
+      orderOpens: [open(1, { role: 'QUOTE', episodeId: '7' }), open(2, { role: 'HEDGE', episodeId: '7' }),
+        open(3, {})],
+      fills: [fill(1, 1_000_000, 1_000_000, 1), fill(2, 1_000_000, 2_000_000, 2), fill(3, 1_000_000, 3_000_000, 3)],
+    });
+    const fills = (params: Record<string, string>) => client.query(buildFillsQuery({ sessionId: 's1', ...params }))
+      .then(r => r.rows.map(row => [row.client_oid_counter, row.order_role, row.order_episode_id])
+        .sort());
+    expect(await fills({})).toEqual([['1', 'QUOTE', '7'], ['2', 'HEDGE', '7'], ['3', null, null]]);
+    expect((await fills({ role: 'HEDGE,NONE' })).map(r => r[0])).toEqual(['2', '3']);
+    const orders = await client.query(buildOrderListQuery({ sessionId: 's1', role: 'QUOTE' }));
+    expect(orders.rows.map(r => [r.client_oid_counter, r.role, r.episode_id])).toEqual([['1', 'QUOTE', '7']]);
+    expect(() => buildOrderListQuery({ sessionId: 's1', role: 'MAKER' })).toThrow(/role must be among/);
+  });
+
+  it('an episode is its hedges and the quote fills they hedged, its opener by id and the rest by the next hedge', async () => {
+    const at = (seconds: number) => (1_800_000_000_000_000_000n + BigInt(Math.round(seconds * 1000)) * 1_000_000n).toString();
+    const open = (counter: number, seconds: number, role: string, episodeId?: string) => ({
+      clientOidCounter: counter, listingId: 500, exchangeId: 1, side: 0, price: 400_000_000, size: 1_000_000,
+      eventTimeNs: at(seconds), role, episodeId,
+    });
+    let version = 0;
+    const filled = (counter: number, seconds: number, cum = 1_000_000) =>
+      fill(counter, cum, 0, ++version, { fillQty: 1_000_000, eventTimeNs: at(seconds) });
+    await post('s1', {
+      orderOpens: [open(10, 0, 'QUOTE'), open(11, 0, 'QUOTE'), open(20, 10.5, 'HEDGE', '10'),
+        open(21, 11, 'HEDGE', '10'), open(12, 20, 'QUOTE'), open(22, 30.2, 'HEDGE', '12'),
+        open(23, 40.1, 'HEDGE', '10')],
+      fills: [
+        // The opener's fill stamped after its hedge went out: the venue's clock runs ahead of the OMS's.
+        filled(10, 10.7), filled(20, 10.6),
+        // The other bid filled before the pull landed, and was hedged by the episode's next hedge.
+        filled(11, 10.55), filled(21, 11.1),
+        filled(12, 30), filled(22, 30.3),
+        // A late fill on the opener, after its cancel raced it, reopens an episode under the same id.
+        filled(10, 40, 2_000_000), filled(23, 40.2),
+      ],
+    });
+    const episode = (episodeId: string) => client.query(buildFillsQuery({ sessionId: 's1', episodeId }))
+      .then(r => r.rows.map(row => `${row.client_oid_counter}:${row.order_role}`).sort());
+    expect(await episode('10')).toEqual(['10:QUOTE', '10:QUOTE', '11:QUOTE', '20:HEDGE', '21:HEDGE', '23:HEDGE']);
+    expect(await episode('12')).toEqual(['12:QUOTE', '22:HEDGE']);
+    expect(await episode('99')).toEqual([]);
+    expect(() => buildFillsQuery({ mode: 'paper', episodeId: '10' })).toThrow(/needs a sessionId/);
+    expect(() => buildFillsQuery({ sessionId: 's1', episodeId: '0' })).toThrow(/positive integer/);
   });
 
   it('a recovery fill must come from an earlier session of the same strategy', async () => {

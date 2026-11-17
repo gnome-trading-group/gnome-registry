@@ -1,9 +1,10 @@
 import { APIGatewayProxyEvent } from 'aws-lambda';
 import { connectLedgerDatabase, createResponse } from './ledger-common';
-import { listingColumns, pageFilters, pageOrder } from './ledger-page';
+import { listingColumns, pageFilters, pageOrder, roleFilter } from './ledger-page';
 
 // A session's orders, or a strategy's across its sessions, newest first (see ledger-page for filters and paging),
-// each with what filled: how many fills, the quantity, the average price and the fees.
+// each with what filled: how many fills, the quantity, the average price and the fees. ?role= keeps the orders a
+// strategy sent for those purposes.
 const STATUSES = ['OPEN', 'CLOSED', 'ANY'];
 
 export function buildOrderListQuery(params: Record<string, string | undefined>): { text: string; values: unknown[] } {
@@ -12,6 +13,7 @@ export function buildOrderListQuery(params: Record<string, string | undefined>):
   if (!STATUSES.includes(status)) throw new Error(`status must be one of ${STATUSES.join(', ')}`);
   if (status === 'OPEN') page.where.push(`o.status = 'OPEN'`);
   if (status === 'CLOSED') page.where.push(`o.status <> 'OPEN'`);
+  roleFilter(params, page, 'o.role');
   return {
     text: `
       SELECT o.*, l.exchange_security_symbol AS symbol, spec.tick_size, spec.lot_size,

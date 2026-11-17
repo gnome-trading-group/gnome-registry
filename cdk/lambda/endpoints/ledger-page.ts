@@ -70,3 +70,15 @@ export function listingColumns(alias: string): string {
 export function pageOrder(sequence: string, page: PageQuery): string {
   return `ORDER BY ${sequence} ${page.after ? 'ASC' : 'DESC'} LIMIT ${page.limit}`;
 }
+
+const ROLES = ['QUOTE', 'HEDGE', 'ARB_LEG', 'EXIT', 'NONE'];
+
+// ?role=QUOTE,HEDGE: what the orders (or the fills' orders) were for; NONE is an order whose strategy didn't say.
+export function roleFilter(params: Record<string, string | undefined>, page: PageQuery, column: string): void {
+  if (!params.role) return;
+  const roles = params.role.split(',');
+  if (roles.some(r => !ROLES.includes(r))) throw new Error(`role must be among ${ROLES.join(', ')}`);
+  page.values.push(roles.filter(r => r !== 'NONE'));
+  const named = `${column} = ANY($${page.values.length}::text[])`;
+  page.where.push(roles.includes('NONE') ? `(${named} OR ${column} IS NULL)` : named);
+}

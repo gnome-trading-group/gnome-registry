@@ -16,6 +16,8 @@ import { connectLedgerDatabase, createResponse, isSessionId, WRITABLE_SESSION_ST
 const BATCH_SOURCES = ['VENUE', 'RECOVERY', 'RESET', 'GAP'];
 const LIQUIDITIES = ['MAKER', 'TAKER'];
 const CLOSE_STATES = ['FILLED', 'CANCELED', 'REJECTED', 'EXPIRED'];
+const ORDER_ROLES = ['QUOTE', 'HEDGE', 'ARB_LEG', 'EXIT'];
+const TIMES_IN_FORCE = ['GOOD_TILL_CANCELED', 'IMMEDIATE_OR_CANCELED', 'FILL_OR_KILL'];
 
 interface Session {
   strategy_id: number;
@@ -121,7 +123,8 @@ const RECOVERY_ORIGINS_VALID = `
   ) AS valid`;
 
 const ORDER_COLUMNS = `"clientOidCounter" bigint, "listingId" int, "exchangeId" int, side smallint, price bigint,
-  size bigint, "exchangeOrderId" text, "filledQty" bigint, "eventTimeNs" bigint, state text, "rejectReason" text`;
+  size bigint, "exchangeOrderId" text, "filledQty" bigint, "eventTimeNs" bigint, state text, "rejectReason" text,
+  "timeInForce" text, role text, "episodeId" bigint, "intentSequence" bigint`;
 
 function eventTime(column: string): string {
   return `CASE WHEN ${column} > 0 THEN to_timestamp(${column}::numeric / 1e9) ELSE NOW() END`;
@@ -135,12 +138,15 @@ const ORDER_ACCOUNT = `LEFT JOIN account_master.session_venue_account sva
 
 const INSERT_ORDER_OPENS = `
   INSERT INTO ledger.order (session_id, client_oid_counter, strategy_id, listing_id, exchange_id, mode, side, price,
-    size, opened_at, account_id)
+    size, opened_at, account_id, time_in_force, role, episode_id, intent_sequence)
   SELECT $2, o."clientOidCounter", $3, o."listingId", o."exchangeId", $4, o.side, o.price, o.size,
-    ${eventTime('o."eventTimeNs"')}, sva.account_id
+    ${eventTime('o."eventTimeNs"')}, sva.account_id, o."timeInForce", o.role, o."episodeId",
+    o."intentSequence"
   FROM jsonb_to_recordset(COALESCE($1::jsonb->'orderOpens', '[]')) AS o(${ORDER_COLUMNS}) ${ORDER_ACCOUNT}
   ON CONFLICT (session_id, client_oid_counter) DO UPDATE SET
-    side = EXCLUDED.side, price = EXCLUDED.price, size = EXCLUDED.size, opened_at = EXCLUDED.opened_at
+    side = EXCLUDED.side, price = EXCLUDED.price, size = EXCLUDED.size, opened_at = EXCLUDED.opened_at,
+    time_in_force = EXCLUDED.time_in_force, role = EXCLUDED.role, episode_id = EXCLUDED.episode_id,
+    intent_sequence = EXCLUDED.intent_sequence
   WHERE ledger.order.opened_at IS NULL`;
 
 const UPSERT_ORDER_ACKS = `
@@ -256,6 +262,14 @@ export function validateBatch(body: string): string {
     }
     if (fill.liquidity != null && !LIQUIDITIES.includes(fill.liquidity)) {
       throw new Error(`fill liquidity must be one of ${LIQUIDITIES.join(', ')} or null`);
+    }
+  }
+  for (const open of parsed.orderOpens ?? []) {
+    if (open?.role != null && !ORDER_ROLES.includes(open.role)) {
+      throw new Error(`order role must be one of ${ORDER_ROLES.join(', ')} or null`);
+    }
+    if (open?.timeInForce != null && !TIMES_IN_FORCE.includes(open.timeInForce)) {
+      throw new Error(`order time in force must be one of ${TIMES_IN_FORCE.join(', ')} or null`);
     }
   }
   for (const close of parsed.orderCloses ?? []) {

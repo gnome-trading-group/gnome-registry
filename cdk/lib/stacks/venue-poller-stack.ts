@@ -39,6 +39,7 @@ export class VenuePollerStack extends cdk.Stack {
         KALSHI_API_URL: props.venuePoller.kalshiApiUrl,
         POLYGON_RPC_URL: props.venuePoller.polygonRpcUrl,
         PUSD_TOKEN_ADDRESS: props.venuePoller.pusdTokenAddress,
+        CTF_TOKEN_ADDRESS: props.venuePoller.ctfTokenAddress,
         VENUES: (props.venues ?? []).join(','),
       },
       bundling: {

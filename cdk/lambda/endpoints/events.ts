@@ -36,6 +36,12 @@ const LOG_SCHEDULE_CHANGE = raw('INSERT INTO sm.event_schedule_change (event_id,
 
 const tagArray = (tags: string[] | null | undefined) => (tags && tags.length > 0 ? tags : null);
 
+/**
+ * A tag as the classifier stores it: its words in lower case, joined by single spaces. Filters take any spelling
+ * ("Rotten-Tomatoes"), since people and rules type them by hand.
+ */
+export const tagKey = (tag: string) => tag.toLowerCase().replace(/[\s_-]+/g, ' ').trim();
+
 /** Events with a contract whose proposition matches, found from the propositions rather than probed event by event. */
 function withProposition(match: Sql): Sql {
   return sql`event_id IN (
@@ -96,11 +102,11 @@ export class EventHandler extends ResourceHandler {
       params?.exchangeId && sql`exchange_id = ${params.exchangeId}`,
       params?.nativeEventId && sql`native_event_id = ${params.nativeEventId}`,
       params?.resolved !== undefined && sql`resolved = ${params.resolved === 'true'}`,
-      params?.tag && sql`tags @> ARRAY[${params.tag}]::text[]`,
+      params?.tag && sql`tags @> ARRAY[${tagKey(params.tag)}]::text[]`,
       params?.eventIds !== undefined && anyId('event_id', parseIdList(params.eventIds)),
       params?.exchangeIds !== undefined && anyId('exchange_id', parseIdList(params.exchangeIds)),
       params?.categories && sql`category = ANY(${textList(params.categories)}::text[])`,
-      params?.tags && sql`tags && ${textList(params.tags)}::text[]`,
+      params?.tags && sql`tags && ${textList(params.tags).map(tagKey)}::text[]`,
       proposition && withProposition(proposition),
       params?.expiryFrom && sql`expiry >= ${timestamp('expiryFrom', params.expiryFrom)}`,
       params?.expiryTo && sql`expiry < ${timestamp('expiryTo', params.expiryTo)}`,

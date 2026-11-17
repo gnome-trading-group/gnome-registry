@@ -10,11 +10,16 @@ import { implies, Relation } from './relation-closure';
 // A group is a set of contracts joined by any constraint; a world is one assignment that breaks none. Only
 // constraints the rows state are known: a missing one adds worlds that can't happen, so a group's worst world is never
 // better than the truth.
+//
+// A contract already settled at $1 or $0 fixes itself and everything it implies, on any venue: once Kalshi pays JUMBO,
+// JUMBO on Polymarket is true too unless the venues settle differently. Worlds against what has settled are split off
+// as divergent: they happen only if a venue still open settles against the ones that have.
 
 export const BINARY = 7;
 export const MULTI_OUTCOME = 8;
 // Above this many contracts a group isn't enumerated (2^n assignments); the largest held in prod was 7 (2026-11-17).
 export const MAX_GROUP_CONTRACTS = 20;
+const DOLLAR = 1_000_000_000n;
 
 export interface ContractFacts {
   securityId: number;
@@ -22,6 +27,8 @@ export interface ContractFacts {
   contractType: number;
   // The other contract of a two-contract BINARY event.
   complement: number | null;
+  // What it settled at, in price units; null while unsettled.
+  settlement: bigint | null;
 }
 
 // Every outcome of each MULTI_OUTCOME event that touches the contracts, by event.
@@ -32,9 +39,12 @@ type Clause = [number, boolean, number, boolean];
 export interface Group {
   securityIds: number[];
   tooLarge: boolean;
-  // Each world: the contracts true in it. Empty when tooLarge.
+  // Each world: the contracts true in it, consistent with every settlement. Empty when tooLarge.
   worlds: Set<number>[];
-  // Flags of the relationships between the group's contracts, deduplicated.
+  // Worlds against what has already settled: they happen only if the venues settle differently.
+  divergent: Set<number>[];
+  // Flags of the relationships between the group's contracts, deduplicated, plus SETTLED_DIFFERENTLY when settled
+  // contracts already disagree and SETTLED_AT_FRACTION when one settled at neither $1 nor $0 (both fix nothing).
   flags: string[];
 }
 
@@ -144,6 +154,50 @@ function enumerate(ids: number[], clauses: Clause[], groupChoices: Choice[]): Se
   return worlds;
 }
 
+// What has settled says of each contract: true, false, or (absent) nothing yet. Read from every settled contract the
+// relation reaches, held or not. A settlement at a fraction, or settlements already disagreeing, decide nothing.
+function settledTruths(
+  rel: Relation, facts: Map<number, ContractFacts>, ids: number[], incoming: Map<number, number[]>,
+): { truth: Map<number, boolean>; flags: string[] } {
+  const truth = new Map<number, boolean>();
+  const flags = new Set<string>();
+  // The contracts whose settlement can decide v: v, its complement, what either implies or is implied by, and the
+  // complements of those (a settled false contract decides through its complement).
+  const near = (v: number) => {
+    const cv = facts.get(v)?.complement ?? null;
+    const out = new Set<number>();
+    for (const x of cv === null ? [v] : [v, cv]) {
+      out.add(x);
+      for (const y of [...(rel.get(x)?.keys() ?? []), ...(incoming.get(x) ?? [])]) {
+        out.add(y);
+        const cy = facts.get(y)?.complement ?? null;
+        if (cy !== null) out.add(cy);
+      }
+    }
+    return out;
+  };
+  for (const v of ids) {
+    for (const u of near(v)) {
+      const settlement = facts.get(u)?.settlement ?? null;
+      if (settlement === null) continue;
+      if (settlement !== 0n && settlement !== DOLLAR) {
+        flags.add('SETTLED_AT_FRACTION');
+        continue;
+      }
+      const known = { securityId: u, holds: settlement === DOLLAR };
+      for (const holds of [true, false]) {
+        const follows = u === v ? known.holds === holds : literalImplies(rel, facts, known, { securityId: v, holds });
+        if (!follows) continue;
+        if (truth.has(v) && truth.get(v) !== holds) flags.add('SETTLED_DIFFERENTLY');
+        truth.set(v, holds);
+      }
+    }
+  }
+  return flags.has('SETTLED_DIFFERENTLY') || flags.has('SETTLED_AT_FRACTION')
+    ? { truth: new Map(), flags: [...flags] }
+    : { truth, flags: [] };
+}
+
 // The groups the contracts form, each with its worlds.
 export function buildGroups(
   securityIds: number[], rel: Relation, facts: Map<number, ContractFacts>, outcomes: EventOutcomes,
@@ -176,6 +230,8 @@ export function buildGroups(
   }
   const members = new Map<number, number[]>();
   for (const id of ids) members.set(uf.find(id), [...(members.get(uf.find(id)) ?? []), id]);
+  const incoming = new Map<number, number[]>();
+  for (const [a, row] of rel) for (const b of row.keys()) incoming.set(b, [...(incoming.get(b) ?? []), a]);
 
   return [...members.values()].map(group => {
     const inGroup = new Set(group);
@@ -184,10 +240,15 @@ export function buildGroups(
     const tooLarge = group.length > MAX_GROUP_CONTRACTS;
     const groupClauses = clauses.filter(c => inGroup.has(c[0]));
     const groupChoices = allChoices.filter(ch => inGroup.has(ch.members[0][0]));
+    const settled = settledTruths(rel, facts, group, incoming);
+    settled.flags.forEach(f => groupFlags.add(f));
+    const all = tooLarge ? [] : enumerate(group, groupClauses, groupChoices);
+    const agrees = (world: Set<number>) => [...settled.truth].every(([id, holds]) => world.has(id) === holds);
     return {
       securityIds: group,
       tooLarge,
-      worlds: tooLarge ? [] : enumerate(group, groupClauses, groupChoices),
+      worlds: all.filter(agrees),
+      divergent: all.filter(w => !agrees(w)),
       flags: [...groupFlags].sort(),
     };
   });

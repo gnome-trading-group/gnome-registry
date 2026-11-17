@@ -17,10 +17,12 @@ import { sameVoidRule, voidRule } from './void-rules';
 // then: the strategy's lifetime PnL, for ?sessionId= the session's (from $0 at its start, as pnl-math defines it), or
 // for ?firm=true every strategy's. Positions on listings that aren't event contracts (a perp hedge) pay the same in
 // every world and are returned as they are, under `other`.
-//   locked  the worst world: what the group makes however it settles, if the venues settle it alike
+//   locked  the worst world: what the group makes however it settles, if the venues settle it alike. Contracts
+//           already settled fix the worlds (risk-groups.ts): once one venue pays an outcome, its equivalents follow
+//   divergent the worlds against what has settled, which happen only if a venue still open settles differently
 //   void    added when the group's venues void markets differently (void-rules.ts), or a relationship between its
 //           contracts is flagged VOID_RULES_DIFFER: every contract paid by its venue's void rule
-//   worst   the lower of locked and void
+//   worst   the lowest of locked, void and divergent
 //   ?status=active (default)  groups with a contract still held, soonest to close first; a flat contract in the same
 //                             group stays in it, since its realized PnL is part of the group's
 //   ?status=history           groups with every contract flat, most recently resolved first, a page at a time:
@@ -247,13 +249,16 @@ async function loadRelation(client: PoolClient, seeds: number[]): Promise<Relati
   }));
 
   const members = (await client.query(`
-    SELECT ec.event_id, ec.security_id, s.contract_type FROM sm.event_contract ec
+    SELECT ec.event_id, ec.security_id, s.contract_type, ec.settlement_price FROM sm.event_contract ec
     JOIN sm.security s ON s.security_id = ec.security_id
     WHERE ec.event_id IN (SELECT event_id FROM sm.event_contract WHERE security_id = ANY($1::int[]))`,
   [reached])).rows;
-  const byEvent = new Map<number, { securityId: number; contractType: number }[]>();
+  const byEvent = new Map<number, { securityId: number; contractType: number; settlement: bigint | null }[]>();
   for (const m of members) {
-    byEvent.set(m.event_id, [...(byEvent.get(m.event_id) ?? []), { securityId: m.security_id, contractType: m.contract_type }]);
+    byEvent.set(m.event_id, [...(byEvent.get(m.event_id) ?? []), {
+      securityId: m.security_id, contractType: m.contract_type,
+      settlement: m.settlement_price === null ? null : BigInt(m.settlement_price),
+    }]);
   }
   const facts = new Map<number, ContractFacts>();
   const outcomes: EventOutcomes = new Map();
@@ -261,7 +266,9 @@ async function loadRelation(client: PoolClient, seeds: number[]): Promise<Relati
     const binaryPair = contracts.length === 2 && contracts.every(c => c.contractType === BINARY);
     for (const c of contracts) {
       const other = binaryPair ? contracts.find(o => o.securityId !== c.securityId)?.securityId ?? null : null;
-      facts.set(c.securityId, { securityId: c.securityId, eventId, contractType: c.contractType, complement: other });
+      facts.set(c.securityId, {
+        securityId: c.securityId, eventId, contractType: c.contractType, complement: other, settlement: c.settlement,
+      });
     }
     if (contracts.some(c => c.contractType === MULTI_OUTCOME)) {
       outcomes.set(eventId, contracts.filter(c => c.contractType === MULTI_OUTCOME).map(c => c.securityId));
@@ -339,8 +346,8 @@ function olderThan(time: number | null, key: number, before: { time: number | nu
 }
 
 function valueGroup(
-  key: number, legs: Leg[], worlds: Set<number>[], tooLarge: boolean, flags: string[], rel: Relation,
-  facts: Map<number, ContractFacts>, info: Map<number, ListingInfo>, firm: boolean,
+  key: number, legs: Leg[], worlds: Set<number>[], divergentWorlds: Set<number>[], tooLarge: boolean, flags: string[],
+  rel: Relation, facts: Map<number, ContractFacts>, info: Map<number, ListingInfo>, firm: boolean,
 ) {
   const sorted = [...legs].sort((a, b) =>
     (a.contract.expiry?.getTime() ?? Infinity) - (b.contract.expiry?.getTime() ?? Infinity)
@@ -348,11 +355,13 @@ function valueGroup(
     || a.holding.strategyId - b.holding.strategyId);
   const labels = new Map(sorted.map(l => [l.contract.securityId, contractLabel(l.contract)]));
   const current = sorted.reduce((sum, l) => sum + l.holding.total(), 0n);
-  const valued = worlds.map(world => {
+  const valueOf = (world: Set<number>) => {
     const value = sorted.reduce((sum, l) => sum + l.holding.settled(world.has(l.contract.securityId) ? DOLLAR : 0n), 0n);
     const paying = sorted.reduce((sum, l) => sum + (world.has(l.contract.securityId) ? l.holding.position.netQuantity : 0n), 0n);
     return { world, value, paying };
-  });
+  };
+  const valued = worlds.map(valueOf);
+  const diverging = divergentWorlds.map(valueOf);
 
   const rules = sorted.map(l => voidRule(l.contract.exchangeCode));
   const rulesDiffer = rules.some(r => !sameVoidRule(r, rules[0]));
@@ -367,8 +376,18 @@ function valueGroup(
 
   const values = valued.map(v => v.value);
   const locked = values.length ? min(values) : null;
-  const worst = locked === null ? null : (voidValue !== null && voidValue < locked ? voidValue : locked);
+  const risks = [...values, ...diverging.map(v => v.value), ...(voidValue === null ? [] : [voidValue])];
+  const worst = locked === null ? null : min(risks);
   const payingCounts = valued.map(v => v.paying);
+  const rows = (list: typeof valued) => list
+    .map(v => ({
+      label: worldLabel(rel, facts, [...labels.keys()], v.world, labels),
+      paysListingIds: sorted.filter(l => v.world.has(l.contract.securityId)).map(l => l.holding.listingId),
+      pnl: money(v.value),
+      change: money(v.value - current),
+      paying: v.paying.toString(),
+    }))
+    .sort((a, b) => (BigInt(a.pnl) < BigInt(b.pnl) ? -1 : BigInt(a.pnl) > BigInt(b.pnl) ? 1 : a.label.localeCompare(b.label)));
   const first = sorted[0].contract;
   return {
     key,
@@ -384,18 +403,12 @@ function valueGroup(
       eventId: l.contract.eventId,
       eventTitle: l.contract.title,
       outcome: labels.get(l.contract.securityId)?.text ?? l.contract.outcome,
+      settlementPrice: facts.get(l.contract.securityId)?.settlement?.toString() ?? null,
       held: heldRow(l.holding, info.get(l.holding.listingId)),
     })),
     current: money(current),
-    worlds: valued
-      .map(v => ({
-        label: worldLabel(rel, facts, [...labels.keys()], v.world, labels),
-        paysListingIds: sorted.filter(l => v.world.has(l.contract.securityId)).map(l => l.holding.listingId),
-        pnl: money(v.value),
-        change: money(v.value - current),
-        paying: v.paying.toString(),
-      }))
-      .sort((a, b) => (BigInt(a.pnl) < BigInt(b.pnl) ? -1 : BigInt(a.pnl) > BigInt(b.pnl) ? 1 : a.label.localeCompare(b.label))),
+    worlds: rows(valued),
+    divergent: rows(diverging),
     void: voidValue === null ? null : { pnl: money(voidValue), change: money(voidValue - current) },
     locked: locked === null ? null : money(locked),
     worst: worst === null ? null : money(worst),
@@ -461,7 +474,7 @@ export async function groups(client: PoolClient, params: Record<string, string |
   ]);
   return {
     asOf: now.toISOString(),
-    groups: shown.map(g => valueGroup(g.key, g.legs, g.worlds, g.tooLarge, g.flags, rel, facts, info, firm)),
+    groups: shown.map(g => valueGroup(g.key, g.legs, g.worlds, g.divergent, g.tooLarge, g.flags, rel, facts, info, firm)),
     other: other.map(h => ({ strategyId: h.strategyId, ...heldRow(h, info.get(h.listingId)) })),
     counts: { active: active.length, flatContracts, flatOther: flatOther.length },
     nextBefore,

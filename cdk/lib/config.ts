@@ -27,6 +27,8 @@ export interface RegistryConfig {
     polygonRpcUrl: string;
     // Polymarket's collateral token on Polygon (CLOB V2).
     pusdTokenAddress: string;
+    // The Conditional Tokens contract that holds every Polymarket outcome token (ERC-1155).
+    ctfTokenAddress: string;
   };
 }
 
@@ -39,6 +41,7 @@ const defaultConfig = {
     // polygon-rpc.com stopped serving anonymous requests; publicnode answers without a key.
     polygonRpcUrl: 'https://polygon-bor-rpc.publicnode.com',
     pusdTokenAddress: '0xC011a7E12a19f7B1f670d46F03B03f3342E82DFB',
+    ctfTokenAddress: '0x4D97DCd97eC945f40cF65F87097ACe5EA0476045',
   },
 };
 

@@ -83,8 +83,9 @@ describeDb('treasury, against Postgres', () => {
     await withTransaction(client, (c) => writeBatch(c, sessionId, JSON.stringify({
       sessionId,
       fills: [{
-        source: 'VENUE', listingId, clientOidCounter: counter, cumQtyAfter: qty * UNIT, side, fillQty: qty * UNIT,
-        fillPrice: Math.round(cents * CENT), fee: Math.round(feeCents * CENT), eventTimeNs: 1, netQuantityAfter: net * UNIT,
+        source: 'VENUE', listingId, clientOidCounter: counter, cumQtyAfter: Math.round(qty * UNIT), side,
+        fillQty: Math.round(qty * UNIT), fillPrice: Math.round(cents * CENT), fee: Math.round(feeCents * CENT), eventTimeNs: 1,
+        netQuantityAfter: Math.round(net * UNIT),
         totalCostAfter: Math.round(Math.abs(net) * cents * CENT), realizedPnlAfter: 0, feesAfter: feeCents * CENT,
         positionVersion: counter,
       }],
@@ -253,6 +254,22 @@ describeDb('treasury, against Postgres', () => {
       { venue_key: '111', status: 'BREAK', venue_qty: String(7 * UNIT), ledger_qty: String(10 * UNIT) },
       { venue_key: '999', status: 'UNKNOWN_VENUE_POSITION', venue_qty: String(3 * UNIT), ledger_qty: '0' },
     ]);
+  });
+
+  it('holds a Polymarket Intl position to the unit: a 6-decimal fill agrees, one unit off breaks', async () => {
+    const pm = await account(2, 'quiet-falcon-01');
+    await open(pm, 100);
+    await live('a', [600]);
+    await trade('a', 600, 0, 5.555556, 64, 5.555556);
+    const t0 = new Date();
+    const read = async (quantity: number, minutes: number) => {
+      await snapshot(pm, 9644.444416, new Date(t0.getTime() + minutes * MINUTE), { positions: [{ venueKey: '111', quantity }] });
+      return (await client.query(`SELECT status FROM treasury.position_check WHERE venue_key = '111'`)).rows[0].status;
+    };
+    expect(await read(5_555_556, 0)).toBe('OK');
+    expect(await read(5_555_556, 6)).toBe('OK');
+    expect(await read(5_555_555, 7)).toBe('PENDING');
+    expect(await read(5_555_555, 13)).toBe('BREAK');
   });
 
   it('finds the listings behind a position the ledger never held, by the venue\'s key and nothing like it', async () => {

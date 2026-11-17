@@ -297,6 +297,7 @@ describe('the venue poller', () => {
     process.env.REGISTRY_API_KEY = 'key';
     process.env.POLYGON_RPC_URL = 'https://rpc.test';
     process.env.PUSD_TOKEN_ADDRESS = '0x' + '11'.repeat(20);
+    process.env.CTF_TOKEN_ADDRESS = '0x' + '22'.repeat(20);
     const posted: any[] = [];
     jest.spyOn(global, 'fetch').mockImplementation(async (url, init) => {
       const target = String(url);

@@ -114,6 +114,24 @@ describeDb('positions by risk group against Postgres', () => {
     expect(group.worst).toBe(cents(-50));
   });
 
+  it('once one venue settles the match, only its outcome is locked and the other is divergent', async () => {
+    await match();
+    // NO on Alpha at Kalshi for 45c, Alpha at Polymarket for 50c. Kalshi settled Beta (NO paid $1): the NO leg is
+    // booked flat at $1, Polymarket's Alpha is still open.
+    await hold(512, 0, 0, 550);
+    await hold(513, 10, 500);
+    await mark(513, 5);
+    await client.query(`UPDATE sm.event_contract SET settlement_price = $1 WHERE security_id = 12`, [String(100 * CENT)]);
+    await client.query(`UPDATE sm.event_contract SET settlement_price = 0 WHERE security_id = 11`);
+
+    const [group] = (await groups(client, { strategyId: '1', mode: 'paper' }, now)).groups;
+    // Kalshi's $5.50 is realized; Polymarket's Alpha pays nothing if Beta won there too: +50c locked.
+    expect(group.worlds.map(w => [w.label, w.pnl])).toEqual([['Not: Alpha', cents(50)]]);
+    // Only if Polymarket pays Alpha after all: +$5.50 + $5.
+    expect(group.divergent.map(w => [w.label, w.pnl])).toEqual([['Alpha', cents(1050)]]);
+    expect([group.locked, group.legs.find(l => l.held.listingId === 512)?.settlementPrice]).toEqual([cents(50), String(100 * CENT)]);
+  });
+
   it('nets a ladder of thresholds: n strikes, n + 1 worlds', async () => {
     await client.query(`INSERT INTO sm.security (security_id, symbol, type, contract_type) VALUES
       (21, 'S50', 0, 7), (22, 'S50N', 0, 7), (23, 'S60', 0, 7), (24, 'S60N', 0, 7)`);

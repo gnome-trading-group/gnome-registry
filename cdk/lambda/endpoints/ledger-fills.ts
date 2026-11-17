@@ -1,29 +1,38 @@
 import { APIGatewayProxyEvent } from 'aws-lambda';
 import { connectLedgerDatabase, createResponse, isSessionId } from './ledger-common';
 import { markPrice, notional, pricedMark, toBigInt } from './ledger-math';
-import { listingColumns, pageFilters, pageOrder } from './ledger-page';
+import { listingColumns, pageFilters, pageOrder, roleFilter } from './ledger-page';
 import { toMark } from './pnl-state';
 
 // A session's fills, or a strategy's across its sessions, newest first (see ledger-page for filters and paging); or
 // one order's fills (?orderSessionId=&clientOidCounter=), oldest first, including those a later session recovered
 // from the venue for it. Each fill carries the listing's mark when it traded and its slippage against it: positive
-// when the fill was better than the mark (bought below it, sold above it), in money for the fill's whole quantity.
+// when the fill was better than the mark (bought below it, sold above it), in money for the fill's whole quantity,
+// and what its order was for (order_role and order_episode_id; null for fills of no order). ?role=
+// keeps the fills of orders sent for those purposes. ?sessionId=&episodeId= gives one episode's fills, oldest first.
 const SOURCES = ['VENUE', 'RECOVERY', 'RESET', 'ADJUSTMENT', 'MANUAL', 'SETTLEMENT', 'GAP'];
 // Event times before this are not epoch nanoseconds (rows that never traded carry none).
 const MIN_EPOCH_NS = 1_000_000_000_000_000_000n;
 
 const ORDER_FILLS_LIMIT = 1000;
 
+function fillTime(alias: string): string {
+  return `CASE WHEN ${alias}.event_time_ns >= ${MIN_EPOCH_NS}
+    THEN to_timestamp(${alias}.event_time_ns::numeric / 1e9) ELSE ${alias}.recorded_at END`;
+}
+
 const SELECT_FILLS = `
   SELECT f.*, l.exchange_security_symbol AS symbol, l.exchange_id, spec.tick_size, spec.lot_size,
-    mk.bid AS mark_bid, mk.ask AS mark_ask, mk.last_trade AS mark_last_trade
+    mk.bid AS mark_bid, mk.ask AS mark_ask, mk.last_trade AS mark_last_trade,
+    ord.role AS order_role, ord.episode_id AS order_episode_id
   FROM ledger.fill f
   ${listingColumns('f')}
+  LEFT JOIN ledger.order ord ON ord.client_oid_counter = f.client_oid_counter
+    AND ord.session_id = CASE f.source WHEN 'VENUE' THEN f.session_id WHEN 'RECOVERY' THEN f.origin_session_id END
   LEFT JOIN LATERAL (
     SELECT bid, ask, last_trade FROM ledger.mark m
     WHERE m.listing_id = f.listing_id AND f.fill_price IS NOT NULL AND ${pricedMark('m')}
-      AND m.ts <= CASE WHEN f.event_time_ns >= ${MIN_EPOCH_NS}
-        THEN to_timestamp(f.event_time_ns::numeric / 1e9) ELSE f.recorded_at END
+      AND m.ts <= ${fillTime('f')}
     ORDER BY m.ts DESC LIMIT 1
   ) mk ON TRUE`;
 
@@ -40,8 +49,30 @@ function orderFilter(params: Record<string, string | undefined>): { where: strin
   };
 }
 
+// An episode is the strategy's id for a quote fill and the hedges it set off: the counter of the quote order whose
+// fill opened it, carried on each hedge. The other quote fills that land while it is open (the other side's bid
+// filling before the pull reaches the venue) were placed before it existed, so they carry nothing; each belongs to
+// the episode of the first hedge sent after it, since the strategy hedges whatever gap it holds with the episode
+// that is open. The opening order's own fills are taken by id rather than by time: fill times are the venue's clock
+// and order times the OMS's, so a fill hedged within the clocks' skew could look newer than its hedge.
+function episodeFilter(params: Record<string, string | undefined>): { where: string; values: unknown[] } | null {
+  if (params.episodeId === undefined) return null;
+  if (!params.sessionId || !isSessionId(params.sessionId)) throw new Error('episodeId needs a sessionId');
+  if (!/^[1-9]\d*$/.test(params.episodeId)) throw new Error('episodeId must be a positive integer');
+  return {
+    where: `((f.source = 'VENUE' AND f.session_id = $1) OR (f.source = 'RECOVERY' AND f.origin_session_id = $1))
+      AND ((ord.role = 'HEDGE' AND ord.episode_id = $2)
+        OR (ord.role = 'QUOTE' AND (ord.client_oid_counter = $2 OR (
+          ${fillTime('f')} <= (SELECT max(h.opened_at) FROM ledger.order h WHERE h.session_id = $1 AND h.episode_id = $2)
+          AND (SELECT h.episode_id FROM ledger.order h
+            WHERE h.session_id = $1 AND h.role = 'HEDGE' AND h.opened_at >= ${fillTime('f')}
+            ORDER BY h.opened_at LIMIT 1) = $2))))`,
+    values: [params.sessionId, params.episodeId],
+  };
+}
+
 export function buildFillsQuery(params: Record<string, string | undefined>): { text: string; values: unknown[] } {
-  const order = orderFilter(params);
+  const order = orderFilter(params) ?? episodeFilter(params);
   if (order) {
     return { text: `${SELECT_FILLS} WHERE ${order.where} ORDER BY f.fill_id LIMIT ${ORDER_FILLS_LIMIT}`, values: order.values };
   }
@@ -52,6 +83,7 @@ export function buildFillsQuery(params: Record<string, string | undefined>): { t
     page.values.push(sources);
     page.where.push(`f.source = ANY($${page.values.length}::text[])`);
   }
+  roleFilter(params, page, 'ord.role');
   return {
     text: `${SELECT_FILLS} WHERE ${page.where.join(' AND ')} ${pageOrder('f.fill_id', page)}`,
     values: page.values,
@@ -80,7 +112,8 @@ export const handler = async (event: APIGatewayProxyEvent) => {
   const pool = await connectLedgerDatabase();
   const client = await pool.connect();
   try {
-    const oldestFirst = !!event.queryStringParameters?.orderSessionId;
+    const params = event.queryStringParameters ?? {};
+    const oldestFirst = !!params.orderSessionId || params.episodeId !== undefined;
     const rows = (await client.query(query)).rows
       .map(withSlippage)
       .sort((a, b) => Number(oldestFirst ? BigInt(a.fill_id) - BigInt(b.fill_id) : BigInt(b.fill_id) - BigInt(a.fill_id)));
