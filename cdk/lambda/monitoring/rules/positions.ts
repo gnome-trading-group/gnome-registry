@@ -4,8 +4,9 @@ import { Finding, finding, seconds } from './types';
 import { NO_PRICE_AFTER_MS } from './thresholds';
 
 // Positions the ledger can't vouch for, and held positions with no recent price (prediction markets can be quiet, so
-// that one is only worth knowing). A listing no session is on is priced by the mark poller, which writes a row every
-// few minutes even on a quiet book, so there a missing price means the poller can't read it. A settled listing needs
+// that one is only worth knowing). Both writers, a session on the listing and the mark poller for one no session is
+// on, write a row every few minutes even on a quiet book, so a missing price means the writer can't read or send
+// it (a book flagged bad data, a ledger that can't post). A settled listing needs
 // no price: the settlement rules follow it until the sweeper closes the position.
 export async function positions(client: PoolClient, now: Date): Promise<Finding[]> {
   const findings: Finding[] = [];

@@ -254,6 +254,14 @@ describe('reward breakdowns', () => {
     expect(easternMidnight('2026-07-04').toISOString()).toBe('2026-07-04T04:00:00.000Z');
   });
 
+  it('starts a Polymarket US day at Eastern midnight on the days daylight saving changes', () => {
+    // Midnight comes before the 2 a.m. change, so it keeps the offset of the day before.
+    expect(easternMidnight('2026-03-08').toISOString()).toBe('2026-03-08T05:00:00.000Z');
+    expect(easternMidnight('2026-11-01').toISOString()).toBe('2026-11-01T04:00:00.000Z');
+    expect(easternMidnight('2026-03-09').toISOString()).toBe('2026-03-09T04:00:00.000Z');
+    expect(easternMidnight('2026-11-02').toISOString()).toBe('2026-11-02T05:00:00.000Z');
+  });
+
   it('lists everything earned up to a Polymarket US payout, by Eastern day, for the oldest unpaid days to be matched', () => {
     const b = liquidityBreakdown(
       { external_ref: 'p', program: 'LIQUIDITY', occurred_at: '2026-11-12T16:00:00Z', amount: '1' },

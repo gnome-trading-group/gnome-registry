@@ -1,8 +1,8 @@
 import { fetchWithRetry } from './http';
 import { polymarketUsHeaders, polymarketUsKey } from './signers';
 import {
-  CreditBreakdown, CreditKind, CreditProgram, DAY_MS, isoDate, PendingCredit, PollTarget, PRICE_SCALE, scaleDecimal,
-  SIZE_SCALE, unclassifiedCredit, VenueCredit, VenueReading,
+  CreditBreakdown, CreditKind, CreditProgram, DAY_MS, IncentiveProgramReading, isoDate, PendingCredit, PollTarget,
+  PRICE_SCALE, scaleDecimal, SIZE_SCALE, unclassifiedCredit, VenueCredit, VenueReading,
 } from './types';
 
 // Polymarket US reports balances per currency, and positions as an object keyed by market slug, paged by cursor,
@@ -205,10 +205,8 @@ const earned = (reward: unknown): bigint => {
 
 // Midnight starting a calendar day in the venue's zone (US Eastern), whose offset from UTC changes with daylight saving.
 export function easternMidnight(date: string): Date {
-  const noon = new Date(`${date.slice(0, 10)}T12:00:00Z`);
-  const hour = Number(new Intl.DateTimeFormat('en-US', { timeZone: VENUE_ZONE, hour: 'numeric', hourCycle: 'h23' })
-    .format(noon));
-  return new Date(noon.getTime() - hour * 3_600_000);
+  // Noon UTC falls on the same Eastern date whatever the offset.
+  return easternDayStart(new Date(`${date.slice(0, 10)}T12:00:00Z`));
 }
 
 // Everything each market earned per (Eastern) day up to the payout, for the registry to find the oldest unpaid days
@@ -240,4 +238,138 @@ export async function readPolymarketUsBreakdowns(credentials: Credentials, pendi
     breakdowns.push(liquidityBreakdown(credit, page.rewards ?? []));
   }
   return breakdowns;
+}
+
+// Polymarket US's liquidity programs, from the gateway's public list (api.polymarket.us serves the same list only to a
+// signed request). A program is one period of a venue program on one market: many markets share a programId, and a
+// market can carry several, each paid on its own. The list's `start` is when the venue program began across all its
+// markets, not when a market's period opens: early, day_of and live run on the market's own kickoff (early from listing
+// to six hours before it, day_of those six hours, live from it until the market stops trading), each paying its pool
+// over that window; daily and daily_event pools pay per Eastern day. The list never gives an end, and a period's status
+// follows its venue program rather than its window, so a market's programs are posted only while it trades; the sync
+// ends them once it doesn't.
+// The gateway ignores the documented pageSize and pageToken, serving the first page again with a fresh token forever;
+// it reads page_size and page_token.
+const INCENTIVES_URL = 'https://gateway.polymarket.us/v1/incentives';
+const INCENTIVE_PAGE_SIZE = 500;
+const MAX_INCENTIVE_PAGES = 400;
+const TRADING = 'INSTRUMENT_STATE_OPEN';
+const LISTED_STATUSES = ['active', 'pending'];
+const DAY_PERIODS = ['daily', 'daily_event'];
+const WINDOW_PERIODS = ['early', 'day_of', 'live'];
+const PRE_GAME_MS = 6 * 3_600_000;
+
+export interface PolymarketUsIncentiveRead {
+  programs: IncentiveProgramReading[];
+  // Markets the list shows but that no longer trade: stopped, or expired and not yet dropped from the list.
+  stopped: Set<string>;
+}
+
+const easternDate = (at: Date): string => new Intl.DateTimeFormat('en-CA', { timeZone: VENUE_ZONE }).format(at);
+const easternHour = (at: Date): number =>
+  Number(new Intl.DateTimeFormat('en-US', { timeZone: VENUE_ZONE, hour: 'numeric', hourCycle: 'h23' }).format(at));
+
+// Midnight starting the Eastern day the instant falls on, exact on the days daylight saving changes.
+export function easternDayStart(at: Date): Date {
+  const date = easternDate(at);
+  for (const behindUtc of [4, 5]) {
+    const midnight = new Date(Date.parse(`${date}T00:00:00Z`) + behindUtc * 3_600_000);
+    if (easternDate(midnight) === date && easternHour(midnight) === 0) return midnight;
+  }
+  throw new Error(`No Eastern midnight found for ${date}`);
+}
+
+export const nextEasternMidnight = (at: Date): Date =>
+  easternDayStart(new Date(easternDayStart(at).getTime() + 25 * 3_600_000));
+
+// The venue writes kickoffs three ways: "2026-11-19 00:00:00+00", "2026-11-10T05:00:00.000Z", "2026-10-16T12:00:00-04:00".
+export function kickoffTime(value: unknown): Date | null {
+  if (typeof value !== 'string' || value === '') return null;
+  const ms = Date.parse(value.replace(' ', 'T').replace(/([+-]\d{2})$/, '$1:00'));
+  return Number.isNaN(ms) ? null : new Date(ms);
+}
+
+const later = (a: Date, b: Date): Date => (a > b ? a : b);
+
+// Null for a window period on a market with no kickoff: its window can't be placed (all are markets already closed).
+function programWindow(period: string, start: Date, kickoff: Date | null)
+  : { from: Date; to: Date | null; per: 'DAY' | 'PERIOD' } | null {
+  if (DAY_PERIODS.includes(period)) return { from: start, to: null, per: 'DAY' };
+  if (!WINDOW_PERIODS.includes(period)) throw new Error(`Polymarket US program period ${period} has no known window`);
+  if (!kickoff) return null;
+  const preGame = new Date(kickoff.getTime() - PRE_GAME_MS);
+  if (period === 'early') return { from: start, to: preGame, per: 'PERIOD' };
+  if (period === 'day_of') return { from: later(start, preGame), to: kickoff, per: 'PERIOD' };
+  return { from: later(start, kickoff), to: null, per: 'PERIOD' };
+}
+
+export function parsePolymarketUsIncentiveMarket(m: Record<string, any>): IncentiveProgramReading[] {
+  if (m.instrumentState !== TRADING) return [];
+  const { timePeriods, ...market } = m;
+  const slug = String(m.marketSlug);
+  const kickoff = kickoffTime(m.eventStartTime);
+  return ((timePeriods ?? []) as Record<string, any>[]).flatMap((p): IncentiveProgramReading[] => {
+    if (p.programType !== 'liquidityProgram' || !LISTED_STATUSES.includes(p.status)) return [];
+    const window = programWindow(String(p.period), new Date(p.start), kickoff);
+    if (!window) return [];
+    const pool = Number(p.rewardPool);
+    if (!Number.isFinite(pool) || pool < 0) throw new Error(`Polymarket US program ${p.programId} has rewardPool ${p.rewardPool}`);
+    const end = p.end ? new Date(p.end) : window.to;
+    return [{
+      venueProgramId: `${p.programId}:${slug}:${p.period}`,
+      program: 'LIQUIDITY',
+      venueMarket: slug,
+      periodStart: window.from.toISOString(),
+      periodEnd: end ? end.toISOString() : null,
+      reward: String(pool),
+      rewardPer: window.per,
+      definition: {
+        targetSize: Number(p.targetSize),
+        discountFactor: Number(p.discountFactor),
+        // Dollars from the mid; 0.07 × 100 is 7.000000000000001 in floating point.
+        ...(p.maxSpread != null ? { maxSpreadCents: Number((Number(p.maxSpread) * 100).toFixed(4)) } : {}),
+        period: String(p.period),
+      },
+      paidOut: null,
+      sourceRef: INCENTIVES_URL,
+      raw: { ...market, timePeriod: p },
+    }];
+  });
+}
+
+// Every page, or an error: a partial list would read as programs ending. A page that brings no market not already
+// read means the cursor isn't moving.
+export async function readPolymarketUsIncentivePrograms(): Promise<PolymarketUsIncentiveRead> {
+  const baseUrl = process.env.POLYMARKET_US_GATEWAY_URL ?? INCENTIVES_URL;
+  const seen = new Set<string>();
+  const stopped = new Set<string>();
+  let programs: IncentiveProgramReading[] = [];
+  let token = '';
+  for (let page = 0; page < MAX_INCENTIVE_PAGES; page++) {
+    const res = await fetchWithRetry(`${baseUrl}?page_size=${INCENTIVE_PAGE_SIZE}`
+      + (token ? `&page_token=${encodeURIComponent(token)}` : ''));
+    if (!res.ok) throw new Error(`Polymarket US incentives page ${page} failed: ${res.status} ${await res.text()}`);
+    const body = await res.json() as { programs?: Record<string, any>[]; nextPageToken?: string };
+    const markets = body.programs ?? [];
+    const fresh = markets.filter(m => !seen.has(String(m.marketSlug)));
+    if (markets.length > 0 && fresh.length === 0) throw new Error(`Polymarket US incentives page ${page} repeats markets already read`);
+    for (const m of fresh) {
+      seen.add(String(m.marketSlug));
+      if (m.instrumentState !== TRADING) stopped.add(String(m.marketSlug));
+    }
+    programs = programs.concat(fresh.flatMap(parsePolymarketUsIncentiveMarket));
+    token = body.nextPageToken ?? '';
+    if (!token || markets.length === 0) return { programs, stopped };
+  }
+  throw new Error(`Polymarket US incentives ran past ${MAX_INCENTIVE_PAGES} pages`);
+}
+
+// The end of a program the registry holds as running that a read no longer posts. A daily pool covers the whole
+// Eastern day, so one whose market stopped trading runs to the end of that day; one the venue dropped from a market
+// still trading may not pay the part day, so it ends with the last whole one. A windowed program ends now: its market
+// stopped trading or the venue dropped it, and nothing earns after either. An expired market leaves the list an hour
+// or two after it stops; a sync down longer than that reads it as dropped.
+export function polymarketUsUnlistedEnd(program: IncentiveProgramReading, now: Date, stopped: Set<string>): Date {
+  if (program.rewardPer === 'PERIOD') return now;
+  return stopped.has(program.venueMarket) ? nextEasternMidnight(now) : easternDayStart(now);
 }

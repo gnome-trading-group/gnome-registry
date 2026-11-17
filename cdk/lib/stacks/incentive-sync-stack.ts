@@ -28,7 +28,8 @@ export class IncentiveSyncStack extends cdk.Stack {
     this.syncLambda = new lambda.NodejsFunction(this, 'incentive-sync-lambda', {
       entry: join(__dirname, '..', '..', 'lambda', 'sync', 'incentive-sync.ts'),
       runtime: Runtime.NODEJS_20_X,
-      // A daily Kalshi payout sweep reads about 140 pages; well under the schedule, so runs never overlap.
+      // A daily Kalshi payout sweep reads about 140 pages and Polymarket US about 100 more; well under the schedule,
+      // so runs never overlap.
       timeout: cdk.Duration.minutes(10),
       memorySize: 1024,
       environment: {

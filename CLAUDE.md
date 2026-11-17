@@ -219,11 +219,17 @@ synth step, so run `npm test` yourself before handing off.
     `rewards` (gross, paid once a period ended, per program) outside its trading PnL. `GET /ledger/reward-accruals`
     (`sessionId`, or `strategyId` + `mode`) gives each listing and program's latest snapshot.
   - IncentiveSyncStack: every 15 min, reads the venues' incentive programs (Kalshi liquidity incentives, Polymarket
-    Intl liquidity rewards) from their public APIs and posts them to `/incentive-programs`, which keeps new and changed
-    ones in `sm.incentive_program` (append-only, point in time like fee schedules; the registry sets
+    Intl liquidity rewards, Polymarket US liquidity programs) from their public APIs and posts them to
+    `/incentive-programs`, which keeps new and changed ones in `sm.incentive_program` (append-only, point in time like
+    fee schedules; the registry sets
     `effective_from`). Kalshi: the unpaid programs every run, plus a sweep of paid ones in the first run after 11:00
     UTC; `scripts/backfill-incentive-programs.ts` loads older ones. Polymarket Intl lists only current programs, so one
-    that drops off a complete read is ended at that UTC day's start. Paper and backtest reward estimates read them.
+    that drops off a complete read is ended at that UTC day's start. Polymarket US (the gateway's
+    `/v1/incentives`, which reads `page_size`/`page_token`, not the documented camelCase) gives one program per
+    (programId, market, period): daily pools per Eastern day, pre-game and live periods as windows on the market's
+    kickoff (early to kickoff − 6 h, day_of the 6 h before, live from kickoff); programs are posted only while their
+    market trades, and one that drops off ends now (windows), at the next Eastern midnight (daily, market stopped) or
+    that Eastern day's start (daily, dropped from a trading market). Paper and backtest reward estimates read them.
   - SettlementSweeperStack: every 5 min, books SETTLEMENT entries for settled positions no session holds.
   - StrategySessionMonitorStack: updates session status from EC2 instance state-change events.
   - AlertingStack: event bus `gnome-alerts`; ingest API (`POST /alerts`, registry API key, URL in SSM

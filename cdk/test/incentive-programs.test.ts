@@ -6,6 +6,10 @@ import { validateIncentiveDefinition } from '../lambda/incentives/definition';
 import { isKalshiPayoutRun, postInChunks, syncVenue, unlistedEnded } from '../lambda/sync/incentive-sync';
 import { parseKalshiIncentiveProgram, readKalshiIncentivePrograms, UNPAID_INCENTIVE_STATUSES } from '../lambda/sync/venues/kalshi';
 import { parsePolymarketIntlRewardMarket } from '../lambda/sync/venues/polymarket-intl';
+import {
+  easternDayStart, kickoffTime, nextEasternMidnight, parsePolymarketUsIncentiveMarket, polymarketUsUnlistedEnd,
+  readPolymarketUsIncentivePrograms,
+} from '../lambda/sync/venues/polymarket-us';
 import { IncentiveProgramReading } from '../lambda/sync/venues/types';
 
 const fixture = (name: string) => JSON.parse(readFileSync(join(__dirname, 'fixtures', 'venues', name), 'utf8'));
@@ -110,6 +114,181 @@ describe('Polymarket Intl reward markets', () => {
   });
 });
 
+describe('Polymarket US incentive programs', () => {
+  const markets: Record<string, any>[] = fixture('polymarket-us-incentives.json').programs;
+  const market = (slug: string) => markets.find(m => m.marketSlug === slug)!;
+  const read = (slug: string) => parsePolymarketUsIncentiveMarket(market(slug));
+  const window = (slug: string) => Object.fromEntries(read(slug).map(p => [p.definition.period, [p.periodStart, p.periodEnd, p.rewardPer]]));
+
+  it('reads a daily_event program: pool per Eastern day, spread in cents', () => {
+    const [p] = read('rotc-t-avedoo-2026-12-21-gte55');
+    expect(p).toMatchObject({
+      venueProgramId: 'culture_low_20260924_v2:rotc-t-avedoo-2026-12-21-gte55:daily_event',
+      program: 'LIQUIDITY',
+      venueMarket: 'rotc-t-avedoo-2026-12-21-gte55',
+      periodStart: '2026-09-24T21:00:00.000Z',
+      periodEnd: null,
+      reward: '40',
+      rewardPer: 'DAY',
+      definition: { targetSize: 500, discountFactor: 0.25, maxSpreadCents: 6, period: 'daily_event' },
+      paidOut: null,
+    });
+    expect(() => validateIncentiveDefinition('POLYMARKET_US', p.definition)).not.toThrow();
+  });
+
+  it('reads a futures daily program per day too, with no spread when the venue gives none', () => {
+    const [p] = read('aachc-bun-2027-05-22-relegation-aug');
+    expect(p).toMatchObject({ reward: '8', rewardPer: 'DAY', periodEnd: null });
+    expect(p.definition).toEqual({ targetSize: 2500, discountFactor: 0.35, period: 'daily' });
+    expect(() => validateIncentiveDefinition('POLYMARKET_US', p.definition)).not.toThrow();
+  });
+
+  it('keeps each of a market\'s programs on its own', () => {
+    expect(read('aaagaspc-usgas-day-2026-11-17-gt3pt7700').map(p => [p.venueProgramId, p.reward])).toEqual([
+      ['macro_low_20260924:aaagaspc-usgas-day-2026-11-17-gt3pt7700:daily_event', '15'],
+      ['usgas_daily_ladder_20261110:aaagaspc-usgas-day-2026-11-17-gt3pt7700:daily_event', '200'],
+    ]);
+  });
+
+  it('places pre-game and live periods on the market\'s kickoff, not the venue program\'s start', () => {
+    // Kickoff 14:30 UTC; the venue programs began 2026-10-18 across every market they cover.
+    expect(window('atc-bun-aug-mai-2026-11-22-aug')).toEqual({
+      early: ['2026-10-18T18:00:00.000Z', '2026-11-22T08:30:00.000Z', 'PERIOD'],
+      day_of: ['2026-11-22T08:30:00.000Z', '2026-11-22T14:30:00.000Z', 'PERIOD'],
+      live: ['2026-11-22T14:30:00.000Z', null, 'PERIOD'],
+    });
+    expect(window('asc-cfb-akron-umass-2026-11-18-neg-10pt5')).toEqual({
+      day_of: ['2026-11-18T18:00:00.000Z', '2026-11-19T00:00:00.000Z', 'PERIOD'],
+      live: ['2026-11-19T00:00:00.000Z', null, 'PERIOD'],
+    });
+  });
+
+  it('starts a window at the venue program\'s start when that comes later, and takes an end the venue gives', () => {
+    const m = market('asc-cfb-akron-umass-2026-11-18-neg-10pt5');
+    const late = { ...m, timePeriods: m.timePeriods.map((p: any) => ({ ...p, start: '2026-11-18T21:00:00Z', end: '2026-11-19T03:10:00Z' })) };
+    expect(Object.fromEntries(parsePolymarketUsIncentiveMarket(late).map(p => [p.definition.period, [p.periodStart, p.periodEnd]])))
+      .toEqual({
+        day_of: ['2026-11-18T21:00:00.000Z', '2026-11-19T03:10:00.000Z'],
+        live: ['2026-11-19T00:00:00.000Z', '2026-11-19T03:10:00.000Z'],
+      });
+  });
+
+  it('reads the three ways the venue writes a kickoff', () => {
+    expect(kickoffTime('2026-11-19 00:00:00+00')?.toISOString()).toBe('2026-11-19T00:00:00.000Z');
+    expect(kickoffTime('2026-11-10T05:00:00.000Z')?.toISOString()).toBe('2026-11-10T05:00:00.000Z');
+    expect(kickoffTime('2026-10-16T12:00:00-04:00')?.toISOString()).toBe('2026-10-16T16:00:00.000Z');
+    expect(kickoffTime('')).toBeNull();
+    expect(kickoffTime(undefined)).toBeNull();
+  });
+
+  it('posts nothing for a market that no longer trades', () => {
+    expect(read('asc-nba-chi-cle-2026-11-16-q1-neg-2pt5')).toEqual([]);
+    expect(read('astatc-nba-hou-mia-2026-11-16-ast-ametho-gte2')).toEqual([]);
+  });
+
+  it('skips a window period whose market has no kickoff, and programs that aren\'t liquidity', () => {
+    const m = market('asc-cfb-akron-umass-2026-11-18-neg-10pt5');
+    expect(parsePolymarketUsIncentiveMarket({ ...m, eventStartTime: '' })).toEqual([]);
+    expect(parsePolymarketUsIncentiveMarket({ ...m, timePeriods: m.timePeriods.map((p: any) => ({ ...p, programType: 'volumeProgram' })) }))
+      .toEqual([]);
+  });
+
+  it('fails on a period kind whose window it doesn\'t know', () => {
+    const m = market('rotc-t-avedoo-2026-12-21-gte55');
+    expect(() => parsePolymarketUsIncentiveMarket({ ...m, timePeriods: [{ ...m.timePeriods[0], period: 'overnight' }] }))
+      .toThrow('overnight');
+  });
+
+  it('gives the spread in cents without floating-point noise', () => {
+    const m = market('rotc-t-avedoo-2026-12-21-gte55');
+    const [p] = parsePolymarketUsIncentiveMarket({ ...m, timePeriods: [{ ...m.timePeriods[0], maxSpread: 0.07 }] });
+    expect(p.definition.maxSpreadCents).toBe(7);
+  });
+
+  it('gives terms the registry accepts, and refuses ones it couldn\'t score', () => {
+    for (const m of markets) {
+      for (const p of parsePolymarketUsIncentiveMarket(m)) {
+        expect(() => validateIncentiveDefinition('POLYMARKET_US', p.definition)).not.toThrow();
+      }
+    }
+    const ok = { targetSize: 500, discountFactor: 0.25, period: 'live' };
+    expect(() => validateIncentiveDefinition('POLYMARKET_US', { ...ok, discountFactor: 1.5 })).toThrow(ValidationError);
+    expect(() => validateIncentiveDefinition('POLYMARKET_US', { ...ok, maxSpreadCents: 0 })).toThrow(ValidationError);
+    expect(() => validateIncentiveDefinition('POLYMARKET_US', { ...ok, period: '' })).toThrow(ValidationError);
+    expect(() => validateIncentiveDefinition('POLYMARKET_US', { ...ok, minSize: 1 })).toThrow(ValidationError);
+  });
+
+  describe('reading the list', () => {
+    afterEach(() => jest.restoreAllMocks());
+    const page = (programs: Record<string, any>[], nextPageToken = '') => new Response(JSON.stringify({ programs, nextPageToken }));
+
+    it('follows page_token, which the gateway reads where it ignores the documented pageToken', async () => {
+      const urls: URL[] = [];
+      jest.spyOn(global, 'fetch').mockImplementation(async (url) => {
+        const u = new URL(String(url));
+        urls.push(u);
+        return u.searchParams.get('page_token') === 'two' ? page(markets.slice(5)) : page(markets.slice(0, 5), 'two');
+      });
+      const result = await readPolymarketUsIncentivePrograms();
+      expect(urls.map(u => [u.searchParams.get('page_size'), u.searchParams.get('page_token')])).toEqual([['500', null], ['500', 'two']]);
+      expect(result.programs.map(p => p.venueMarket)).toContain('rotc-t-avedoo-2026-12-21-gte55');
+      expect([...result.stopped].sort()).toEqual(['asc-nba-chi-cle-2026-11-16-q1-neg-2pt5', 'astatc-nba-hou-mia-2026-11-16-ast-ametho-gte2']);
+    });
+
+    it('fails when a page brings back only markets already read, as the documented parameters do', async () => {
+      let n = 0;
+      jest.spyOn(global, 'fetch').mockImplementation(async () => page(markets.slice(0, 5), `fresh-token-${n++}`));
+      await expect(readPolymarketUsIncentivePrograms()).rejects.toThrow('repeats markets');
+    });
+
+    it('fails rather than return part of the list', async () => {
+      jest.spyOn(global, 'fetch').mockImplementation(async (url) =>
+        new URL(String(url)).searchParams.get('page_token') ? new Response('bad', { status: 400 }) : page(markets.slice(0, 5), 'two'));
+      await expect(readPolymarketUsIncentivePrograms()).rejects.toThrow('page 1 failed: 400');
+    });
+  });
+
+  describe('ending programs that leave the list', () => {
+    const [daily] = read('rotc-t-avedoo-2026-12-21-gte55');
+    const live = read('asc-cfb-akron-umass-2026-11-18-neg-10pt5').find(p => p.definition.period === 'live')!;
+    const now = new Date('2026-11-17T02:30:00Z');
+
+    it('runs a daily program to the end of the Eastern day its market stopped trading on', () => {
+      expect(polymarketUsUnlistedEnd(daily, now, new Set([daily.venueMarket])).toISOString()).toBe('2026-11-17T05:00:00.000Z');
+    });
+
+    it('ends a daily program the venue dropped from a trading market with the last whole Eastern day', () => {
+      expect(polymarketUsUnlistedEnd(daily, now, new Set()).toISOString()).toBe('2026-11-16T05:00:00.000Z');
+    });
+
+    it('ends a windowed program now', () => {
+      expect(polymarketUsUnlistedEnd(live, now, new Set([live.venueMarket]))).toBe(now);
+      expect(polymarketUsUnlistedEnd(live, now, new Set())).toBe(now);
+    });
+
+    it('finds Eastern midnight on the days daylight saving changes', () => {
+      expect(easternDayStart(new Date('2026-03-08T12:00:00Z')).toISOString()).toBe('2026-03-08T05:00:00.000Z');
+      expect(nextEasternMidnight(new Date('2026-03-08T12:00:00Z')).toISOString()).toBe('2026-03-09T04:00:00.000Z');
+      expect(easternDayStart(new Date('2026-11-01T12:00:00Z')).toISOString()).toBe('2026-11-01T04:00:00.000Z');
+      expect(nextEasternMidnight(new Date('2026-11-01T12:00:00Z')).toISOString()).toBe('2026-11-02T05:00:00.000Z');
+      expect(easternDayStart(new Date('2026-11-17T04:59:59Z')).toISOString()).toBe('2026-11-16T05:00:00.000Z');
+    });
+
+    it('closes the market\'s programs once, through the sync, and leaves the ones still listed', async () => {
+      const posted: IncentiveProgramReading[][] = [];
+      const result = await syncVenue('POLYMARKET_US', {
+        read: async () => ({ programs: [live], stopped: new Set([daily.venueMarket]) }),
+        closeUnlisted: (program, at, venueRead) => polymarketUsUnlistedEnd(program, at, venueRead.stopped!),
+      }, now, async (rows) => {
+        posted.push(rows);
+        return { inserted: rows.length, unchanged: 0 };
+      }, async () => [live, daily]);
+      expect(result).toMatchObject({ read: 1, ended: 1 });
+      expect(posted[1]).toEqual([{ ...daily, periodEnd: '2026-11-17T05:00:00.000Z' }]);
+    });
+  });
+});
+
 describe('incentive program posts', () => {
   const row = (fields: Record<string, unknown> = {}) => ({
     exchangeCode: 'KALSHI', venueProgramId: 'p1', program: 'LIQUIDITY', venueMarket: 'KXRT-VIO-60',
@@ -161,8 +340,15 @@ describe('incentive sync', () => {
 
   it('ends the open programs a complete read no longer lists, keeping their terms', () => {
     const end = new Date('2026-11-12T00:00:00Z');
-    expect(unlistedEnded([reading('a'), reading('b')], [reading('a')], end))
+    expect(unlistedEnded([reading('a'), reading('b')], [reading('a')], () => end))
       .toEqual([{ ...reading('b'), periodEnd: '2026-11-12T00:00:00.000Z' }]);
+  });
+
+  it('keeps an end already recorded when it comes sooner, so a later run cannot push it back', () => {
+    const ending = { ...reading('b'), periodEnd: '2026-11-13T05:00:00.000Z' };
+    expect(unlistedEnded([ending], [], () => new Date('2026-11-14T05:00:00Z'))).toEqual([]);
+    expect(unlistedEnded([ending], [], () => new Date('2026-11-12T17:00:00Z')))
+      .toEqual([{ ...ending, periodEnd: '2026-11-12T17:00:00.000Z' }]);
   });
 
   it('posts in chunks of 1000 and adds up what the registry kept', async () => {
@@ -179,8 +365,8 @@ describe('incentive sync', () => {
   it('closes unlisted programs at the UTC day start for a venue that lists only current programs', async () => {
     const posted: { rows: IncentiveProgramReading[]; source: string }[] = [];
     const result = await syncVenue('POLYMARKET_INTL', {
-      read: async () => [reading('a')],
-      closeUnlisted: (now) => new Date(Math.floor(now.getTime() / 86_400_000) * 86_400_000),
+      read: async () => ({ programs: [reading('a')] }),
+      closeUnlisted: (_program, now) => new Date(Math.floor(now.getTime() / 86_400_000) * 86_400_000),
     }, new Date('2026-11-12T17:30:00Z'),
     async (rows, _code, source) => {
       posted.push({ rows, source });

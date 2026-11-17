@@ -7,6 +7,10 @@ import { ValidationError } from '../endpoints/base';
 //   POLYMARKET_INTL    minSize (shares an order needs to score), maxSpreadCents (from the adjusted midpoint), asset
 //                      (the token it pays in). The venue lists some markets at a zero spread and size and $0.001 a
 //                      day, which no order can earn; they're kept as listed.
+//   POLYMARKET_US      targetSize (contracts per side a snapshot needs), discountFactor (per tick behind the best price,
+//                      in (0, 1]), maxSpreadCents (from the midpoint both sides' size-adjusted prices must sit within;
+//                      absent when the program has none), period (the venue's kind: daily, daily_event, early, day_of,
+//                      live)
 
 function positive(name: string, value: unknown, allowZero = false): number {
   if (typeof value !== 'number' || !Number.isFinite(value) || value < 0 || (!allowZero && value === 0)) {
@@ -35,6 +39,15 @@ const VALIDATORS: Record<string, (d: Record<string, unknown>) => void> = {
     if (typeof d.asset !== 'string' || !/^0x[0-9a-fA-F]{40}$/.test(d.asset)) {
       throw new ValidationError('definition.asset must be a token address');
     }
+  },
+  POLYMARKET_US: (d) => {
+    exactKeys('definition', d, ['targetSize', 'discountFactor', 'maxSpreadCents', 'period']);
+    positive('definition.targetSize', d.targetSize);
+    if (positive('definition.discountFactor', d.discountFactor) > 1) {
+      throw new ValidationError('definition.discountFactor must be at most 1');
+    }
+    if (d.maxSpreadCents !== undefined) positive('definition.maxSpreadCents', d.maxSpreadCents);
+    if (typeof d.period !== 'string' || d.period === '') throw new ValidationError('definition.period must be a string');
   },
 };
 

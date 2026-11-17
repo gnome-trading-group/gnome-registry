@@ -1,6 +1,7 @@
 import { registryFetch, resolveApiKey } from './registry-client';
 import { readKalshiIncentivePrograms } from './venues/kalshi';
 import { readPolymarketIntlIncentivePrograms } from './venues/polymarket-intl';
+import { polymarketUsUnlistedEnd, readPolymarketUsIncentivePrograms } from './venues/polymarket-us';
 import { DAY_MS, IncentiveProgramReading } from './venues/types';
 
 // Records the venues' incentive programs in the registry every 15 minutes: each venue's reader returns what the venue
@@ -17,20 +18,32 @@ const KALSHI_PAYOUT_LOOKBACK_MS = 45 * DAY_MS;
 export type Post = (rows: IncentiveProgramReading[], exchangeCode: string, source: string) => Promise<{ inserted: number; unchanged: number }>;
 export type ReadOpen = (exchangeCode: string, endingAfter: Date) => Promise<IncentiveProgramReading[]>;
 
-interface VenueSync {
-  read: (now: Date) => Promise<IncentiveProgramReading[]>;
-  // Programs the registry holds as running that a complete read no longer lists, ended as of now.
-  closeUnlisted?: (now: Date) => Date;
+export interface VenueRead {
+  programs: IncentiveProgramReading[];
+  // Markets the venue lists but that no longer trade, for a venue whose programs end with their market.
+  stopped?: Set<string>;
+}
+
+export interface VenueSync {
+  read: (now: Date) => Promise<VenueRead>;
+  // When a program the registry holds as running, which a complete read no longer lists, ended.
+  closeUnlisted?: (program: IncentiveProgramReading, now: Date, read: VenueRead) => Date;
 }
 
 const VENUES: Record<string, VenueSync> = {
   KALSHI: {
-    read: (now) => readKalshiIncentivePrograms(isKalshiPayoutRun(now) ? new Date(now.getTime() - KALSHI_PAYOUT_LOOKBACK_MS) : undefined),
+    read: async (now) => ({
+      programs: await readKalshiIncentivePrograms(isKalshiPayoutRun(now) ? new Date(now.getTime() - KALSHI_PAYOUT_LOOKBACK_MS) : undefined),
+    }),
   },
   POLYMARKET_INTL: {
-    read: () => readPolymarketIntlIncentivePrograms(),
+    read: async () => ({ programs: await readPolymarketIntlIncentivePrograms() }),
     // Polymarket pays per UTC day and doesn't say whether a part day is paid, so the day it went missing isn't.
-    closeUnlisted: (now) => new Date(Math.floor(now.getTime() / DAY_MS) * DAY_MS),
+    closeUnlisted: (_program, now) => new Date(Math.floor(now.getTime() / DAY_MS) * DAY_MS),
+  },
+  POLYMARKET_US: {
+    read: () => readPolymarketUsIncentivePrograms(),
+    closeUnlisted: (program, now, read) => polymarketUsUnlistedEnd(program, now, read.stopped ?? new Set()),
   },
 };
 
@@ -38,10 +51,16 @@ export function isKalshiPayoutRun(now: Date): boolean {
   return now.getUTCHours() === KALSHI_PAYOUT_HOUR_UTC && now.getUTCMinutes() < SCHEDULE_MINUTES;
 }
 
-// The open programs the read didn't list, posted again with their last terms and the given end.
-export function unlistedEnded(open: IncentiveProgramReading[], read: IncentiveProgramReading[], end: Date): IncentiveProgramReading[] {
+// The open programs the read didn't list, posted again with their last terms and an end. An end already recorded
+// that comes sooner stands, so a later run can't push a closed program's end back.
+export function unlistedEnded(
+  open: IncentiveProgramReading[], read: IncentiveProgramReading[], endOf: (program: IncentiveProgramReading) => Date,
+): IncentiveProgramReading[] {
   const listed = new Set(read.map(p => p.venueProgramId));
-  return open.filter(p => !listed.has(p.venueProgramId)).map(p => ({ ...p, periodEnd: end.toISOString() }));
+  return open.filter(p => !listed.has(p.venueProgramId)).flatMap(p => {
+    const end = endOf(p);
+    return p.periodEnd !== null && Date.parse(p.periodEnd) <= end.getTime() ? [] : [{ ...p, periodEnd: end.toISOString() }];
+  });
 }
 
 export async function postInChunks(post: Post, rows: IncentiveProgramReading[], exchangeCode: string, source: string) {
@@ -56,9 +75,11 @@ export async function postInChunks(post: Post, rows: IncentiveProgramReading[], 
 
 export async function syncVenue(exchangeCode: string, venue: VenueSync, now: Date, post: Post, readOpen: ReadOpen) {
   const read = await venue.read(now);
-  const result = { venue: exchangeCode, read: read.length, ended: 0, ...await postInChunks(post, read, exchangeCode, 'VENUE_API') };
-  if (venue.closeUnlisted) {
-    const ended = unlistedEnded(await readOpen(exchangeCode, now), read, venue.closeUnlisted(now));
+  const { programs } = read;
+  const result = { venue: exchangeCode, read: programs.length, ended: 0, ...await postInChunks(post, programs, exchangeCode, 'VENUE_API') };
+  const closeUnlisted = venue.closeUnlisted;
+  if (closeUnlisted) {
+    const ended = unlistedEnded(await readOpen(exchangeCode, now), programs, p => closeUnlisted(p, now, read));
     const closed = await postInChunks(post, ended, exchangeCode, 'VENUE_API');
     result.ended = ended.length;
     result.inserted += closed.inserted;
