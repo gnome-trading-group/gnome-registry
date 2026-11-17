@@ -226,8 +226,10 @@ synth step, so run `npm test` yourself before handing off.
     UTC; `scripts/backfill-incentive-programs.ts` loads older ones. Polymarket Intl lists only current programs, so one
     that drops off a complete read is ended at that UTC day's start. Polymarket US (the gateway's
     `/v1/incentives`, which reads `page_size`/`page_token`, not the documented camelCase) gives one program per
-    (programId, market, period): daily pools per Eastern day, pre-game and live periods as windows on the market's
-    kickoff (early to kickoff − 6 h, day_of the 6 h before, live from kickoff); programs are posted only while their
+    (programId, market, period), whose reward is the programId's one pool, shared by score across every market naming
+    it in `definition.programId` (never sum it across markets): daily pools per Eastern day, pre-game and live periods
+    as windows on the market's kickoff (early to kickoff − 6 h, day_of the 6 h before, live from kickoff); programs are
+    posted only while their
     market trades, and one that drops off ends now (windows), at the next Eastern midnight (daily, market stopped) or
     that Eastern day's start (daily, dropped from a trading market). Paper and backtest reward estimates read them.
   - SettlementSweeperStack: every 5 min, books SETTLEMENT entries for settled positions no session holds.

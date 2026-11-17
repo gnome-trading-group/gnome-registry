@@ -10,7 +10,8 @@ import { ValidationError } from '../endpoints/base';
 //   POLYMARKET_US      targetSize (contracts per side a snapshot needs), discountFactor (per tick behind the best price,
 //                      in (0, 1]), maxSpreadCents (from the midpoint both sides' size-adjusted prices must sit within;
 //                      absent when the program has none), period (the venue's kind: daily, daily_event, early, day_of,
-//                      live)
+//                      live), programId (the venue program whose one pool the reward is, shared by every market that
+//                      names it, never a market's own)
 
 function positive(name: string, value: unknown, allowZero = false): number {
   if (typeof value !== 'number' || !Number.isFinite(value) || value < 0 || (!allowZero && value === 0)) {
@@ -41,13 +42,16 @@ const VALIDATORS: Record<string, (d: Record<string, unknown>) => void> = {
     }
   },
   POLYMARKET_US: (d) => {
-    exactKeys('definition', d, ['targetSize', 'discountFactor', 'maxSpreadCents', 'period']);
+    exactKeys('definition', d, ['targetSize', 'discountFactor', 'maxSpreadCents', 'period', 'programId']);
     positive('definition.targetSize', d.targetSize);
     if (positive('definition.discountFactor', d.discountFactor) > 1) {
       throw new ValidationError('definition.discountFactor must be at most 1');
     }
     if (d.maxSpreadCents !== undefined) positive('definition.maxSpreadCents', d.maxSpreadCents);
     if (typeof d.period !== 'string' || d.period === '') throw new ValidationError('definition.period must be a string');
+    if (typeof d.programId !== 'string' || d.programId === '') {
+      throw new ValidationError('definition.programId must be a string');
+    }
   },
 };
 

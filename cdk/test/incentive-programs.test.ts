@@ -120,7 +120,7 @@ describe('Polymarket US incentive programs', () => {
   const read = (slug: string) => parsePolymarketUsIncentiveMarket(market(slug));
   const window = (slug: string) => Object.fromEntries(read(slug).map(p => [p.definition.period, [p.periodStart, p.periodEnd, p.rewardPer]]));
 
-  it('reads a daily_event program: pool per Eastern day, spread in cents', () => {
+  it('reads a daily_event program: the program\'s pool per Eastern day, spread in cents', () => {
     const [p] = read('rotc-t-avedoo-2026-12-21-gte55');
     expect(p).toMatchObject({
       venueProgramId: 'culture_low_20260924_v2:rotc-t-avedoo-2026-12-21-gte55:daily_event',
@@ -130,7 +130,9 @@ describe('Polymarket US incentive programs', () => {
       periodEnd: null,
       reward: '40',
       rewardPer: 'DAY',
-      definition: { targetSize: 500, discountFactor: 0.25, maxSpreadCents: 6, period: 'daily_event' },
+      definition: {
+        targetSize: 500, discountFactor: 0.25, maxSpreadCents: 6, period: 'daily_event', programId: 'culture_low_20260924_v2',
+      },
       paidOut: null,
     });
     expect(() => validateIncentiveDefinition('POLYMARKET_US', p.definition)).not.toThrow();
@@ -139,8 +141,17 @@ describe('Polymarket US incentive programs', () => {
   it('reads a futures daily program per day too, with no spread when the venue gives none', () => {
     const [p] = read('aachc-bun-2027-05-22-relegation-aug');
     expect(p).toMatchObject({ reward: '8', rewardPer: 'DAY', periodEnd: null });
-    expect(p.definition).toEqual({ targetSize: 2500, discountFactor: 0.35, period: 'daily' });
+    expect(p.definition).toEqual({ targetSize: 2500, discountFactor: 0.35, period: 'daily', programId: 'soccer_futures_20261019' });
     expect(() => validateIncentiveDefinition('POLYMARKET_US', p.definition)).not.toThrow();
+  });
+
+  it('names the program whose pool a reward is, the same on every market it covers', () => {
+    const markets = ['rotc-t-avedoo-2026-12-21-gte55', 'rotc-t-avedoo-2026-12-21-gte60'];
+    const programs = markets.map(slug => parsePolymarketUsIncentiveMarket({ ...market('rotc-t-avedoo-2026-12-21-gte55'), marketSlug: slug })[0]);
+    expect(programs.map(p => [p.venueProgramId, p.reward, p.definition.programId])).toEqual([
+      ['culture_low_20260924_v2:rotc-t-avedoo-2026-12-21-gte55:daily_event', '40', 'culture_low_20260924_v2'],
+      ['culture_low_20260924_v2:rotc-t-avedoo-2026-12-21-gte60:daily_event', '40', 'culture_low_20260924_v2'],
+    ]);
   });
 
   it('keeps each of a market\'s programs on its own', () => {
@@ -211,10 +222,13 @@ describe('Polymarket US incentive programs', () => {
         expect(() => validateIncentiveDefinition('POLYMARKET_US', p.definition)).not.toThrow();
       }
     }
-    const ok = { targetSize: 500, discountFactor: 0.25, period: 'live' };
+    const ok = { targetSize: 500, discountFactor: 0.25, period: 'live', programId: 'nfl_spreads_live_20261110' };
     expect(() => validateIncentiveDefinition('POLYMARKET_US', { ...ok, discountFactor: 1.5 })).toThrow(ValidationError);
     expect(() => validateIncentiveDefinition('POLYMARKET_US', { ...ok, maxSpreadCents: 0 })).toThrow(ValidationError);
+    expect(() => validateIncentiveDefinition('POLYMARKET_US', ok)).not.toThrow();
     expect(() => validateIncentiveDefinition('POLYMARKET_US', { ...ok, period: '' })).toThrow(ValidationError);
+    expect(() => validateIncentiveDefinition('POLYMARKET_US', { targetSize: 500, discountFactor: 0.25, period: 'live' }))
+      .toThrow(ValidationError);
     expect(() => validateIncentiveDefinition('POLYMARKET_US', { ...ok, minSize: 1 })).toThrow(ValidationError);
   });
 

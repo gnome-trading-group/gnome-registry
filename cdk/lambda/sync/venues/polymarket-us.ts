@@ -241,13 +241,15 @@ export async function readPolymarketUsBreakdowns(credentials: Credentials, pendi
 }
 
 // Polymarket US's liquidity programs, from the gateway's public list (api.polymarket.us serves the same list only to a
-// signed request). A program is one period of a venue program on one market: many markets share a programId, and a
-// market can carry several, each paid on its own. The list's `start` is when the venue program began across all its
-// markets, not when a market's period opens: early, day_of and live run on the market's own kickoff (early from listing
-// to six hours before it, day_of those six hours, live from it until the market stops trading), each paying its pool
-// over that window; daily and daily_event pools pay per Eastern day. The list never gives an end, and a period's status
-// follows its venue program rather than its window, so a market's programs are posted only while it trades; the sync
-// ends them once it doesn't.
+// signed request). A reading is one period of a venue program on one market: many markets share a programId, and a
+// market can carry several. A programId's pool is one pool, split by score across every market carrying it
+// (polymarket.us/rewards: "never summed per market"), so each reading's reward is that whole pool and its definition
+// names the programId; summing rewards across markets counts a pool many times over.
+// The list's `start` is when the venue program began across all its markets, not when a market's period opens: early,
+// day_of and live run on the market's own kickoff (early from listing to six hours before it, day_of those six hours,
+// live from it until the market stops trading); daily and daily_event pools pay per Eastern day. The list never gives
+// an end, and a period's status follows its venue program rather than its window, so a market's programs are posted
+// only while it trades; the sync ends them once it doesn't.
 // The gateway ignores the documented pageSize and pageToken, serving the first page again with a fresh token forever;
 // it reads page_size and page_token.
 const INCENTIVES_URL = 'https://gateway.polymarket.us/v1/incentives';
@@ -329,6 +331,7 @@ export function parsePolymarketUsIncentiveMarket(m: Record<string, any>): Incent
         // Dollars from the mid; 0.07 × 100 is 7.000000000000001 in floating point.
         ...(p.maxSpread != null ? { maxSpreadCents: Number((Number(p.maxSpread) * 100).toFixed(4)) } : {}),
         period: String(p.period),
+        programId: String(p.programId),
       },
       paidOut: null,
       sourceRef: INCENTIVES_URL,
