@@ -2,10 +2,12 @@ import { createPublicKey, generateKeyPairSync, verify } from 'crypto';
 import { readFileSync } from 'fs';
 import { join } from 'path';
 import { fetchWithRetry } from '../lambda/sync/venues/http';
-import { readKalshi } from '../lambda/sync/venues/kalshi';
+import { parseKalshiSettlement, readKalshi } from '../lambda/sync/venues/kalshi';
 import { readPolymarketIntl } from '../lambda/sync/venues/polymarket-intl';
 import { kalshiHeaders, polymarketUsHeaders, polymarketUsKey } from '../lambda/sync/venues/signers';
-import { parseBalances, parsePositions } from '../lambda/sync/venues/polymarket-us';
+import {
+  parseBalances, parsePolymarketUsResolution, parsePositions, readPolymarketUs,
+} from '../lambda/sync/venues/polymarket-us';
 import { scaleDecimal } from '../lambda/sync/venues/types';
 import { venueKeyOf } from '../lambda/endpoints/treasury';
 
@@ -106,6 +108,7 @@ describe('venue readers on captured answers', () => {
     const target = String(url);
     if (target.includes('/subaccounts/balances')) return respond(fixture('kalshi-subaccount-balances.json'));
     if (target.includes('/portfolio/balance')) return respond(fixture('kalshi-balance.json'));
+    if (target.includes('/portfolio/settlements')) return respond(fixture('kalshi-settlements.json'));
     return respond({ market_positions: [], cursor: '' });
   };
   const kalshiCredentials = () => {
@@ -120,6 +123,40 @@ describe('venue readers on captured answers', () => {
       kalshiCredentials());
     expect(reading.cashTotal).toBe(99_309_900_000n);
     expect(reading.cashByPartition).toEqual({ 0: 89_309_900_000n, 1: 0n, 2: 10_000_000_000n, 3: 0n });
+  });
+
+  it('reads the markets Kalshi settled in the last day, each at what a YES contract paid', async () => {
+    jest.spyOn(Date, 'now').mockReturnValue(Date.parse('2026-11-17T19:30:00Z'));
+    const fetch = jest.spyOn(global, 'fetch').mockImplementation(async (url) => kalshiAnswers(url));
+    const reading = await readKalshi(
+      { account_id: 1, exchange_id: 1, exchange_code: 'KALSHI', label: 'x', venue_ref: {}, read_secret_name: null, ...UNMANAGED },
+      kalshiCredentials());
+    expect(reading.settlements).toEqual([
+      { venueKey: 'KXCS2GAME-26NOV171100PHABBL-PHA', settledAt: new Date('2026-11-17T18:52:44.714698Z'), price: 0n },
+      { venueKey: 'KXCS2GAME-26NOV171100PHABBL-BBL', settledAt: new Date('2026-11-17T18:52:44.714698Z'), price: 1_000_000_000n },
+      { venueKey: 'KXCS2GAME-26NOV171200SPINOT-SPI', settledAt: new Date('2026-11-17T18:13:39.668844Z'), price: 1_000_000_000n },
+    ]);
+    const asked = new URL(String(fetch.mock.calls.find(([u]) => String(u).includes('/portfolio/settlements'))?.[0]));
+    expect(asked.searchParams.get('min_ts')).toBe(String(Date.parse('2026-11-16T19:30:00Z') / 1000));
+  });
+
+  it('leaves a voided Kalshi market to the classifier', () => {
+    expect(parseKalshiSettlement({
+      ticker: 'T-A', market_result: 'void', value: null, settled_time: '2026-11-17T18:52:44Z',
+    })).toBeNull();
+  });
+
+  it('keeps a Kalshi reading whose settlements can\'t be read, saying why', async () => {
+    jest.spyOn(console, 'error').mockImplementation(() => undefined);
+    jest.spyOn(global, 'fetch').mockImplementation(async (url) => (String(url).includes('/portfolio/settlements')
+      ? new Response('{"error":"forbidden"}', { status: 403 })
+      : kalshiAnswers(url)));
+    const reading = await readKalshi(
+      { account_id: 1, exchange_id: 1, exchange_code: 'KALSHI', label: 'x', venue_ref: {}, read_secret_name: null, ...UNMANAGED },
+      kalshiCredentials());
+    expect(reading.cashTotal).toBe(99_309_900_000n);
+    expect(reading.settlements).toBeUndefined();
+    expect((reading.raw as { settlementsError: string }).settlementsError).toMatch(/403/);
   });
 
   // The balance's breakdown sums every subaccount, so a subaccount's shards must come from its own rows.
@@ -281,6 +318,37 @@ describe('venue readers on captured answers', () => {
       return respond({ result: short ? `0x${word(32n)}${word(0n)}` : `0x${word(0n)}` });
     });
     await expect(readPolymarketIntl(PM_INTL_TARGET)).rejects.toThrow('Polygon balanceOfBatch answered 2 words for 1 tokens');
+  });
+});
+
+describe('Polymarket US settlements', () => {
+  const resolutions = JSON.parse(readFileSync(join(__dirname, 'fixtures', 'venues', 'polymarket-us-resolutions.json'), 'utf8'));
+
+  afterEach(() => jest.restoreAllMocks());
+
+  it('prices a resolved market by its long side, whichever side the account held', () => {
+    expect(resolutions.activities.map(parsePolymarketUsResolution)).toEqual([
+      { venueKey: 'aec-cs2-bbc-pha-2026-11-17', settledAt: new Date('2026-11-17T18:39:28.391219472Z'), price: 1_000_000_000n },
+      { venueKey: 'aec-cs2-not-sag-2026-11-17', settledAt: new Date('2026-11-17T18:01:23.125885796Z'), price: 0n },
+    ]);
+    expect(parsePolymarketUsResolution({ type: 'ACTIVITY_TYPE_TRADE', trade: {} })).toBeNull();
+  });
+
+  it('reads the day\'s resolutions with the balances, stopping once the feed reaches past it', async () => {
+    jest.spyOn(Date, 'now').mockReturnValue(Date.parse('2026-11-18T18:30:00Z'));
+    const fetch = jest.spyOn(global, 'fetch').mockImplementation(async (url) => {
+      const target = String(url);
+      if (target.includes('/v1/account/balances')) return new Response(JSON.stringify({ balances: [{ currency: 'USD', currentBalance: '10', buyingPower: '10' }] }));
+      if (target.includes('/v1/portfolio/positions')) return new Response(JSON.stringify({ positions: {}, eof: true }));
+      return new Response(JSON.stringify({ ...resolutions, eof: false, nextCursor: 'more' }));
+    });
+    const reading = await readPolymarketUs(
+      { account_id: 3, exchange_id: 3, exchange_code: 'POLYMARKET_US', label: 'x', venue_ref: {}, read_secret_name: null, ...UNMANAGED },
+      { apiKey: 'k', secret: Buffer.alloc(32, 7).toString('base64') });
+    expect(reading.settlements?.map(s => s.venueKey)).toEqual(['aec-cs2-bbc-pha-2026-11-17']);
+    const asked = fetch.mock.calls.map(([u]) => new URL(String(u))).filter(u => u.pathname === '/v1/portfolio/activities');
+    expect(asked).toHaveLength(1);
+    expect(asked[0].searchParams.get('types')).toBe('ACTIVITY_TYPE_POSITION_RESOLUTION');
   });
 });
 

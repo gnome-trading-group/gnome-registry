@@ -2,7 +2,8 @@ import { fetchWithRetry } from './http';
 import { polymarketUsHeaders, polymarketUsKey } from './signers';
 import {
   CreditBreakdown, CreditKind, CreditProgram, DAY_MS, IncentiveProgramReading, isoDate, PendingCredit, PollTarget,
-  PRICE_SCALE, scaleDecimal, SIZE_SCALE, unclassifiedCredit, VenueCredit, VenueReading,
+  PRICE_SCALE, scaleDecimal, SETTLEMENT_LOOKBACK_MS, SIZE_SCALE, unclassifiedCredit, VenueCredit, VenueReading,
+  VenueSettlement,
 } from './types';
 
 // Polymarket US reports balances per currency, and positions as an object keyed by market slug, paged by cursor,
@@ -76,10 +77,47 @@ export async function readPolymarketUs(target: PollTarget, credentials: Credenti
     }
     cursor = page.eof === false ? page.nextCursor ?? '' : '';
   } while (cursor);
+  // Without them recon only waits for the classifier, as it always could; that's no reason to lose the reading.
+  let settlementsError: string | undefined;
+  const settlements = await readPolymarketUsSettlements(baseUrl, credentials).catch((error: unknown) => {
+    settlementsError = error instanceof Error ? error.message : String(error);
+    console.error(`Reading ${target.label} settlements failed: ${settlementsError}`);
+    return undefined;
+  });
   return {
-    cashTotal: total - margin, cashAvailable: available, portfolioValue, redeemableValue: 0n, positions,
-    raw: { balances, positions: pages, account: target.label },
+    cashTotal: total - margin, cashAvailable: available, portfolioValue, redeemableValue: 0n, positions, settlements,
+    raw: { balances, positions: pages, account: target.label, ...(settlementsError ? { settlementsError } : {}) },
   };
+}
+
+const RESOLUTION_TYPE = 'ACTIVITY_TYPE_POSITION_RESOLUTION';
+
+// Polymarket US closes an account's position when its market resolves, as an activity naming the market and the
+// price each side settled at (a tie pays both 0.50). The long side's price is the market's.
+export function parsePolymarketUsResolution(activity: Record<string, any>): VenueSettlement | null {
+  const resolution = activity.positionResolution;
+  if (activity.type !== RESOLUTION_TYPE || !resolution) return null;
+  const long = (resolution.market?.marketSides ?? []).find((side: Record<string, any>) => side.long === true);
+  const settledAt = new Date(resolution.updateTime);
+  if (typeof resolution.marketSlug !== 'string' || long?.price == null || Number.isNaN(settledAt.getTime())) return null;
+  return { venueKey: resolution.marketSlug, settledAt, price: scaleDecimal(long.price, PRICE_SCALE) };
+}
+
+// The feed comes newest first; reading stops at the first page reaching back past the lookback.
+async function readPolymarketUsSettlements(baseUrl: string, credentials: Credentials): Promise<VenueSettlement[]> {
+  const since = Date.now() - SETTLEMENT_LOOKBACK_MS;
+  const settlements: VenueSettlement[] = [];
+  let cursor = '';
+  for (;;) {
+    const page = await get(baseUrl, credentials,
+      `/v1/portfolio/activities?limit=100&types=${RESOLUTION_TYPE}${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`);
+    const read = ((page.activities ?? []) as Record<string, any>[]).map(parsePolymarketUsResolution)
+      .filter((s): s is VenueSettlement => s !== null);
+    settlements.push(...read.filter(s => s.settledAt.getTime() >= since));
+    cursor = page.eof === false ? page.nextCursor ?? '' : '';
+    if (!cursor || read.some(s => s.settledAt.getTime() < since)) break;
+  }
+  return settlements;
 }
 
 // Money Polymarket US moves on the account outside trading, from its activity feed. Rewards and rebates count once

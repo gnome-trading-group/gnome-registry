@@ -10,8 +10,10 @@ import { allocatePending, BreakdownInput } from './treasury-allocate';
 // notional, a sell receives it, both pay their fee), plus what the venue does that the ledger books later or not at
 // all: Kalshi and Polymarket US pay out $1 as soon as one account holds both sides of a market and charge $1 for a
 // short (Kalshi books it as a NO; Polymarket US holds it as margin, which the poller counts as spent), and every
-// venue credits a settled market before the sweeper books its SETTLEMENT. The venue's
-// side counts resolved Polymarket positions waiting to be redeemed as the cash they will become.
+// venue credits a settled market before the sweeper books its SETTLEMENT, often before the classifier has even
+// recorded its value: until it does, the venue's own settlement price stands in for it, within the account's
+// settlement grace. The venue's side counts resolved Polymarket positions waiting to be redeemed as the cash they will
+// become.
 //
 // Positions: what the venue holds on each market against the ledger's live positions on the account, summed across
 // strategies. A Kalshi market is one signed position (YES positive, NO negative), so its ledger side is YES - NO.
@@ -28,6 +30,14 @@ export interface VenuePositionInput {
   quantity: string | number;
   redeemable?: boolean;
   value?: string | number | null;
+}
+
+// A market the venue says it settled (see sync/venues/types.ts VenueSettlement): price, in price units, is what one
+// contract of venueKey's positive side paid.
+export interface VenueSettlementInput {
+  venueKey: string;
+  settledAt: string;
+  price: string | number;
 }
 
 const CREDIT_KINDS = ['DEPOSIT', 'WITHDRAWAL', 'INTEREST', 'REWARD', 'FEE_ADJUSTMENT', 'CORRECTION'];
@@ -62,6 +72,7 @@ export interface SnapshotInput {
   rebalanceTargets?: RebalanceReading | null;
   // Null when the venue can't list positions: then only cash is reconciled.
   positions?: VenuePositionInput[] | null;
+  settlements?: VenueSettlementInput[] | null;
   credits?: CreditInput[] | null;
   // What the venue says rewards were for, market by market: of those just sent and those still PENDING.
   breakdowns?: BreakdownInput[] | null;
@@ -97,6 +108,11 @@ export function parseSnapshot(body: string, source: 'POLLER' | 'MANUAL', actor: 
     if (typeof p.venueKey !== 'string' || p.venueKey.length === 0) throw new TreasuryError(400, 'positions need a venueKey');
     scaled('quantity', p.quantity);
     scaled('value', p.value);
+  }
+  for (const v of s.settlements ?? []) {
+    if (typeof v.venueKey !== 'string' || v.venueKey.length === 0) throw new TreasuryError(400, 'settlements need a venueKey');
+    if (scaled(`settlement ${v.venueKey} price`, v.price) === null) throw new TreasuryError(400, `settlement ${v.venueKey} needs a price`);
+    if (Number.isNaN(new Date(v.settledAt).getTime())) throw new TreasuryError(400, `settlement ${v.venueKey} needs a settledAt`);
   }
   for (const c of s.credits ?? []) {
     if (typeof c.externalRef !== 'string' || c.externalRef.length === 0) throw new TreasuryError(400, 'credits need an externalRef');
@@ -208,7 +224,9 @@ export interface CashExpectation {
   unpaidWithinGrace: bigint;
 }
 
-export async function expectedCash(client: PoolClient, account: AccountRow, now: Date): Promise<CashExpectation> {
+export async function expectedCash(
+  client: PoolClient, account: AccountRow, now: Date, venueSettled: Map<string, bigint> = new Map(),
+): Promise<CashExpectation> {
   const since = account.recon_since as Date;
   const flows = (await client.query(
     `SELECT
@@ -240,6 +258,22 @@ export async function expectedCash(client: PoolClient, account: AccountRow, now:
     expected += payout;
     if (now.getTime() - s.settled_at.getTime() < account.settlement_grace_ms) unpaidWithinGrace += abs(payout);
   }
+  // What the venue already paid on markets the classifier hasn't recorded yet, each side at its own price.
+  if (venueSettled.size > 0) {
+    const unrecorded = (await client.query(
+      `SELECT l.exchange_security_id, p.net_quantity
+       FROM ledger.position p
+       JOIN sm.listing l ON l.listing_id = p.listing_id
+       WHERE p.account_id = $1 AND p.mode = 'live' AND p.net_quantity <> 0
+         AND NOT EXISTS (SELECT 1 FROM sm.event_contract ec
+                         WHERE ec.security_id = l.security_id AND ec.settlement_price IS NOT NULL)`,
+      [account.account_id])).rows;
+    for (const r of unrecorded) {
+      const { key, sign } = venueKeyOf(account.exchange_code, r.exchange_security_id ?? '');
+      const price = venueSettled.get(key);
+      if (price !== undefined) expected += notional(sign > 0n ? price : PRICE_SCALE - price, toBigInt(r.net_quantity));
+    }
+  }
   return { expected, unpaidWithinGrace };
 }
 
@@ -260,9 +294,10 @@ function judge(
 
 async function reconcileCash(
   client: PoolClient, account: AccountRow, snapshotId: number, venueCash: bigint, fp: string, now: Date,
+  venueSettled: Map<string, bigint>,
 ): Promise<{ status: string; expected: bigint | null; diff: bigint | null }> {
   if (!account.recon_enabled || account.recon_since === null) return { status: 'OFF', expected: null, diff: null };
-  const { expected, unpaidWithinGrace } = await expectedCash(client, account, now);
+  const { expected, unpaidWithinGrace } = await expectedCash(client, account, now, venueSettled);
   const diff = venueCash - expected;
   const previousRow = (await client.query(
     `SELECT cash_status, ledger_fingerprint, cash_diff, ran_at,
@@ -284,6 +319,7 @@ async function reconcileCash(
 
 async function checkPositions(
   client: PoolClient, account: AccountRow, venue: VenuePositionInput[], fp: string, now: Date,
+  venueSettled: Map<string, bigint>,
 ): Promise<{ checked: number; breaks: number }> {
   const ledgerRows = (await client.query(
     `SELECT l.exchange_security_id, l.listing_id, SUM(p.net_quantity) AS net,
@@ -345,8 +381,9 @@ async function checkPositions(
     const reported = venueByKey.get(key);
     const listing = listingsByKey.get(key);
     // A settled market's positions close by settlement on both sides, at different moments; cash covers it. It is no
-    // longer checked, so what it was flagged for goes too.
-    if (held?.settled || listing?.settled || reported?.redeemable) {
+    // longer checked, so what it was flagged for goes too. The venue's word that it settled counts until the
+    // classifier records the value.
+    if (held?.settled || listing?.settled || reported?.redeemable || venueSettled.has(key)) {
       if (previous.has(key)) {
         await client.query('DELETE FROM treasury.position_check WHERE account_id = $1 AND venue_key = $2',
           [account.account_id, key]);
@@ -447,11 +484,18 @@ export async function recordSnapshot(client: PoolClient, input: SnapshotInput, n
       [snapshot.snapshot_id, p.venueKey, String(p.quantity), p.redeemable ?? false, p.value == null ? null : String(p.value)]);
   }
   const fp = await fingerprint(client, input.accountId);
+  // Trusted only within the account's settlement grace: past it, a market the classifier still hasn't recorded is
+  // checked against the ledger again, so a value that never arrives breaks rather than hides.
+  const venueSettled = new Map<string, bigint>();
+  for (const v of input.settlements ?? []) {
+    const age = now.getTime() - new Date(v.settledAt).getTime();
+    if (age > -CREDIT_CLOCK_SKEW_MS && age < account.settlement_grace_ms) venueSettled.set(v.venueKey, toBigInt(v.price));
+  }
   const venueCash = (scaled('cashTotal', input.cashTotal) as bigint) + (scaled('redeemableValue', input.redeemableValue) ?? 0n);
-  const cash = await reconcileCash(client, account, snapshot.snapshot_id, venueCash, fp, now);
+  const cash = await reconcileCash(client, account, snapshot.snapshot_id, venueCash, fp, now, venueSettled);
   const positions = input.positions == null
     ? { checked: 0, breaks: 0 }
-    : await checkPositions(client, account, input.positions, fp, now);
+    : await checkPositions(client, account, input.positions, fp, now, venueSettled);
   await client.query(
     `INSERT INTO treasury.recon_run (account_id, snapshot_id, ran_at, expected_cash, venue_cash, cash_diff, cash_status,
        ledger_fingerprint, positions_checked, position_breaks)

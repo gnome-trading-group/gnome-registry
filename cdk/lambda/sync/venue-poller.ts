@@ -150,6 +150,9 @@ function snapshotBody(target: PollTarget, reading: VenueReading) {
     positions: reading.positions?.map(p => ({
       venueKey: p.venueKey, quantity: p.quantity.toString(), redeemable: p.redeemable, value: p.value?.toString() ?? null,
     })) ?? null,
+    settlements: reading.settlements?.map(s => ({
+      venueKey: s.venueKey, settledAt: s.settledAt.toISOString(), price: s.price.toString(),
+    })) ?? null,
     raw: reading.raw,
   };
 }

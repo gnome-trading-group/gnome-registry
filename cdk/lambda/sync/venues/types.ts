@@ -11,8 +11,19 @@ export interface VenueReading {
   rebalanceTargets?: RebalanceReading;
   // Null when the venue can't list positions; only cash is reconciled then.
   positions: { venueKey: string; quantity: bigint; redeemable: boolean; value: bigint | null }[] | null;
+  // Markets the venue settled lately. It drops a settled position and pays it out at once, while the ledger waits
+  // for the classifier to record the value; until then, recon takes the venue's word for it.
+  settlements?: VenueSettlement[];
   raw: unknown;
 }
+
+// price: what one contract of venueKey's positive side (Kalshi's YES, Polymarket US's long) settled at.
+export interface VenueSettlement {
+  venueKey: string;
+  settledAt: Date;
+  price: bigint;
+}
+
 
 export type CreditKind = 'DEPOSIT' | 'WITHDRAWAL' | 'INTEREST' | 'REWARD' | 'FEE_ADJUSTMENT' | 'CORRECTION';
 export type CreditProgram = 'LIQUIDITY' | 'MAKER_REBATE' | 'TAKER_REBATE' | 'HOLDING' | 'REFERRAL' | 'VOLUME' | 'INTEREST'
@@ -116,6 +127,8 @@ export interface CreditBreakdown {
 }
 
 export const DAY_MS = 86_400_000;
+// Long enough for any account's settlement grace; recon applies the grace.
+export const SETTLEMENT_LOOKBACK_MS = DAY_MS;
 
 // The UTC day a daily payout was for: venues pay a day's rewards in the first hours of the next.
 export function payoutDay(occurredAt: Date): Date {

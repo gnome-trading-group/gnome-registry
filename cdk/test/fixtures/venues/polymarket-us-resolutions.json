@@ -1,0 +1,81 @@
+{
+  "activities": [
+    {
+      "type": "ACTIVITY_TYPE_POSITION_RESOLUTION",
+      "positionResolution": {
+        "marketSlug": "aec-cs2-bbc-pha-2026-11-17",
+        "side": "POSITION_RESOLUTION_SIDE_LONG",
+        "updateTime": "2026-11-17T18:39:28.391219472Z",
+        "tradeId": "",
+        "beforePosition": {
+          "netPositionDecimal": "-3.0000"
+        },
+        "afterPosition": {
+          "netPositionDecimal": "0.0000",
+          "realized": {
+            "value": "-1.4300",
+            "currency": "USD"
+          }
+        },
+        "market": {
+          "slug": "aec-cs2-bbc-pha-2026-11-17",
+          "status": "MARKET_STATUS_RESOLVED",
+          "outcomePrices": "[\"1\",\"0\"]",
+          "marketSides": [
+            {
+              "identifier": "aec-cs2-bbc-pha-2026-11-17",
+              "description": "BBL",
+              "price": "1",
+              "long": true
+            },
+            {
+              "identifier": "aec-cs2-bbc-pha-2026-11-17",
+              "description": "Phantom",
+              "price": "0",
+              "long": false
+            }
+          ]
+        }
+      }
+    },
+    {
+      "type": "ACTIVITY_TYPE_POSITION_RESOLUTION",
+      "positionResolution": {
+        "marketSlug": "aec-cs2-not-sag-2026-11-17",
+        "side": "POSITION_RESOLUTION_SIDE_SHORT",
+        "updateTime": "2026-11-17T18:01:23.125885796Z",
+        "tradeId": "",
+        "beforePosition": {
+          "netPositionDecimal": "-18.0000"
+        },
+        "afterPosition": {
+          "netPositionDecimal": "0.0000",
+          "realized": {
+            "value": "12.2077",
+            "currency": "USD"
+          }
+        },
+        "market": {
+          "slug": "aec-cs2-not-sag-2026-11-17",
+          "status": "MARKET_STATUS_RESOLVED",
+          "outcomePrices": "[\"0\",\"1\"]",
+          "marketSides": [
+            {
+              "identifier": "aec-cs2-not-sag-2026-11-17",
+              "description": "NoTime",
+              "price": "0",
+              "long": true
+            },
+            {
+              "identifier": "aec-cs2-not-sag-2026-11-17",
+              "description": "Spirit Academy Green",
+              "price": "1",
+              "long": false
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "eof": true
+}

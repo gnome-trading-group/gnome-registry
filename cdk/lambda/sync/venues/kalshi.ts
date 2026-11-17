@@ -2,7 +2,7 @@ import { fetchWithRetry } from './http';
 import { kalshiHeaders } from './signers';
 import {
   CreditKind, CreditProgram, PollTarget, PRICE_SCALE, RebalanceReading, RebalanceTargets, sameTargets, scaleDecimal,
-  SIZE_SCALE, unclassifiedCredit, VenueCredit, VenueReading,
+  SETTLEMENT_LOOKBACK_MS, SIZE_SCALE, unclassifiedCredit, VenueCredit, VenueReading, VenueSettlement,
 } from './types';
 import { IncentiveProgramReading } from './types';
 
@@ -99,6 +99,13 @@ export async function readKalshi(target: PollTarget, credentials: Credentials): 
   // are read per subaccount instead. Mid-transfer they needn't add up to the total.
   const subaccountBalances = await get(baseUrl, credentials, '/trade-api/v2/portfolio/subaccounts/balances');
   const rebalanceTargets = await rebalance(baseUrl, credentials, target);
+  // Without them recon only waits for the classifier, as it always could; that's no reason to lose the reading.
+  let settlementsError: string | undefined;
+  const settlements = await readKalshiSettlements(baseUrl, credentials).catch((error: unknown) => {
+    settlementsError = error instanceof Error ? error.message : String(error);
+    console.error(`Reading ${target.label} settlements failed: ${settlementsError}`);
+    return undefined;
+  });
   const ours = Number(subaccount ?? 0);
   const cashByPartition: Record<string, bigint> = {};
   for (const shard of subaccountBalances.subaccount_balances ?? []) {
@@ -113,8 +120,28 @@ export async function readKalshi(target: PollTarget, credentials: Credentials): 
     portfolioValue,
     redeemableValue: 0n,
     positions,
-    raw: { balance, subaccountBalances },
+    settlements,
+    raw: { balance, subaccountBalances, ...(settlementsError ? { settlementsError } : {}) },
   };
+}
+
+// value is what a YES contract paid, in cents; a voided market pays back cost instead, which is left to the
+// classifier. A market's settlement is the same for every account, so the login's own list serves any subaccount.
+export function parseKalshiSettlement(s: Record<string, any>): VenueSettlement | null {
+  if (!['yes', 'no', 'scalar'].includes(String(s.market_result)) || typeof s.value !== 'number') return null;
+  const settledAt = new Date(s.settled_time);
+  if (typeof s.ticker !== 'string' || Number.isNaN(settledAt.getTime())) return null;
+  return { venueKey: s.ticker, settledAt, price: BigInt(s.value) * CENT };
+}
+
+// The endpoint's default page size.
+const SETTLEMENT_PAGE_LIMIT = 100;
+
+async function readKalshiSettlements(baseUrl: string, credentials: Credentials): Promise<VenueSettlement[]> {
+  const minTs = Math.floor((Date.now() - SETTLEMENT_LOOKBACK_MS) / 1000);
+  return (await pages(baseUrl, credentials,
+    `/trade-api/v2/portfolio/settlements?limit=${SETTLEMENT_PAGE_LIMIT}&min_ts=${minTs}`, 'settlements'))
+    .map(parseKalshiSettlement).filter((s): s is VenueSettlement => s !== null);
 }
 
 // Kalshi doesn't document its credit types, so they're matched by name until real payouts show what they are; a

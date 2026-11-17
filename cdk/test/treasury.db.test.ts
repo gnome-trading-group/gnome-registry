@@ -256,6 +256,45 @@ describeDb('treasury, against Postgres', () => {
     ]);
   });
 
+  it('takes the venue\'s settlement until the classifier records it, and only for the settlement grace', async () => {
+    const kalshi = await account(1, 'steady-heron-01');
+    await open(kalshi, 100);
+    await live('a', [500]);
+    await trade('a', 500, 0, 10, 40, 10);
+    const settledAt = new Date();
+    const settlements = [{ venueKey: 'T', settledAt: settledAt.toISOString(), price: String(DOLLAR) }];
+    const read = async (minutes: number) => {
+      const result = await snapshot(kalshi, 10600, new Date(settledAt.getTime() + minutes * MINUTE), { positions: [], settlements });
+      const checks = (await client.query(`SELECT status FROM treasury.position_check WHERE venue_key = 'T'`)).rows;
+      return [result.cashStatus, checks.map(c => c.status)];
+    };
+    // Kalshi paid the 10 YES out and dropped them; the ledger still holds them, its value not yet recorded.
+    expect(await read(1)).toEqual(['OK', []]);
+    expect(await read(7)).toEqual(['OK', []]);
+    // A value that never arrives isn't hidden past the grace.
+    expect(await read(121)).toEqual(['PENDING', ['PENDING']]);
+    expect(await read(127)).toEqual(['BREAK', ['BREAK']]);
+    // Once recorded, the payout counts once, from the ledger's own settlement.
+    await client.query(`INSERT INTO sm.event (event_id, title, exchange_id, native_event_id) VALUES (1, 'T?', 1, 'T')`);
+    await client.query(`INSERT INTO sm.event_contract (event_id, security_id, outcome_label, settlement_price, settled_at)
+      VALUES (1, 1, 'Yes', $1, $2)`, [DOLLAR, settledAt]);
+    expect(await read(3)).toEqual(['OK', []]);
+  });
+
+  it('pays a venue-settled NO at the opposite of the market\'s price', async () => {
+    const kalshi = await account(1, 'steady-heron-01');
+    await open(kalshi, 100);
+    await live('a', [501]);
+    await trade('a', 501, 0, 10, 60, 10);
+    const now = new Date();
+    const result = await snapshot(kalshi, 10400, now, {
+      positions: [], settlements: [{ venueKey: 'T', settledAt: new Date(now.getTime() - MINUTE).toISOString(), price: '0' }],
+    });
+    expect(result.cashStatus).toBe('OK');
+    expect(result.positionBreaks).toBe(0);
+    expect((await client.query(`SELECT 1 FROM treasury.position_check WHERE venue_key = 'T'`)).rowCount).toBe(0);
+  });
+
   it('holds a Polymarket Intl position to the unit: a 6-decimal fill agrees, one unit off breaks', async () => {
     const pm = await account(2, 'quiet-falcon-01');
     await open(pm, 100);

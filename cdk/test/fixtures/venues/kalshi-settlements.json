@@ -1,0 +1,47 @@
+{
+  "cursor": "",
+  "settlements": [
+    {
+      "event_ticker": "KXCS2GAME-26NOV171100PHABBL",
+      "exchange_index": 0,
+      "fee_cost": "0.532500",
+      "market_result": "no",
+      "no_count_fp": "10.00",
+      "no_total_cost_dollars": "3.400000",
+      "revenue": 0,
+      "settled_time": "2026-11-17T18:52:44.714698Z",
+      "ticker": "KXCS2GAME-26NOV171100PHABBL-PHA",
+      "value": 0,
+      "yes_count_fp": "29.00",
+      "yes_total_cost_dollars": "20.310000"
+    },
+    {
+      "event_ticker": "KXCS2GAME-26NOV171100PHABBL",
+      "exchange_index": 0,
+      "fee_cost": "0.522400",
+      "market_result": "yes",
+      "no_count_fp": "25.00",
+      "no_total_cost_dollars": "10.701600",
+      "revenue": 0,
+      "settled_time": "2026-11-17T18:52:44.714698Z",
+      "ticker": "KXCS2GAME-26NOV171100PHABBL-BBL",
+      "value": 100,
+      "yes_count_fp": "10.00",
+      "yes_total_cost_dollars": "1.600000"
+    },
+    {
+      "event_ticker": "KXCS2GAME-26NOV171200SPINOT",
+      "exchange_index": 0,
+      "fee_cost": "0.152400",
+      "market_result": "yes",
+      "no_count_fp": "0.00",
+      "no_total_cost_dollars": "0.000000",
+      "revenue": 900,
+      "settled_time": "2026-11-17T18:13:39.668844Z",
+      "ticker": "KXCS2GAME-26NOV171200SPINOT-SPI",
+      "value": 100,
+      "yes_count_fp": "9.00",
+      "yes_total_cost_dollars": "3.690000"
+    }
+  ]
+}
