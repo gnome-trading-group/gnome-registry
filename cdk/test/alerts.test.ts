@@ -31,6 +31,14 @@ describe('alert severity', () => {
     expect(down({ workingOrders: '0', linkedSessions: '1', cleanStop: 'true' })).toBe('WARNING');
   });
 
+  it('warns when a live gateway or production shard has no home-zone capacity, and only records a paper gateway', () => {
+    const short = (mode: 'live' | 'paper' | null) =>
+      severityOf({ ...base, type: 'HOME_ZONE_NO_CAPACITY', mode, labels: { zoneId: 'use2-az2' } }, null, 'prod');
+    expect(short('live')).toBe('WARNING');
+    expect(short(null)).toBe('WARNING');
+    expect(short('paper')).toBe('INFO');
+  });
+
   it('caps paper, dev and custom alerts below paging', () => {
     expect(severityOf(base, 'live', 'prod')).toBe('CRITICAL');
     expect(severityOf(base, 'paper', 'prod')).toBe('ERROR');

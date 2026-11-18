@@ -31,6 +31,8 @@ interface IExchangeBase {
   exchangeCode: string;
   exchangeName: string;
   region: string;
+  // A zone ID of the region's platform network (e.g. use2-az2); null clears it, absent leaves it.
+  homeZoneId?: string | null;
 }
 export interface ICreateExchange extends IExchangeBase {}
 export interface IExchange extends IExchangeBase {

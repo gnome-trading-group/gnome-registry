@@ -91,6 +91,19 @@ describeDb('gateways and the accounts they hold, against Postgres', () => {
     expect(rows.find((g) => g.gateway_key === 'live:kalshi:main')).toMatchObject({ accounts: 2, exchange_code: 'KALSHI' });
   });
 
+  it("gives each gateway its exchange's home zone, and none while it sits in another region", async () => {
+    await client.query(`UPDATE sm.exchange SET home_zone_id = 'use1-az2' WHERE exchange_id = 1`);
+    await client.query(`UPDATE sm.exchange SET home_zone_id = 'euw1-az3' WHERE exchange_id = 2`);
+    await client.query(`UPDATE account_master.gateway SET region = 'us-east-2' WHERE gateway_key = 'live:polymarket_intl:b'`);
+
+    const rows = (await client.query(new GatewayHandler().generateSelectQuery(null))).rows;
+    const zone = (key: string) => rows.find((g) => g.gateway_key === key).home_zone_id;
+    expect(zone('live:kalshi:main')).toBe('use1-az2');
+    expect(zone('paper:kalshi:main')).toBe('use1-az2');
+    expect(zone('live:polymarket_intl:main')).toBe('euw1-az3');
+    expect(zone('live:polymarket_intl:b')).toBeNull();
+  });
+
   it('creates a paper gateway in its exchange\'s region the first time it is wanted, and only marks it after', async () => {
     const first = (await client.query(generateWantPaperQuery('paper:hyperliquid:main'))).rows;
     expect(first).toHaveLength(1);

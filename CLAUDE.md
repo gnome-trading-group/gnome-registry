@@ -88,9 +88,14 @@ synth step, so run `npm test` yourself before handing off.
   treasury) passes `client.query(text, values)` directly. Postgres input errors (22P02, 22003, 22007, 22008) become
   400s in `ResourceHandler`. ILIKE searches bind the whole pattern; `%`, `_` and `\` in a search are still wildcards.
 - Migrations: add a new `NNN_name.sql` with the next number; never edit an applied one. Each file runs in one
-  transaction (5-minute Lambda timeout). They are not applied on deploy: the `DatabaseInitLambda` must be invoked by
-  hand after a release, dev first, then prod. If a migration drops something old clients still read, sequence it
-  after those clients are released.
+  transaction (15-minute Lambda timeout). They are applied on deploy: a trigger in `DatabaseStack`
+  (`lib/constructs/db-init-lambda.ts`) invokes the `DatabaseInitLambda` whenever its bundle changes (the migrations
+  are bundled into it), so a release with a new migration applies it in dev, then in prod after `ApproveProd`. The
+  database stack deploys before the API stack, so new code finds its columns. A failing file rolls back and fails the
+  stack update, which stops the stage; files before it stay applied (recorded in `_migrations`, skipped next time).
+  Because it applies at once, a migration that drops or renames something old clients still read must ship in a
+  later release than the clients that stop reading it (other repos' services and the Java client included). The
+  Lambda can still be invoked by hand; it is idempotent.
 - No backward-compat shims: nothing is in production trading yet, so change the schema and migrate every caller.
 - Alert types: adding one to `ALERT_TYPES` requires `docs/runbooks/alerts/<TYPE>.md` (all template sections) and a
   regenerated `runbooks.generated.json`; `runbooks.test.ts` fails otherwise.
@@ -105,8 +110,8 @@ synth step, so run `npm test` yourself before handing off.
   branch, which `RegistryPipeline` (in the InfraPipelines account) builds: synth, `Dev` stage, manual `ApproveProd`,
   `Prod` stage. Dev and prod are separate AWS accounts. Stacks per stage: `Dev-`/`Prod-` + `DatabaseStack`,
   `ApiStack`, `ExchangeSyncStack`, `StrategySessionMonitorStack`, `SettlementSweeperStack`, `VenuePollerStack`,
-  `MarkPollerStack`, `IncentiveSyncStack`, `SamplesApiStack`, `MonitoringStack`, `AlertingStack`. After a release with new migrations,
-  invoke the `DatabaseInitLambda` in each account.
+  `MarkPollerStack`, `IncentiveSyncStack`, `SamplesApiStack`, `MonitoringStack`, `AlertingStack`. New migrations apply
+  during the `DatabaseStack` deploy of each stage (see Migrations).
 - What runs:
   - ApiStack: the Registry API (stage `api`), one Lambda per resource in the VPC; the strategy-session launcher
     (launch/stop/logs, outside the VPC, starts EC2 orchestrators) and the venue-account creator (Secrets Manager,
@@ -172,6 +177,12 @@ synth step, so run `npm test` yourself before handing off.
     `rollRequestedBy` only from a service caller) and wakes the reconciler. The session monitor holds
     `ORDER_GATEWAY_UNLINKED` off for 6 minutes after a roll was asked for; a roll that fails alerts
     `GATEWAY_ROLL_FAILED`.
+  - Home zones: `sm.exchange.home_zone_id` (migration 082) is the availability zone ID (e.g. `use2-az2`, not a name)
+    an exchange's order gateways and production market-data shards run in, the zone measured nearest the venue; null
+    = any zone. `ExchangeHandler` accepts `homeZoneId` only as a zone of the exchange's region's platform network
+    (gnome-shared-cdk `platformZoneIds`), and moving an exchange's region drops it. `GET /gateways` and `/streams`
+    return each row's `home_zone_id` (none when the row sits outside its exchange's region; none for vendor streams).
+    A start that can't place there raises `HOME_ZONE_NO_CAPACITY`; the venue is moved by changing its home zone.
   - DatabaseStack: RDS Postgres 16 (`gnome` db) in isolated subnets, plus the migration Lambda and a query Lambda
     (`{"query": "..."}`, returns rows) for read-only inspection.
   - ExchangeSyncStack: security-master sync every 15 minutes (Hyperliquid, Lighter adapters); in prod it reports to `#gnome-security-master`.

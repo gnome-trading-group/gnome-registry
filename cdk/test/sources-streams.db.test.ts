@@ -100,6 +100,28 @@ describeDb('market-data sources and streams, against Postgres', () => {
     });
   });
 
+  it("gives a listing stream its exchange's home zone, none when collected elsewhere, and none to a vendor stream", async () => {
+    await client.query(`UPDATE sm.exchange SET home_zone_id = 'use1-az2' WHERE exchange_id = 1`);
+    expect((await getStreams({ listingId: '500' }))[0]).toMatchObject({ resolved_region: 'us-east-1', home_zone_id: 'use1-az2' });
+
+    await client.query(`UPDATE md.stream SET region = 'us-east-1' WHERE listing_id = 500`);
+    expect((await getStreams({ listingId: '500' }))[0].home_zone_id).toBe('use1-az2');
+    await client.query(`UPDATE md.stream SET region = 'eu-west-1' WHERE listing_id = 500`);
+    expect((await getStreams({ listingId: '500' }))[0]).toMatchObject({ resolved_region: 'eu-west-1', home_zone_id: null });
+
+    const vendor = JSON.parse((await withClient(new SourceHandler()).createOne(JSON.stringify(
+      { code: 'PANDASCORE', homeRegion: 'us-east-1', adapter: 'PANDASCORE', families: ['esports'] }))).body);
+    await client.query(`INSERT INTO md.stream (source_id, subject_kind, native_subject_id, family, active)
+      VALUES ($1, 'MATCH', '12345', 'esports', true)`, [vendor.source_id]);
+    expect((await getStreams({ family: 'esports' }))[0]).toMatchObject({ resolved_region: 'us-east-1', home_zone_id: null });
+  });
+
+  it('refuses a home zone that is not shaped like a zone ID', async () => {
+    await expect(client.query(`UPDATE sm.exchange SET home_zone_id = 'us-east-1a' WHERE exchange_id = 1`))
+      .rejects.toThrow(/home_zone_id/);
+    await client.query(`UPDATE sm.exchange SET home_zone_id = 'use1-nyc2-az1' WHERE exchange_id = 1`);
+  });
+
   it('filters streams by listings, family and active, and resolves a vendor stream to its home region', async () => {
     const sources = withClient(new SourceHandler());
     const created = await sources.createOne(JSON.stringify(

@@ -4,8 +4,12 @@ import * as lambda from 'aws-cdk-lib/aws-lambda-nodejs';
 import * as ec2 from 'aws-cdk-lib/aws-ec2';
 import * as secrets from 'aws-cdk-lib/aws-secretsmanager';
 import { Runtime } from 'aws-cdk-lib/aws-lambda';
+import * as triggers from 'aws-cdk-lib/triggers';
 import { Construct } from 'constructs';
 import { join } from 'path';
+
+// The most a Lambda may run: data migrations rewrite whole tables, each file in one transaction.
+const MIGRATION_TIMEOUT = cdk.Duration.minutes(15);
 
 export interface DatabaseInitLambdaProps {
   database: rds.DatabaseInstance;
@@ -25,7 +29,7 @@ export class DatabaseInitLambda extends Construct {
       }),
       runtime: Runtime.NODEJS_22_X,
       // Data migrations rewrite whole tables (e.g. re-keying every Kalshi binary event) and run in one transaction.
-      timeout: cdk.Duration.minutes(5),
+      timeout: MIGRATION_TIMEOUT,
       memorySize: 512,
       environment: {
         DATABASE_SECRET_JSON: props.rootUserSecret.secretValue.unsafeUnwrap(),
@@ -42,6 +46,17 @@ export class DatabaseInitLambda extends Construct {
     });
     props.database.grantConnect(initLambda);
     initLambda.node.addDependency(props.database);
+
+    // Applies the migrations on deploy. The migrations are bundled into the function, so a new one changes its code
+    // and its version, which runs the trigger again; a deploy with no new migration runs nothing. The runner skips
+    // what `_migrations` records as applied and throws on a failing file (rolled back), which fails this stack's
+    // update, so the stage stops before the API (which deploys after this stack) runs code needing the change.
+    new triggers.Trigger(this, 'ApplyMigrations', {
+      handler: initLambda,
+      executeOnHandlerChange: true,
+      invocationType: triggers.InvocationType.REQUEST_RESPONSE,
+      timeout: MIGRATION_TIMEOUT,
+    });
 
     const queryLambda = new lambda.NodejsFunction(this, 'DatabaseQueryLambda-Lambda', {
       entry: join(__dirname, '..', '..', 'lambda', 'db-query', 'index.ts'),

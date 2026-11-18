@@ -6,11 +6,13 @@ import { anyId, raw, Sql, sql, where } from './sql';
 // A listing's stream stores only its listing_id, so its subject id and active flag are read from the listing here, and
 // its event from the listing's contract (both sides of a binary contract are listings of one security, so both resolve
 // to the event). Every stream's region is resolved once too (its own override, else the venue's exchange region, else
-// the vendor's home region) so no caller repeats these rules.
+// the vendor's home region) so no caller repeats these rules, and so is its home zone: its exchange's, unless the stream
+// is collected in another region than the exchange's (a zone is a region's); vendor streams have none.
 const STREAM_SELECT = `
   SELECT st.stream_id, st.source_id, src.code AS source_code, src.kind AS source_kind, st.subject_kind,
          st.listing_id, COALESCE(st.native_subject_id, l.exchange_security_id) AS native_subject_id,
          st.family, st.region, COALESCE(st.region, e.region, src.home_region) AS resolved_region,
+         CASE WHEN st.region IS NULL OR st.region = e.region THEN e.home_zone_id END AS home_zone_id,
          COALESCE(st.event_id, ec.event_id) AS event_id, st.starts_at, st.ends_at, COALESCE(st.active, l.active) AS active, st.date_created
   FROM md.stream st
   JOIN md.source src ON src.source_id = st.source_id

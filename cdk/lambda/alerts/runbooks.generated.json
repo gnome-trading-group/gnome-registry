@@ -331,6 +331,15 @@
       ],
       "url": "https://github.com/gnome-trading-group/gnome-registry/blob/main/docs/runbooks/alerts/GLOBAL_HALT.md"
     },
+    "HOME_ZONE_NO_CAPACITY": {
+      "summary": "An order gateway or a production market-data shard hasn't been placed in its exchange's home availability zone 5 minutes after it was started, because no host of any of its instance types could be launched there.",
+      "firstSteps": [
+        "Read the alert key (`HOME_ZONE_NO_CAPACITY:<live|paper>:<exchange>:<instance>` for a gateway, `HOME_ZONE_NO_CAPACITY:<shard id>` for a shard) and the labels `region`, `zoneId` and `capacityProvider`.",
+        "Check the zone's Auto Scaling group activity (EC2 console, the group named for the zone) for `InsufficientInstanceCapacity`.",
+        "If the zone stays short, move the venue: controller, Exchanges, set its home zone to the region's other zone."
+      ],
+      "url": "https://github.com/gnome-trading-group/gnome-registry/blob/main/docs/runbooks/alerts/HOME_ZONE_NO_CAPACITY.md"
+    },
     "HOST_CPU_HIGH": {
       "summary": "The session's instance has been close to fully busy, or throttled, for ten minutes.",
       "firstSteps": [

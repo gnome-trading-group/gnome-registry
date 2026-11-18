@@ -95,6 +95,9 @@ export class GatewayHandler extends ResourceHandler {
   generateSelectQuery(params: APIGatewayProxyEventQueryStringParameters | null): Sql {
     return sql`
       SELECT g.*, e.exchange_code,
+        -- The zone the gateway starts in; none while the row sits in another region than its exchange (a zone is a
+        -- region's).
+        CASE WHEN g.region = e.region THEN e.home_zone_id END AS home_zone_id,
         (SELECT COUNT(*) FROM account_master.gateway_account ga JOIN account_master.venue_account a USING (account_id)
          WHERE ga.gateway_key = g.gateway_key AND a.status IN ('ACTIVE', 'DRAINING'))::int AS accounts
       FROM account_master.gateway g LEFT JOIN sm.exchange e USING (exchange_id)${where([

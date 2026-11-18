@@ -84,7 +84,13 @@ class SecurityMasterTest {
                         12356,
                         """
                         [{"exchange_id": 12356, "region": "us-east-1"}]""",
-                        new Exchange(12356, null, null, "us-east-1")));
+                        new Exchange(12356, null, null, "us-east-1")),
+                Arguments.of(
+                        12357,
+                        """
+                        [{"exchange_id": 12357, "exchange_code": "KALSHI", "exchange_name": "Kalshi", "region": "us-east-2",
+                          "home_zone_id": "use2-az2"}]""",
+                        new Exchange(12357, "KALSHI", "Kalshi", "us-east-2", "use2-az2")));
     }
 
     @ParameterizedTest
@@ -282,6 +288,16 @@ class SecurityMasterTest {
                 new group.gnometrading.md.Stream(
                         31, 2, "KALSHI", "LISTING", 789, "MKT:yes", "book", "us-east-1", 0, 0L, 0L, true),
                 stream);
+    }
+
+    @Test
+    void testStreamCarriesItsExchangesHomeZone() {
+        when(registryConnection.get(new ViewString("/api/streams?listingId=789")))
+                .thenReturn(ByteBuffer.wrap(LISTING_STREAM_JSON
+                        .replace("\"active\": true", "\"active\": true, \"home_zone_id\": \"use1-az2\"")
+                        .getBytes()));
+
+        assertEquals("use1-az2", securityMaster.streamForListing(789).homeZoneId());
     }
 
     @Test
