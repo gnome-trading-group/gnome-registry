@@ -126,6 +126,9 @@ public final class SecurityMaster {
     private static final Stream EMPTY_STREAM = new Stream(-1, -1, null, null, 0, null, null, null, 0, 0L, 0L, false);
 
     private final RegistryConnection registryConnection;
+    // When set, the undated time-dependent reads answer as the registry knew them at this instant, so everything built
+    // on this instance (a backtest's strategy and OMS) sees the same point in time as its simulator.
+    private final String defaultKnownAsOf;
 
     private final MutableString securityPath;
     private final MutableString exchangePath;
@@ -159,7 +162,17 @@ public final class SecurityMaster {
     private final IntMap<Stream> streamByListingCache;
 
     public SecurityMaster(final RegistryConnection registryConnection) {
+        this(registryConnection, null);
+    }
+
+    /**
+     * A security master whose undated fee and incentive reads ({@link #getFeeTimeline(int)},
+     * {@link #getIncentiveTimeline(int)}) answer as the registry knew them at {@code defaultKnownAsOf} (ISO-8601);
+     * null answers as the registry resolves them now.
+     */
+    public SecurityMaster(final RegistryConnection registryConnection, final String defaultKnownAsOf) {
         this.registryConnection = registryConnection;
+        this.defaultKnownAsOf = defaultKnownAsOf;
 
         this.securityPath = new ExpandingMutableString(SECURITY_ENDPOINT);
         this.exchangePath = new ExpandingMutableString(EXCHANGE_ENDPOINT);
@@ -631,8 +644,14 @@ public final class SecurityMaster {
         }
     }
 
-    /** The listing's fee schedules over time, as the registry resolves them now; empty if it has none. */
+    /**
+     * The listing's fee schedules over time, as the registry resolves them now, or as it knew them at this instance's
+     * default known-as-of time when one was given; empty if it has none.
+     */
     public FeeTimeline getFeeTimeline(final int listingId) {
+        if (this.defaultKnownAsOf != null) {
+            return getFeeTimeline(listingId, this.defaultKnownAsOf);
+        }
         final FeeTimeline cached = this.feeTimelineCache.get(listingId);
         if (cached != null) {
             return cached;
@@ -673,8 +692,14 @@ public final class SecurityMaster {
         }
     }
 
-    /** The venue incentive programs that reach the listing's market, as the registry holds them now. */
+    /**
+     * The venue incentive programs that reach the listing's market, as the registry holds them now, or as it knew them
+     * at this instance's default known-as-of time when one was given.
+     */
     public IncentiveTimeline getIncentiveTimeline(final int listingId) {
+        if (this.defaultKnownAsOf != null) {
+            return getIncentiveTimeline(listingId, this.defaultKnownAsOf);
+        }
         final IncentiveTimeline cached = this.incentiveTimelineCache.get(listingId);
         if (cached != null) {
             return cached;

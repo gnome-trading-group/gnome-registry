@@ -820,6 +820,42 @@ class SecurityMasterTest {
     }
 
     @Test
+    void testUndatedFeeTimelineReadsAtTheDefaultKnownAsOf() {
+        final SecurityMaster pinned = new SecurityMaster(registryConnection, "2026-10-01T00:00:00.000Z");
+        when(registryConnection.get(new ViewString("/api/fees?listingIds=7&knownAsOf=2026-10-01T00:00:00.000Z")))
+                .thenReturn(ByteBuffer.wrap("[{\"listingId\": 7, \"timeline\": []}]".getBytes()));
+
+        final FeeTimeline timeline = pinned.getFeeTimeline(7);
+
+        assertEquals(0, timeline.size());
+        assertSame(timeline, pinned.getFeeTimeline(7));
+        assertSame(timeline, pinned.getFeeTimeline(7, "2026-10-01T00:00:00.000Z"));
+        verify(registryConnection, times(1)).get(any());
+    }
+
+    @Test
+    void testUndatedFeeTimelineWithANullDefaultReadsNow() {
+        final SecurityMaster unpinned = new SecurityMaster(registryConnection, null);
+        when(registryConnection.get(new ViewString("/api/fees?listingIds=7")))
+                .thenReturn(ByteBuffer.wrap("[{\"listingId\": 7, \"timeline\": []}]".getBytes()));
+
+        assertEquals(0, unpinned.getFeeTimeline(7).size());
+        assertSame(unpinned.getFeeTimeline(7), unpinned.getFeeTimeline(7));
+        verify(registryConnection, times(1)).get(any());
+    }
+
+    @Test
+    void testUndatedIncentiveTimelineReadsAtTheDefaultKnownAsOf() {
+        final SecurityMaster pinned = new SecurityMaster(registryConnection, "2026-10-01T00:00:00.000Z");
+        when(registryConnection.get(
+                        new ViewString("/api/incentive-programs?listingIds=7&knownAsOf=2026-10-01T00:00:00.000Z")))
+                .thenReturn(ByteBuffer.wrap("[{\"listingId\": 7, \"programs\": []}]".getBytes()));
+
+        assertEquals(0, pinned.getIncentiveTimeline(7).size());
+        verify(registryConnection, times(1)).get(any());
+    }
+
+    @Test
     void testGetFeeTimelineReadsAMakerRebate() {
         when(registryConnection.get(new ViewString("/api/fees?listingIds=7")))
                 .thenReturn(ByteBuffer.wrap(
