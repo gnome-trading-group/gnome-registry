@@ -7,7 +7,8 @@ const DEFAULT_PAGE_SIZE = 5000;
 
 /**
  * Whether a select already orders its rows. An ORDER BY inside parentheses (a subquery, an aggregate, a CTE) orders
- * something else, and taking one for the select's own would leave its pages unordered.
+ * something else, and taking one for the select's own would leave its pages unordered. Comments are skipped: a quote
+ * in one would otherwise read as a string that swallows the real ORDER BY, and a second one would get appended.
  */
 export function hasTopLevelOrderBy(text: string): boolean {
   let depth = 0;
@@ -16,6 +17,14 @@ export function hasTopLevelOrderBy(text: string): boolean {
     const c = text[i];
     if (inString) {
       if (c === "'") inString = false;
+    } else if (c === '-' && text[i + 1] === '-') {
+      const end = text.indexOf('\n', i);
+      if (end === -1) return false;
+      i = end;
+    } else if (c === '/' && text[i + 1] === '*') {
+      const end = text.indexOf('*/', i + 2);
+      if (end === -1) return false;
+      i = end + 1;
     } else if (c === "'") {
       inString = true;
     } else if (c === '(') {

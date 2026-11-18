@@ -134,9 +134,13 @@ synth step, so run `npm test` yourself before handing off.
     (`RECORDS_PER_SECOND_PER_STREAM`, 20/s): slow sessions go on t3.small up to 500 records/s (a Python one 300/s),
     else like standard; standard on c7a.medium up to 100 streams and 4,000 records/s (a Python one 1,000/s), else
     c7a.large; low latency on c7i.2xlarge.
-  - Where the launcher puts an instance: every session goes in the zone of the first of its region's gateways already
-    running (from the `private_ip` that gateway advertises in `service-endpoints`; the first zone when none runs yet,
-    or when the session trades through none). A `low_latency` session on a type that supports it also goes in the
+  - Where the launcher puts an instance: every session goes in the zone of the first of its region's gateways (the
+    gateway of its first traded listing there) already running: the `availability_zone` that gateway advertises in
+    `service-endpoints`, or, from a release that doesn't say, the subnet its `private_ip` is in. When none runs yet,
+    the first such exchange's home zone (`home_zone_id`, matched to the subnets' zone IDs), where its gateway will start;
+    the first zone when there's neither, or the session trades through none. The row records `availability_zone` and
+    `gateway_zone` (migration 083: the running gateway's zone it saw; null when none ran), and a session placed away
+    from its gateway is logged. A `low_latency` session on a type that supports it also goes in the
     region's precision-time placement group (found by the platform tag), so its clock follows the Nitro hardware
     clock. On `InsufficientInstanceCapacity` it tries that zone outside the group, then the other zone in and out of
     it; a zone named in the request is the only one tried.

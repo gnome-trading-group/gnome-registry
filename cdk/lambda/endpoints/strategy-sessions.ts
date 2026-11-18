@@ -31,6 +31,8 @@ interface IUpdateSession {
   instanceType?: string;
   launchRegion?: string;
   availabilityZone?: string;
+  // The zone of the gateway the session trades through in its region, as the launcher saw it.
+  gatewayZone?: string;
   // Only update when the session is currently in one of these statuses. Lets concurrent writers (launcher,
   // EC2 monitor, the orchestrator itself) race without a late event dragging a session backwards.
   expectedStatus?: string | string[];
@@ -131,6 +133,7 @@ export class StrategySessionHandler extends ResourceHandler {
       instance_type: s.instanceType ?? undefined,
       launch_region: s.launchRegion ?? undefined,
       availability_zone: s.availabilityZone ?? undefined,
+      gateway_zone: s.gatewayZone ?? undefined,
       date_modified: NOW,
     })}${where([
       sql`session_id = ${row['session_id']}`,

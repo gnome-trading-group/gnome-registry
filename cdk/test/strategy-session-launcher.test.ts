@@ -8,8 +8,13 @@ let runInstancesError: Error | null = null;
 // region's network has (null: none).
 let runInstancesErrors: Error[] = [];
 let precisionTimeGroup: string | null = 'gnome-precision-time-pg';
-// The private IP each gateway advertises in service-endpoints.
+// The private IP each gateway advertises in service-endpoints, and the zone it says it runs in (releases that say).
 const gatewayIps: Record<string, string> = {};
+const gatewayZones: Record<string, string> = {};
+// Gateways whose item is a stopped one's, not written for 5 minutes (DynamoDB expires items only eventually).
+const staleGateways = new Set<string>();
+// Kalshi's home zone in the security master (a zone ID), none by default.
+let kalshiHomeZone: string | null = null;
 
 jest.mock('@aws-sdk/client-ec2', () => {
   const command = (kind: string) => jest.fn().mockImplementation((input) => ({ kind, input }));
@@ -20,8 +25,8 @@ jest.mock('@aws-sdk/client-ec2', () => {
         if (cmd.kind === 'DescribeSubnets') {
           return {
             Subnets: [
-              { SubnetId: 'subnet-a', AvailabilityZone: 'us-east-1a', CidrBlock: '10.144.0.0/20' },
-              { SubnetId: 'subnet-b', AvailabilityZone: 'us-east-1b', CidrBlock: '10.144.16.0/20' },
+              { SubnetId: 'subnet-a', AvailabilityZone: 'us-east-1a', AvailabilityZoneId: 'use1-az2', CidrBlock: '10.144.0.0/20' },
+              { SubnetId: 'subnet-b', AvailabilityZone: 'us-east-1b', AvailabilityZoneId: 'use1-az4', CidrBlock: '10.144.16.0/20' },
             ],
           };
         }
@@ -51,8 +56,14 @@ jest.mock('@aws-sdk/client-dynamodb', () => ({
     send: async (cmd: any) => {
       const id: string = cmd.input.Key.service_id.S;
       events.push(`GetItem ${id}`);
-      const ip = gatewayIps[id.replace(/^order-gateway#/, '')];
-      return ip ? { Item: { private_ip: { S: ip } } } : {};
+      const key = id.replace(/^order-gateway#/, '');
+      const ip = gatewayIps[key];
+      const zone = gatewayZones[key];
+      const writtenAtMs = Date.now() - (staleGateways.has(key) ? 5 * 60_000 : 1_000);
+      return ip ? { Item: {
+        private_ip: { S: ip }, written_at_ns: { N: `${BigInt(writtenAtMs) * 1_000_000n}` },
+        ...(zone ? { availability_zone: { S: zone } } : {}),
+      } } : {};
     },
   })),
   GetItemCommand: jest.fn().mockImplementation((input) => ({ input })),
@@ -225,6 +236,9 @@ beforeEach(() => {
   runInstancesErrors = [];
   precisionTimeGroup = 'gnome-precision-time-pg';
   for (const key of Object.keys(gatewayIps)) delete gatewayIps[key];
+  for (const key of Object.keys(gatewayZones)) delete gatewayZones[key];
+  staleGateways.clear();
+  kalshiHomeZone = null;
   marketDataCalls = [];
   leaseStatusQueue = [];
   leaseDeleteStatus = 200;
@@ -297,7 +311,8 @@ beforeEach(() => {
     if (method === 'GET' && path === '/listings') return jsonResponse([{ listing_id: 1, exchange_id: 5 }]);
     if (method === 'GET' && path === '/exchanges') {
       if (url.includes('exchangeCode=POLYMARKET_US')) return jsonResponse([{ exchange_id: 6, exchange_code: 'POLYMARKET_US' }]);
-      return jsonResponse(url.includes('exchangeId=5') ? [{ exchange_id: 5, exchange_code: 'KALSHI', region: 'us-east-1' }] : []);
+      return jsonResponse(url.includes('exchangeId=5')
+        ? [{ exchange_id: 5, exchange_code: 'KALSHI', region: 'us-east-1', home_zone_id: kalshiHomeZone }] : []);
     }
     if (method === 'GET') return jsonResponse([sessionRow]);
     if (method === 'POST') {
@@ -1441,6 +1456,49 @@ describe('placement', () => {
     expect(tried()).toEqual([['subnet-b', 'gnome-precision-time-pg']]);
   });
 
+  it('starts in its exchange\'s home zone, where the gateway will start, when that gateway isn\'t running yet', async () => {
+    kalshiHomeZone = 'use1-az4';
+
+    const res = await launch({ mode: 'live' });
+
+    expect(res.statusCode).toBe(200);
+    expect(tried()).toEqual([['subnet-b', 'gnome-precision-time-pg']]);
+    expect(patchBodies).toContainEqual(expect.objectContaining({ instanceId: 'i-123' }));
+    expect(patchBodies.find((b: any) => b.instanceId)).not.toHaveProperty('gatewayZone');
+  });
+
+  it('follows the zone the running gateway says it runs in, over its IP and over the home zone, and records it', async () => {
+    kalshiHomeZone = 'use1-az4';
+    gatewayIps['live:kalshi:main'] = '10.144.17.40';
+    gatewayZones['live:kalshi:main'] = 'us-east-1a';
+
+    const res = await launch({ mode: 'live' });
+
+    expect(res.statusCode).toBe(200);
+    expect(tried()).toEqual([['subnet-a', 'gnome-precision-time-pg']]);
+    expect(patchBodies).toContainEqual(expect.objectContaining({ instanceId: 'i-123', gatewayZone: 'us-east-1a' }));
+  });
+
+  it('ignores a stopped gateway\'s item that DynamoDB has yet to expire, and goes to the home zone', async () => {
+    kalshiHomeZone = 'use1-az4';
+    gatewayIps['live:kalshi:main'] = '10.144.1.40';
+    gatewayZones['live:kalshi:main'] = 'us-east-1a';
+    staleGateways.add('live:kalshi:main');
+
+    await launch({ mode: 'live' });
+
+    expect(tried()).toEqual([['subnet-b', 'gnome-precision-time-pg']]);
+    expect(patchBodies.find((b: any) => b.instanceId)).not.toHaveProperty('gatewayZone');
+  });
+
+  it('ignores a home zone the network has no subnet in', async () => {
+    kalshiHomeZone = 'use1-az6';
+
+    await launch({ mode: 'live' });
+
+    expect(tried()).toEqual([['subnet-a', 'gnome-precision-time-pg']]);
+  });
+
   it('starts in the first zone when its gateway isn\'t running yet', async () => {
     const res = await launch({ mode: 'live' });
 
@@ -1485,6 +1543,7 @@ describe('placement', () => {
 
   it('stays in a zone the caller named, inside the group then outside it', async () => {
     runInstancesErrors = [capacity(), capacity()];
+    kalshiHomeZone = 'use1-az2';
 
     const res = await launch({ availabilityZone: 'us-east-1b' });
 

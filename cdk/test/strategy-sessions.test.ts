@@ -1,6 +1,7 @@
 import { PoolClient } from 'pg';
 import { hasTopLevelOrderBy, ResourceHandler } from '../lambda/endpoints/base';
 import { EventHandler } from '../lambda/endpoints/events';
+import { GatewayHandler } from '../lambda/endpoints/gateways';
 import { RiskPolicyHandler } from '../lambda/endpoints/risk-policies';
 import { StrategySessionHandler, parseStatuses } from '../lambda/endpoints/strategy-sessions';
 
@@ -66,6 +67,16 @@ describe('strategy session queries', () => {
     expect(query.text).not.toContain('status');
   });
 
+  it('records the zone a session was placed in beside its gateway\'s', () => {
+    const query = handler.generateModifyQuery(
+      { session_id: 's1' },
+      JSON.stringify({ instanceId: 'i-1', availabilityZone: 'us-east-2b', gatewayZone: 'us-east-2b' }),
+    );
+    expect(query.text).toContain('availability_zone = $2');
+    expect(query.text).toContain('gateway_zone = $3');
+    expect(query.values).toEqual(['i-1', 'us-east-2b', 'us-east-2b', 's1']);
+  });
+
   it('keeps the first stop reason and stopper', () => {
     const query = handler.generateModifyQuery(
       { session_id: 's1' },
@@ -113,6 +124,8 @@ describe('strategy session list ordering', () => {
     expect(events.match(/ORDER BY/g)).toHaveLength(1);
     const policies = await listQuery(new RiskPolicyHandler(), { sortBy: 'policy_id' });
     expect(policies.match(/ORDER BY/g)).toHaveLength(1);
+    const gateways = await listQuery(new GatewayHandler(), {});
+    expect(gateways.match(/ORDER BY/g)).toHaveLength(1);
   });
 });
 
@@ -124,5 +137,12 @@ describe('hasTopLevelOrderBy', () => {
     expect(hasTopLevelOrderBy('WITH v AS (SELECT * FROM t ORDER BY a) SELECT * FROM v')).toBe(false);
     expect(hasTopLevelOrderBy("SELECT ')' AS p, 'x ORDER BY y' FROM t")).toBe(false);
     expect(hasTopLevelOrderBy('SELECT recorder_by FROM t')).toBe(false);
+  });
+
+  it('skips comments, quotes in them included', () => {
+    expect(hasTopLevelOrderBy("SELECT a, -- a zone is a region's\n b FROM t ORDER BY a")).toBe(true);
+    expect(hasTopLevelOrderBy("SELECT a /* it's ( */ FROM t ORDER BY a")).toBe(true);
+    expect(hasTopLevelOrderBy('SELECT a FROM t -- ORDER BY a\n')).toBe(false);
+    expect(hasTopLevelOrderBy('SELECT a FROM t /* ORDER BY a */')).toBe(false);
   });
 });

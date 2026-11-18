@@ -71,6 +71,20 @@ describe("the gateways' status", () => {
     expect(result[0].endpoint).toMatchObject({ state: 'STOPPING', canHandOver: true, handover: true });
   });
 
+  it("gives each gateway its exchange's home zone and the zone its host says it runs in, none from an older release", async () => {
+    const { result } = await statuses([{ ...row('live:kalshi:main'), home_zone_id: 'use2-az2' }, row('paper:kalshi:main', 'paper')], {
+      [endpointId('live:kalshi:main')]: {
+        ...endpoint(1_000), availability_zone: { S: 'us-east-2a' }, availability_zone_id: { S: 'use2-az1' },
+      },
+      [endpointId('paper:kalshi:main')]: endpoint(1_000),
+    });
+
+    expect(result[0]).toMatchObject({
+      homeZoneId: 'use2-az2', endpoint: { availabilityZone: 'us-east-2a', availabilityZoneId: 'use2-az1' },
+    });
+    expect(result[1]).toMatchObject({ homeZoneId: null, endpoint: { availabilityZone: null, availabilityZoneId: null } });
+  });
+
   it('gives the roll the reconciler last took up, and the request on the row', async () => {
     const requested = { ...row('live:kalshi:main'), roll_requested_at: '2026-11-12T18:58:00.000Z', roll_requested_by: 'a@b.c' };
     const { result } = await statuses([requested], {

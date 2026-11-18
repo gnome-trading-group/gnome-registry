@@ -21,6 +21,8 @@ function endpoint(books: number, streams: number, state = 'READY', startedAtMs =
     handover: false,
     startedAt: new Date(startedAtMs).toISOString(),
     paper: { books, streams, recordsPerSecond: 100, maxBooks: 800, maxStreams: 150 },
+    availabilityZone: null,
+    availabilityZoneId: null,
   };
 }
 

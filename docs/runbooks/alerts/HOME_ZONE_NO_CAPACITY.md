@@ -9,7 +9,7 @@ first_steps:
 
 ## What it means
 
-Each exchange can have a home zone (`sm.exchange.home_zone_id`, a zone ID such as `use2-az2`): the zone measured nearest the venue. Its order gateways (live and paper) start only there, on that zone's host group (`order-gateway-hosts-<zoneId>`, `order-gateway-paper-hosts-<zoneId>`), and so do the production shards carrying its streams (`collection-ondemand-<region>-<zoneId>`). Each group tries several instance types in order (live gateways c7a.large, c7i.large, m7a.large, m7i.large; paper c7a.medium, m7a.medium, c7i.large; shards r7a.medium, m7a.large, r7i.large). This alert means none of them could be launched in that zone for 5 minutes. There is no automatic move to another zone: the start keeps trying in the home zone.
+Each exchange can have a home zone (`sm.exchange.home_zone_id`, a zone ID such as `use2-az2`): the zone measured nearest the venue. Its order gateways (live and paper) start only there, on that zone's host group (`order-gateway-hosts-<zoneId>`, `order-gateway-paper-hosts-<zoneId>`), and so do the production shards carrying its streams (`collection-ondemand-<region>-<zoneId>`). Each group tries several instance types in order (live gateways c7a.large, c7i.large, m7a.large, m7i.large; paper c7a.medium, m7a.medium, c7i.large; shards r7a.medium, m7a.large, m7i.large). This alert means none of them could be launched in that zone for 5 minutes. There is no automatic move to another zone: the start keeps trying in the home zone.
 
 Research shards (Spot) have no zone and never raise this.
 

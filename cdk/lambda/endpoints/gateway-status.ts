@@ -29,6 +29,8 @@ export interface GatewayRow {
   roll_requested_at: string | null;
   roll_requested_by: string | null;
   accounts: number;
+  // Its exchange's home zone (a zone ID), where it starts; none when the exchange has none.
+  home_zone_id?: string | null;
 }
 
 export interface GatewayEndpoint {
@@ -48,6 +50,9 @@ export interface GatewayEndpoint {
   startedAt: string | null;
   // A paper gateway's load against its caps; null for a live one or an older release.
   paper: PaperLoad | null;
+  // The zone its host runs in, by this account's name and by ID; null from an older release.
+  availabilityZone: string | null;
+  availabilityZoneId: string | null;
 }
 
 /** What a paper gateway carries against its caps: books (a session's listing each) and distinct streams. */
@@ -85,6 +90,9 @@ export interface GatewayStatus {
   // What a start, and so a roll, would run: its pin, else the orchestrator's latest release; null if that couldn't be
   // read.
   rollTargetVersion: string | null;
+  // Where it starts (a zone ID): it moves there at its next start, or at once when it holds nothing, if it runs
+  // elsewhere; null when its exchange has no home zone.
+  homeZoneId: string | null;
   wantedAt: string | null;
   accounts: number;
   rollRequestedAt: string | null;
@@ -135,6 +143,8 @@ export function endpointOf(item: Item | undefined, nowMs: number): GatewayEndpoi
         maxStreams: num(item, 'paper_max_streams'),
       }
       : null,
+    availabilityZone: optionalStr(item, 'availability_zone'),
+    availabilityZoneId: optionalStr(item, 'availability_zone_id'),
   };
 }
 
@@ -174,6 +184,7 @@ export function gatewayStatuses(
     profile: row.profile,
     pinnedVersion: row.orchestrator_version,
     rollTargetVersion: row.orchestrator_version ?? latestVersion,
+    homeZoneId: row.home_zone_id ?? null,
     wantedAt: row.wanted_at,
     accounts: row.accounts,
     rollRequestedAt: row.roll_requested_at,

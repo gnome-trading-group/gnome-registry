@@ -179,6 +179,8 @@ interface ExchangeRow {
   exchange_id: number;
   exchange_code: string;
   region: string;
+  // A zone ID, where its gateways and production shards run; none when it has no home zone.
+  home_zone_id?: string | null;
 }
 
 async function exchangeRows(exchangeIds: Set<number>): Promise<Map<number, ExchangeRow>> {
@@ -263,6 +265,8 @@ export async function simulationProblem(
 interface PlatformSubnet {
   subnetId: string;
   availabilityZone: string;
+  // The physical zone (e.g. use2-az2), the same in every account, as exchanges name their home zone.
+  availabilityZoneId?: string;
   cidrBlock: string;
 }
 
@@ -287,7 +291,8 @@ async function discoverNetworkConfig(region: string): Promise<NetworkConfig> {
       }),
   ]);
   const subnets = (subnetsRes.Subnets ?? []).map(s => ({
-    subnetId: s.SubnetId!, availabilityZone: s.AvailabilityZone!, cidrBlock: s.CidrBlock ?? '',
+    subnetId: s.SubnetId!, availabilityZone: s.AvailabilityZone!, availabilityZoneId: s.AvailabilityZoneId,
+    cidrBlock: s.CidrBlock ?? '',
   }));
   if (subnets.length === 0) throw new Error(`No platform network subnets found in ${region}`);
   const sg = sgsRes.SecurityGroups?.[0];
@@ -309,11 +314,14 @@ export function cidrContains(cidr: string, ip: string): boolean {
 }
 
 const serviceEndpoints = new DynamoDBClient({ region: SERVICE_ENDPOINTS.region });
+// As gateway-status reads it: a gateway writes its item every 15 s, so one unwritten for a minute isn't running.
+const GATEWAY_ENDPOINT_FRESH_MS = 60_000;
 
 /**
- * The zone of the first of these gateways running in the network, from the private IP it advertises in
- * `service-endpoints`; undefined when none runs yet (each scales from zero, so one ensured a moment ago is still
- * booting). A session in its gateway's zone saves a cross-zone hop on every order and report.
+ * The zone of the first of these gateways running in the network: the zone it advertises in `service-endpoints`, or,
+ * from a release that doesn't say, the subnet its private IP is in; undefined when none runs yet (each scales from
+ * zero, so one ensured a moment ago is still booting). A session in its gateway's zone saves a cross-zone hop on every
+ * order and report.
  */
 async function gatewayZone(gatewayKeys: string[], network: NetworkConfig): Promise<string | undefined> {
   for (const key of gatewayKeys) {
@@ -321,14 +329,33 @@ async function gatewayZone(gatewayKeys: string[], network: NetworkConfig): Promi
       const res = await serviceEndpoints.send(new GetItemCommand({
         TableName: SERVICE_ENDPOINTS.tableName,
         Key: { [SERVICE_ENDPOINTS.partitionKey]: { S: `order-gateway#${key}` } },
-        ProjectionExpression: 'private_ip',
+        ProjectionExpression: 'private_ip, availability_zone, written_at_ns',
       }));
+      // An item outlives its gateway until DynamoDB gets round to its expiry; one not written lately is a stopped
+      // gateway's, whose zone says nothing of where the next one starts.
+      const writtenAtNs = res.Item?.written_at_ns?.N;
+      if (!writtenAtNs || Date.now() - Number(BigInt(writtenAtNs) / 1_000_000n) > GATEWAY_ENDPOINT_FRESH_MS) continue;
+      const advertised = res.Item?.availability_zone?.S;
+      if (advertised && network.subnets.some((s) => s.availabilityZone === advertised)) return advertised;
       const ip = res.Item?.private_ip?.S;
       const subnet = ip ? network.subnets.find((s) => cidrContains(s.cidrBlock, ip)) : undefined;
       if (subnet) return subnet.availabilityZone;
     } catch (error) {
       console.warn(`Could not read where gateway ${key} runs; launching without its zone`, error);
     }
+  }
+  return undefined;
+}
+
+/**
+ * The zone, by this account's name, that the first of these exchanges calls home (its `home_zone_id`, a zone ID), where
+ * its gateway will start; undefined when none has one the network has a subnet in.
+ */
+export function homeZone(exchanges: { home_zone_id?: string | null }[], subnets: PlatformSubnet[]): string | undefined {
+  for (const exchange of exchanges) {
+    const id = exchange.home_zone_id;
+    const subnet = id ? subnets.find((s) => s.availabilityZoneId === id) : undefined;
+    if (subnet) return subnet.availabilityZone;
   }
   return undefined;
 }
@@ -907,13 +934,14 @@ async function handleLaunch(body: string | null) {
     { Key: 'Name', Value: `orchestrator-${s.sessionId.substring(0, 8)}` },
   ];
 
-  // Every session goes beside its own region's gateway, saving a cross-zone hop on each order and report. A
-  // low-latency session also goes into the precision-time group, so what it measures against other hosts is good to
-  // microseconds.
-  const localGateways = [...exchanges].filter(([, e]) => e.region === region)
-    .map(([exchangeId]) => gatewayKeys.get(exchangeId))
-    .filter((key): key is string => key !== undefined);
-  const preferredZone = s.availabilityZone ?? await gatewayZone(localGateways, network);
+  // Every session goes beside its own region's gateway, saving a cross-zone hop on each order and report: the zone that
+  // gateway runs in, or, before it runs, its exchange's home zone, where it will start. The first is the gateway of
+  // the session's first traded listing in the region. A low-latency session also goes into the precision-time group,
+  // so what it measures against other hosts is good to microseconds.
+  const local = [...exchanges].filter(([exchangeId, e]) => e.region === region && gatewayKeys.has(exchangeId));
+  const localGateways = local.map(([exchangeId]) => gatewayKeys.get(exchangeId)!);
+  const runningGatewayZone = await gatewayZone(localGateways, network);
+  const preferredZone = s.availabilityZone ?? runningGatewayZone ?? homeZone(local.map(([, e]) => e), network.subnets);
   const group = profile === LOW_LATENCY && supportsPrecisionTime(instanceType) ? network.precisionTimeGroup : undefined;
   const attempts = placements(network.subnets, preferredZone, group, s.availabilityZone !== undefined);
 
@@ -959,9 +987,13 @@ async function handleLaunch(body: string | null) {
     }
   }
 
+  if (runningGatewayZone && availabilityZone && runningGatewayZone !== availabilityZone) {
+    console.warn(`Session ${s.sessionId} placed in ${availabilityZone}, its gateway runs in ${runningGatewayZone}`);
+  }
   const session = await registryFetch('/strategy-sessions', 'PATCH', {
     instanceId,
     availabilityZone,
+    ...(runningGatewayZone ? { gatewayZone: runningGatewayZone } : {}),
   }, { sessionId: s.sessionId });
 
   return createResponse(200, session);
