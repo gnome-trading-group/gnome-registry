@@ -5,7 +5,9 @@ import {
   PRICE_SCALE, scaleDecimal, SETTLEMENT_LOOKBACK_MS, SIZE_SCALE, VenueCredit, VenueReading, VenueSettlement,
 } from './types';
 import { IncentiveProgramReading } from './types';
-import { chunks, pause, PRICE_SCALE as SPEC_PRICE_SCALE, SIZE_SCALE as SPEC_SIZE_SCALE, units, VenueSpec } from './specs';
+import {
+  chunks, inParallel, pause, PRICE_SCALE as SPEC_PRICE_SCALE, ReadOptions, SIZE_SCALE as SPEC_SIZE_SCALE, units, VenueSpec,
+} from './specs';
 
 // Polymarket Intl holds everything on chain, so an account is read with no credentials: its collateral is the
 // funder wallet's pUSD balance on Polygon, and the public data API lists the outcome tokens that wallet holds.
@@ -346,6 +348,8 @@ const POLYMARKET_INTL_LOT_SIZE = 10_000;
 // Markets per Gamma request: about 80 characters each in the URL.
 const CONDITIONS_PER_REQUEST = 100;
 const PAUSE_BETWEEN_REQUESTS_MS = 250;
+// Gamma requests in flight at once, each still pausing after itself: a full pass's ~600 pages in a minute or two.
+const GAMMA_REQUESTS_AT_ONCE = 4;
 
 /** The market and token a listing trades: `{condition_id}:{token_id}`. */
 export function polymarketIntlMarketOf(exchangeSecurityId: string): { conditionId: string; tokenId: string } {
@@ -376,16 +380,18 @@ async function clobMarket(conditionId: string): Promise<{ tick: number | null; m
  * near 0 and 1; read from Gamma, open markets first and then closed ones, with the CLOB filling in what Gamma omits,
  * whole markets included (Gamma stops listing old closed markets the CLOB still knows).
  */
-export async function readPolymarketIntlSpecs(exchangeSecurityIds: string[]): Promise<Map<string, VenueSpec>> {
+export async function readPolymarketIntlSpecs(
+  exchangeSecurityIds: string[], options: ReadOptions = {},
+): Promise<Map<string, VenueSpec>> {
   const listingsByCondition = new Map<string, string[]>();
   for (const id of exchangeSecurityIds) {
     const { conditionId } = polymarketIntlMarketOf(id);
     listingsByCondition.set(conditionId, [...(listingsByCondition.get(conditionId) ?? []), id]);
   }
   const found = new Map<string, { tick: number | null; minSize: number | null }>();
-  for (const closed of [false, true]) {
+  for (const closed of options.listedOnly ? [false] : [false, true]) {
     const wanted = [...listingsByCondition.keys()].filter(c => !found.has(c));
-    for (const batch of chunks(wanted, CONDITIONS_PER_REQUEST)) {
+    await inParallel(chunks(wanted, CONDITIONS_PER_REQUEST), GAMMA_REQUESTS_AT_ONCE, async batch => {
       for (const market of await gammaMarkets(batch, closed)) {
         found.set(String(market.conditionId), {
           tick: units(market.orderPriceMinTickSize, SPEC_PRICE_SCALE),
@@ -393,11 +399,12 @@ export async function readPolymarketIntlSpecs(exchangeSecurityIds: string[]): Pr
         });
       }
       await pause(PAUSE_BETWEEN_REQUESTS_MS);
-    }
+    });
   }
   const specs = new Map<string, VenueSpec>();
   for (const [conditionId, ids] of listingsByCondition) {
     let terms = found.get(conditionId) ?? { tick: null, minSize: null };
+    if (options.listedOnly && !found.has(conditionId)) continue;
     if (terms.tick === null || terms.minSize === null) {
       const clob = await clobMarket(conditionId);
       terms = { tick: terms.tick ?? clob.tick, minSize: terms.minSize ?? clob.minSize };

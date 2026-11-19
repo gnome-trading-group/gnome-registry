@@ -1,8 +1,9 @@
 import { APIGatewayProxyEvent, APIGatewayProxyEventQueryStringParameters } from 'aws-lambda';
 import { parseIdList, ResourceHandler, ValidationError } from './base';
 import { isoTimestamp } from './fees';
-import { validatePriceBands } from './price-bands';
+import { checkGridEnd, validatePriceBands } from './price-bands';
 import { anyId, NOW, Sql, sql, where } from './sql';
+import { AssetClass } from '../sync/venues/exchange-types';
 
 interface IListingSpec {
   listingId: number;
@@ -90,6 +91,34 @@ export class ListingSpecHandler extends ResourceHandler {
       VALUES (${spec.listingId}, ${JSON.stringify(priceBands)}::jsonb, ${spec.lotSize}, ${spec.minNotional ?? 0},
         ${spec.contractMultiplier ?? 1000000000}, ${spec.minSize ?? 0}, ${effectiveFrom})
       RETURNING *`;
+  }
+
+  async createOne(body: string | null) {
+    if (body) await this.checkGridEnds([JSON.parse(body) as IListingSpec]);
+    return super.createOne(body);
+  }
+
+  async createMany(body: string | null) {
+    const items = body ? JSON.parse(body) : null;
+    if (Array.isArray(items) && items.length > 0) await this.checkGridEnds(items as IListingSpec[]);
+    return super.createMany(body);
+  }
+
+  // Whether a listing is a binary contract lives on its security, which the insert can't see: one lookup per request.
+  // A listing that doesn't exist is left to the insert's foreign key.
+  private async checkGridEnds(specs: IListingSpec[]) {
+    const bands = specs.map(spec => validatePriceBands(spec.priceBands));
+    const ids = [...new Set(specs.map(spec => Number(spec.listingId)))].filter(Number.isSafeInteger);
+    const { rows } = await this.client.query(sql`
+      SELECT listing.listing_id, security.asset_class = ${AssetClass.PREDICTION} AS binary
+      FROM sm.listing listing JOIN sm.security security USING (security_id)
+      WHERE ${anyId('listing.listing_id', ids)}`);
+    const binary = new Map<number, boolean>(rows.map((row: { listing_id: number; binary: boolean }) =>
+      [Number(row.listing_id), row.binary]));
+    specs.forEach((spec, i) => {
+      const known = binary.get(Number(spec.listingId));
+      if (known !== undefined) checkGridEnd(spec.listingId, bands[i], known);
+    });
   }
 
   generateDeleteQuery(body: string): Sql {

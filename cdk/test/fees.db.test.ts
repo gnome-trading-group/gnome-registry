@@ -48,8 +48,9 @@ describeDb('Fee schedules and point-in-time listing specs, against Postgres', ()
     await client.query(`INSERT INTO sm.exchange (exchange_id, exchange_name, region, exchange_code) VALUES
       (1, 'K', 'us-east-1', 'KALSHI'), (2, 'P', 'us-east-1', 'POLYMARKET_US'),
       (3, 'H', 'ap-northeast-1', 'HYPERLIQUID'), (4, 'L', 'ap-northeast-1', 'LIGHTER')`);
-    await client.query(`INSERT INTO sm.security (security_id, symbol, type) VALUES (1, 'KX-YES', 4), (2, 'KX-NO', 4),
-      (7, 'KX2-YES', 4), (3, 'PM-LONG', 4), (4, 'TT-LONG', 4), (5, 'BTC', 1), (6, 'HYPE/USDC', 0)`);
+    await client.query(`INSERT INTO sm.security (security_id, symbol, type, asset_class) VALUES (1, 'KX-YES', 4, 5),
+      (2, 'KX-NO', 4, 5), (7, 'KX2-YES', 4, 5), (3, 'PM-LONG', 4, 5), (4, 'TT-LONG', 4, 5), (5, 'BTC', 1, 0),
+      (6, 'HYPE/USDC', 0, 0)`);
     await client.query(`INSERT INTO sm.listing (listing_id, exchange_id, security_id, exchange_security_id,
       exchange_security_symbol, fee_group, fee_event) VALUES
       (500, 1, 1, 'G-1:yes', 'G-1-YES', 'KXMLBHIT', 'KXMLBHIT-G'), (501, 1, 2, 'G-1:no', 'G-1-NO', 'KXMLBHIT', 'KXMLBHIT-G'),
@@ -164,6 +165,32 @@ describeDb('Fee schedules and point-in-time listing specs, against Postgres', ()
       await client.query(`UPDATE sm.listing SET active = true WHERE listing_id = 501`);
       const after = JSON.parse((await specs.get({ exchangeId: '1', activeListings: 'true', afterListingId: '500' })).body);
       expect(after.map((r: any) => r.listing_id)).toEqual([501]);
+    });
+
+    it.each([
+      ['a binary contract whose grid ends below $1', 500, [{ start: 0, end: 900_000_000, step: 10_000_000 }]],
+      ['a binary contract whose grid is open', 500, [{ start: 0, end: null, step: 10_000_000 }]],
+      ['a perp whose grid ends', 700, [{ start: 0, end: 1_000_000_000, step: 1 }]],
+    ])('refuses %s', async (_name, listingId, priceBands) => {
+      await expect(specs.createOne(JSON.stringify({ listingId, priceBands, lotSize: 1 })))
+        .rejects.toThrow(ValidationError);
+      expect((await client.query('SELECT count(*)::int AS n FROM sm.listing_spec')).rows[0].n).toBe(0);
+    });
+
+    it('refuses a whole batch when one spec ends wrong, writing none of it', async () => {
+      const batch = [
+        { listingId: 500, priceBands: bands(10), lotSize: 1 },
+        { listingId: 700, priceBands: bands(1), lotSize: 1 },
+      ];
+      await expect(specs.createMany(JSON.stringify(batch))).rejects.toThrow('listing 700 has no upper price bound');
+      expect((await client.query('SELECT count(*)::int AS n FROM sm.listing_spec')).rows[0].n).toBe(0);
+    });
+
+    it('takes a binary contract ending at $1 and a perp or spot pair with no end', async () => {
+      await specs.createOne(spec(10));
+      await specs.createOne(JSON.stringify({ listingId: 700, priceBands: [{ start: 0, end: null, step: 1 }], lotSize: 1 }));
+      await specs.createOne(JSON.stringify({ listingId: 701, priceBands: [{ start: 0, end: null, step: 1 }], lotSize: 1 }));
+      expect((await client.query('SELECT count(*)::int AS n FROM sm.listing_spec')).rows[0].n).toBe(3);
     });
 
     it('refuses effectiveFrom together with correction', async () => {

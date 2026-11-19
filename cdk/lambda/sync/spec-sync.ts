@@ -12,7 +12,8 @@ import { chunks, ReadSpecs, sameSpec, VenueSpec } from './venues/specs';
 // The one writer of listing specs (sm.listing_spec): each venue's reader says what the venue publishes for a listing
 // now, and a listing whose spec differs gets a new row. A listing's first spec holds since the epoch; a later change is
 // dated when it was seen: now for a scheduled pass, or when a shard saw the venue announce it (a refresh). Three ways in:
-// - mode `full` (every 15 minutes): every active listing of every venue, against its spec in force now;
+// - mode `full` (every 15 minutes, one run per venue): every active listing the venue lists as trading, against its
+//   spec in force now;
 // - mode `missing` (every minute): active listings with no spec yet, so a new listing is tradable within a minute;
 // - the refresh queue: one listing a shard saw change (POST /listing-specs/refresh), checked against the venue.
 // A venue that fails doesn't stop the others, but fails the run, so its alarm fires.
@@ -191,12 +192,13 @@ export async function syncVenue(
     ? (await registry.activeTargets(exchangeId)).filter(t => t.current !== null)
     : await registry.missingTargets(exchangeId);
   if (targets.length === 0) return { venue: exchangeCode, targets: 0 };
-  const read = await readers[exchangeCode](targets.map(t => t.exchangeSecurityId));
+  const started = Date.now();
+  const read = await readers[exchangeCode](targets.map(t => t.exchangeSecurityId), { listedOnly: mode === 'full' });
   const plan = planSpecs(targets, read, now);
   const posted = await registry.post(plan.rows);
   return {
     venue: exchangeCode, targets: targets.length, unchanged: plan.unchanged, unknown: plan.unknown,
-    invalid: plan.invalid, ...posted,
+    invalid: plan.invalid, ...posted, seconds: Math.round((Date.now() - started) / 1000),
   };
 }
 
@@ -231,11 +233,13 @@ function isSqsEvent(event: unknown): event is SQSEvent {
   return Array.isArray((event as SQSEvent)?.Records);
 }
 
-async function scheduled(mode: Mode, registry: Registry) {
+// A full pass runs one venue per invocation, so the slowest venue can't run the others past the Lambda's timeout.
+export async function scheduled(mode: Mode, registry: Registry, venue?: string, readers = READERS) {
   const exchangeIds = await registry.exchangeIds();
   const now = new Date();
-  const venues = Object.keys(READERS).filter(code => exchangeIds.has(code));
-  const settled = await Promise.allSettled(venues.map(code => syncVenue(code, exchangeIds.get(code)!, mode, registry, now)));
+  const venues = Object.keys(readers).filter(code => exchangeIds.has(code) && (venue === undefined || code === venue));
+  const settled = await Promise.allSettled(
+    venues.map(code => syncVenue(code, exchangeIds.get(code)!, mode, registry, now, readers)));
   const failed = venues.filter((code, i) => {
     const outcome = settled[i];
     if (outcome.status === 'rejected') {
@@ -272,10 +276,11 @@ export async function refreshes(event: SQSEvent, registry: Registry, readers = R
   return { batchItemFailures };
 }
 
-export const handler = async (event: { mode?: Mode } | SQSEvent) => {
+export const handler = async (event: { mode?: Mode; venue?: string } | SQSEvent) => {
   const registry = apiRegistry(await resolveApiKey());
   if (isSqsEvent(event)) return refreshes(event, registry);
-  const mode = event.mode;
+  const { mode, venue } = event;
   if (mode !== 'full' && mode !== 'missing') throw new Error(`Spec sync needs mode full or missing, not ${mode}`);
-  return scheduled(mode, registry);
+  if (venue !== undefined && !READERS[venue]) throw new Error(`Spec sync has no reader for venue ${venue}`);
+  return scheduled(mode, registry, venue);
 };

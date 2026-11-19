@@ -9,7 +9,7 @@ import { SqsEventSource } from 'aws-cdk-lib/aws-lambda-event-sources';
 import * as lambda from 'aws-cdk-lib/aws-lambda-nodejs';
 import * as sqs from 'aws-cdk-lib/aws-sqs';
 import { join } from 'path';
-import { SPEC_REFRESH_QUEUE } from '../../lambda/endpoints/spec-refresh-queue';
+import { SPEC_REFRESH_QUEUE, SPEC_SYNC_EXCHANGES } from '../../lambda/endpoints/spec-refresh-queue';
 import { ApiStack } from './api-stack';
 
 interface Props extends cdk.StackProps {
@@ -43,15 +43,23 @@ export class SpecSyncStack extends cdk.Stack {
     };
     const readApiKey = new iam.PolicyStatement({ actions: ['apigateway:GET'], resources: [props.apiKey.keyArn] });
 
-    // A full pass reads every venue at once, so the slowest bounds it: about 400 Gamma pages, some 4 minutes. Lambda's
-    // longest timeout leaves it room.
-    this.syncLambda = new lambda.NodejsFunction(this, 'spec-sync-lambda', { ...shared, timeout: cdk.Duration.minutes(15) });
-    this.syncLambda.addToRolePolicy(readApiKey);
-    new events.Rule(this, 'SpecSyncFullRule', {
-      description: 'Spec sync: checks every active listing spec against its venue',
-      schedule: events.Schedule.rate(cdk.Duration.minutes(15)),
-      targets: [new targets.LambdaFunction(this.syncLambda, { event: events.RuleTargetInput.fromObject({ mode: 'full' }) })],
+    // A venue's full pass reads every listing it trades: Kalshi's ~90k take about two minutes, Polymarket Intl's ~600
+    // Gamma pages about as long. One rule per venue, so one slow venue can't hold up or time out the rest.
+    // A failed pass isn't retried: the next one starts within minutes, and a retry of a timed-out pass would run past
+    // it, reading the same venue twice at once.
+    this.syncLambda = new lambda.NodejsFunction(this, 'spec-sync-lambda', {
+      ...shared, timeout: cdk.Duration.minutes(15), retryAttempts: 0,
     });
+    this.syncLambda.addToRolePolicy(readApiKey);
+    for (const venue of SPEC_SYNC_EXCHANGES) {
+      new events.Rule(this, `SpecSyncFullRule${venue}`, {
+        description: `Spec sync: checks every active ${venue} listing spec against the venue`,
+        schedule: events.Schedule.rate(cdk.Duration.minutes(15)),
+        targets: [new targets.LambdaFunction(this.syncLambda, {
+          event: events.RuleTargetInput.fromObject({ mode: 'full', venue }),
+        })],
+      });
+    }
     new events.Rule(this, 'SpecSyncMissingRule', {
       description: 'Spec sync: gives listings with no spec their first',
       schedule: events.Schedule.rate(cdk.Duration.minutes(1)),

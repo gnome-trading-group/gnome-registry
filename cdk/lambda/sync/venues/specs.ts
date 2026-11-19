@@ -9,8 +9,15 @@ export interface VenueSpec {
   contractMultiplier: number;
 }
 
+export interface ReadOptions {
+  // Only markets the venue lists as trading now: a full pass rechecks thousands of listings, and chasing ones the venue
+  // has delisted, one request each, outlasts the run. Their specs can no longer change; new listings and announced tick
+  // changes are read with no such limit.
+  listedOnly?: boolean;
+}
+
 /** Reads the specs of these listings (by exchange security id) from the venue; one it doesn't know is left out. */
-export type ReadSpecs = (exchangeSecurityIds: string[]) => Promise<Map<string, VenueSpec>>;
+export type ReadSpecs = (exchangeSecurityIds: string[], options?: ReadOptions) => Promise<Map<string, VenueSpec>>;
 
 export const PRICE_SCALE = 1_000_000_000;
 export const SIZE_SCALE = 1_000_000;
@@ -46,3 +53,12 @@ export function chunks<T>(items: T[], size: number): T[][] {
 }
 
 export const pause = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
+
+/** Runs `work` on every item, at most `limit` at a time; the first failure rejects once the running ones settle. */
+export async function inParallel<T>(items: T[], limit: number, work: (item: T) => Promise<void>): Promise<void> {
+  let next = 0;
+  const workers = Array.from({ length: Math.min(limit, items.length) }, async () => {
+    while (next < items.length) await work(items[next++]);
+  });
+  await Promise.all(workers);
+}

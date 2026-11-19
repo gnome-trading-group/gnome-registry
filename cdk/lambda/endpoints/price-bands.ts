@@ -40,6 +40,24 @@ export function validatePriceBands(value: unknown): PriceBand[] {
   return bands;
 }
 
+/** A binary contract's price; its grid ends here, which readers mirror the other side about and treat as the cap. */
+export const BINARY_GRID_END = 1_000_000_000;
+
+/**
+ * A ValidationError unless the grid ends where the listing's prices do: exactly $1 for a binary contract, open for
+ * anything else, which has no upper bound.
+ */
+export function checkGridEnd(listingId: number, bands: PriceBand[], binary: boolean): void {
+  const end = bands[bands.length - 1].end;
+  if (binary && end !== BINARY_GRID_END) {
+    throw new ValidationError(`listing ${listingId} is a binary contract: its price grid must end at ${BINARY_GRID_END}, `
+      + `not ${end ?? 'open'}`);
+  }
+  if (!binary && end !== null) {
+    throw new ValidationError(`listing ${listingId} has no upper price bound: its price grid must end open, not at ${end}`);
+  }
+}
+
 function readBand(band: unknown, i: number): PriceBand {
   const { start, end, step } = (band ?? {}) as Record<string, unknown>;
   if (!isUnits(start) || !(end === null || isUnits(end)) || !isUnits(step) || step <= 0) {

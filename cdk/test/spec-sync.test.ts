@@ -6,7 +6,7 @@ import { readLighterSpecs } from '../lambda/sync/venues/lighter';
 import { SQSEvent } from 'aws-lambda';
 import { SPEC_SYNC_EXCHANGES } from '../lambda/endpoints/spec-refresh-queue';
 import {
-  planSpecs, postInChunks, READERS, refreshes, refreshListing, Registry, SpecRow, syncVenue, Target,
+  planSpecs, postInChunks, READERS, refreshes, refreshListing, Registry, scheduled, SpecRow, syncVenue, Target,
 } from '../lambda/sync/spec-sync';
 import { kalshiPriceBands, readKalshiSpecs } from '../lambda/sync/venues/kalshi';
 import { readPolymarketIntlSpecs } from '../lambda/sync/venues/polymarket-intl';
@@ -83,6 +83,21 @@ describe('Polymarket Intl specs', () => {
     expect(specs.get(`${missingTick.conditionId}:3`)!.priceBands).toEqual([{ start: 0, end: 1_000_000_000, step: 1_000_000 }]);
     expect(specs.has('0xnone:4')).toBe(false);
   });
+
+  it('reads only markets Gamma lists as open when asked for listed ones, asking neither its closed list nor the CLOB',
+    async () => {
+      const [open] = fixture('polymarket-intl-gamma-markets.json') as Record<string, any>[];
+      const urls: string[] = [];
+      jest.spyOn(global, 'fetch').mockImplementation(async (url) => {
+        urls.push(String(url));
+        return json(String(url).includes('gamma-api') ? [open] : { minimum_tick_size: 0.01, minimum_order_size: 5 });
+      });
+      const specs = await readPolymarketIntlSpecs([`${open.conditionId}:1`, '0xold:2'], { listedOnly: true });
+
+      expect([...specs.keys()]).toEqual([`${open.conditionId}:1`]);
+      expect(urls.some(u => u.includes('closed=true'))).toBe(false);
+      expect(urls.some(u => u.includes('clob.polymarket.com'))).toBe(false);
+    });
 
   it('reads a market Gamma no longer lists from the CLOB', async () => {
     jest.spyOn(global, 'fetch').mockImplementation(async (url) => {
@@ -270,8 +285,21 @@ describe('a pass', () => {
     expect(read).not.toHaveBeenCalled();
     expect(await syncVenue('KALSHI', 1, 'full', registry, new Date(), { KALSHI: read }))
       .toMatchObject({ venue: 'KALSHI', targets: 1, written: 1 });
-    expect(read).toHaveBeenCalledWith(['M1']);
+    expect(read).toHaveBeenCalledWith(['M1'], { listedOnly: true });
     expect(posted.map(r => r.listingId)).toEqual([1]);
+  });
+
+  it('runs one venue when asked, leaving the others to their own runs', async () => {
+    const kalshi = jest.fn(async () => new Map());
+    const lighter = jest.fn(async () => new Map());
+    const registry = {
+      exchangeIds: async () => new Map([['KALSHI', 1], ['LIGHTER', 2]]),
+      activeTargets: async () => [{ listingId: 1, exchangeSecurityId: 'M1', current: spec() }],
+      post: async () => ({ written: 0, failed: 0 }),
+    } as unknown as Registry;
+    await scheduled('full', registry, 'LIGHTER', { KALSHI: kalshi, LIGHTER: lighter });
+    expect(kalshi).not.toHaveBeenCalled();
+    expect(lighter).toHaveBeenCalledTimes(1);
   });
 
   it('has a reader for exactly the exchanges the refresh endpoint takes', () => {
