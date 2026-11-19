@@ -5,6 +5,8 @@ import {
   SETTLEMENT_LOOKBACK_MS, SIZE_SCALE, unclassifiedCredit, VenueCredit, VenueReading, VenueSettlement,
 } from './types';
 import { IncentiveProgramReading } from './types';
+import { PriceBand } from '../../endpoints/price-bands';
+import { chunks, complementBands, pause, PRICE_SCALE as SPEC_PRICE_SCALE, units, VenueSpec } from './specs';
 
 // Kalshi reports money in cents rounded down, and to four decimals in its *_dollars fields, which sub-cent prices
 // need; a position per market ticker, signed: YES positive, NO negative. Collateral is split by exchange shard; the
@@ -283,4 +285,80 @@ export async function readKalshiIncentivePrograms(paidSince?: Date): Promise<Inc
   for (const status of UNPAID_INCENTIVE_STATUSES) rows = rows.concat(await readKalshiIncentivePages(status));
   if (paidSince) rows = rows.concat(await readKalshiIncentivePages('paid_out', paidSince));
   return rows.map(parseKalshiIncentiveProgram).filter((p): p is IncentiveProgramReading => p !== null);
+}
+
+// ----- listing specs -----
+
+// Every Kalshi listing trades in hundredths of a contract, with no minimum beyond a lot.
+const KALSHI_LOT_SIZE = 10_000;
+const MARKETS_PATH = '/trade-api/v2/markets';
+const HISTORICAL_MARKETS_PATH = '/trade-api/v2/historical/markets';
+// Tickers per request: 400 is past the URL length Kalshi accepts.
+const TICKERS_PER_REQUEST = 200;
+const PAUSE_BETWEEN_REQUESTS_MS = 250;
+
+/** A market's grid from its price_ranges ({start, end, step} dollar strings), the source of truth for its ticks. */
+export function kalshiPriceBands(market: Record<string, any>): PriceBand[] | null {
+  const ranges = market.price_ranges;
+  if (!Array.isArray(ranges) || ranges.length === 0) return null;
+  const bands = ranges.map((r: Record<string, unknown>) => ({
+    start: units(r.start, SPEC_PRICE_SCALE),
+    end: units(r.end, SPEC_PRICE_SCALE),
+    step: units(r.step, SPEC_PRICE_SCALE),
+  }));
+  if (bands.some(b => b.start === null || b.end === null || b.step === null || b.step <= 0)) return null;
+  return bands.sort((a, b) => a.start! - b.start!) as PriceBand[];
+}
+
+/** The market ticker a listing trades, and whether the listing prices its complement (its NO side). */
+export function kalshiMarketOf(exchangeSecurityId: string): { ticker: string; complement: boolean } {
+  const colon = exchangeSecurityId.indexOf(':');
+  if (colon < 0) return { ticker: exchangeSecurityId, complement: false };
+  return { ticker: exchangeSecurityId.slice(0, colon), complement: exchangeSecurityId.slice(colon + 1).toLowerCase() === 'no' };
+}
+
+async function kalshiMarkets(path: string, tickers: string[]): Promise<Record<string, any>[]> {
+  const url = `${kalshiPublicUrl()}${path}?limit=1000&tickers=${tickers.map(encodeURIComponent).join(',')}`;
+  const res = await fetchWithRetry(url);
+  if (!res.ok) throw new Error(`Kalshi GET ${path} failed: ${res.status} ${await res.text()}`);
+  return ((await res.json()) as { markets?: Record<string, any>[] }).markets ?? [];
+}
+
+/**
+ * Specs for Kalshi listings: each market's price_ranges, mirrored for its NO listing. A market settled before Kalshi's
+ * historical cutoff is only under /historical/markets, so tickers the live endpoint doesn't return are asked there.
+ */
+export async function readKalshiSpecs(exchangeSecurityIds: string[]): Promise<Map<string, VenueSpec>> {
+  const listingsByTicker = new Map<string, string[]>();
+  for (const id of exchangeSecurityIds) {
+    const { ticker } = kalshiMarketOf(id);
+    listingsByTicker.set(ticker, [...(listingsByTicker.get(ticker) ?? []), id]);
+  }
+  const bandsByTicker = new Map<string, PriceBand[]>();
+  for (const path of [MARKETS_PATH, HISTORICAL_MARKETS_PATH]) {
+    const wanted = [...listingsByTicker.keys()].filter(t => !bandsByTicker.has(t));
+    for (const batch of chunks(wanted, TICKERS_PER_REQUEST)) {
+      for (const market of await kalshiMarkets(path, batch)) {
+        const bands = kalshiPriceBands(market);
+        if (bands) bandsByTicker.set(String(market.ticker), bands);
+        else console.warn(`Kalshi market ${market.ticker} has no usable price_ranges: ${JSON.stringify(market.price_ranges)}`);
+      }
+      await pause(PAUSE_BETWEEN_REQUESTS_MS);
+    }
+  }
+  const specs = new Map<string, VenueSpec>();
+  for (const [ticker, ids] of listingsByTicker) {
+    const bands = bandsByTicker.get(ticker);
+    if (!bands) continue;
+    for (const id of ids) {
+      specs.set(id, {
+        priceBands: kalshiMarketOf(id).complement ? complementBands(bands) : bands,
+        lotSize: KALSHI_LOT_SIZE,
+        minNotional: 0,
+        minSize: 0,
+        contractMultiplier: SPEC_PRICE_SCALE,
+      });
+    }
+  }
+  return specs;
 }

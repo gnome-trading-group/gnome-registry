@@ -42,6 +42,9 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Queue;
+import java.util.concurrent.ConcurrentLinkedQueue;
+import java.util.function.LongFunction;
 
 /**
  * SecurityMaster is an abstraction for the database security master layer.
@@ -52,7 +55,6 @@ public final class SecurityMaster {
     private static final String SECURITY_ENDPOINT = "/api/securities?";
     private static final String EXCHANGE_ENDPOINT = "/api/exchanges?";
     private static final String LISTING_ENDPOINT = "/api/listings?";
-    private static final String LISTING_SPEC_ENDPOINT = "/api/listing-specs?";
     private static final String EVENT_ENDPOINT = "/api/events?";
     private static final String EVENT_CONTRACT_ENDPOINT = "/api/event-contracts?";
     private static final String FEE_ENDPOINT = "/api/fees?";
@@ -65,34 +67,11 @@ public final class SecurityMaster {
     // Events per stream-by-event request: an event has a few streams, so the answer stays under the API's page size.
     static final int EVENTS_PER_REQUEST = 100;
     private static final String SOURCE_ACCOUNT_ENDPOINT = "/api/sources/accounts?";
-    // Every spec a listing has had, each from when it held at the venue.
-    private static final String SPEC_HISTORY_PARAMETER = "&from=1970-01-01T00:00:00Z";
     private static final long NANOS_PER_MILLI = 1_000_000L;
 
     private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper()
             .setPropertyNamingStrategy(PropertyNamingStrategies.SNAKE_CASE)
             .configure(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false);
-
-    @JsonIgnoreProperties(ignoreUnknown = true)
-    private record ListingSpecRow(
-            int listingId,
-            long tickSize,
-            long lotSize,
-            long minNotional,
-            long contractMultiplier,
-            long minSize,
-            String effectiveFrom) {}
-
-    /** A listing's specs in effective order; each holds from its start until the next one's. */
-    private record ListingSpecHistory(long[] startNanos, ListingSpec[] specs) {
-        ListingSpec at(final long nanos) {
-            ListingSpec spec = null;
-            for (int i = 0; i < this.startNanos.length && this.startNanos[i] <= nanos; i++) {
-                spec = this.specs[i];
-            }
-            return spec;
-        }
-    }
 
     @JsonIgnoreProperties(ignoreUnknown = true)
     private record SimulationParametersRow(
@@ -118,7 +97,6 @@ public final class SecurityMaster {
             false,
             0);
     private static final Exchange EMPTY_EXCHANGE = new Exchange(-1, null, null, null);
-    private static final ListingSpecHistory NO_SPECS = new ListingSpecHistory(new long[0], new ListingSpec[0]);
     private static final Event EMPTY_EVENT = new Event(-1, 0, null, null, null, false, 0L, 0L, 0.0);
     private static final SimulationParameters NO_SIMULATION_PARAMETERS = new SimulationParameters(-1, -1, null, null);
     private static final EventContract EMPTY_EVENT_CONTRACT = new EventContract(-1, -1, -1, null);
@@ -133,7 +111,6 @@ public final class SecurityMaster {
     private final MutableString securityPath;
     private final MutableString exchangePath;
     private final MutableString listingPath;
-    private final MutableString listingSpecPath;
     private final MutableString eventPath;
     private final MutableString eventContractPath;
     private final MutableString feePath;
@@ -146,7 +123,9 @@ public final class SecurityMaster {
     private final IntMap<Exchange> exchangeCache;
     private final IntMap<Listing> listingCache;
     private final LongMap<Listing> listingByExchangeSecurity;
-    private final IntMap<ListingSpecHistory> listingSpecCache;
+    private final IntMap<ListingSpecs.Slot> listingSpecCache;
+    // Slots this instance created that a refresher hasn't taken yet; the refresher runs on another thread.
+    private final Queue<ListingSpecs.Slot> createdSpecSlots;
     private final IntMap<FeeTimeline> feeTimelineCache;
     // Keyed by the knowledge time a run pinned, then by listing or exchange: one process normally pins one time.
     private final Map<String, IntMap<FeeTimeline>> pinnedFeeTimelineCache;
@@ -177,7 +156,6 @@ public final class SecurityMaster {
         this.securityPath = new ExpandingMutableString(SECURITY_ENDPOINT);
         this.exchangePath = new ExpandingMutableString(EXCHANGE_ENDPOINT);
         this.listingPath = new ExpandingMutableString(LISTING_ENDPOINT);
-        this.listingSpecPath = new ExpandingMutableString(LISTING_SPEC_ENDPOINT);
         this.eventPath = new ExpandingMutableString(EVENT_ENDPOINT);
         this.eventContractPath = new ExpandingMutableString(EVENT_CONTRACT_ENDPOINT);
         this.feePath = new ExpandingMutableString(FEE_ENDPOINT);
@@ -191,6 +169,7 @@ public final class SecurityMaster {
         this.listingCache = new IntHashMap<>();
         this.listingByExchangeSecurity = new LongHashMap<>();
         this.listingSpecCache = new IntHashMap<>();
+        this.createdSpecSlots = new ConcurrentLinkedQueue<>();
         this.feeTimelineCache = new IntHashMap<>();
         this.pinnedFeeTimelineCache = new HashMap<>();
         this.incentiveTimelineCache = new IntHashMap<>();
@@ -606,42 +585,36 @@ public final class SecurityMaster {
      * fetched once, so a backtest sees each spec only from when it held at the venue.
      */
     public ListingSpec getListingSpec(final int listingId, final long epochNanos) {
-        ListingSpecHistory history = this.listingSpecCache.get(listingId);
-        if (history == null) {
-            history = fetchListingSpecs(listingId);
-            this.listingSpecCache.put(listingId, history);
-        }
-        return history.at(epochNanos);
+        return specSlot(listingId).history.at(epochNanos);
     }
 
-    private ListingSpecHistory fetchListingSpecs(final int listingId) {
-        final int originalLength = addParameters(this.listingSpecPath, "listingId", listingId);
-        this.listingSpecPath.appendString(SPEC_HISTORY_PARAMETER);
-        final ByteBuffer response = this.registryConnection.get(this.listingSpecPath);
-        this.listingSpecPath.setLength(originalLength);
+    /**
+     * The listing's specs over time, for another thread to read: the spec in force at a time, or null if it had none
+     * yet, refreshes included. Call this where specs are read, since it fetches the history if it isn't cached; the
+     * answer is safe to read from any thread and never allocates.
+     */
+    public LongFunction<ListingSpec> listingSpecHistory(final int listingId) {
+        final ListingSpecs.Slot slot = specSlot(listingId);
+        return epochNanos -> slot.history.at(epochNanos);
+    }
 
-        try {
-            final ListingSpecRow[] rows = OBJECT_MAPPER.readValue(toByteArray(response), ListingSpecRow[].class);
-            if (rows.length == 0) {
-                return NO_SPECS;
-            }
-            final long[] starts = new long[rows.length];
-            final ListingSpec[] specs = new ListingSpec[rows.length];
-            for (int i = 0; i < rows.length; i++) {
-                final ListingSpecRow row = rows[i];
-                starts[i] = row.effectiveFrom() == null ? 0 : FeeTimelineJson.epochNanos(row.effectiveFrom());
-                specs[i] = new ListingSpec(
-                        row.listingId(),
-                        row.tickSize(),
-                        row.lotSize(),
-                        row.minNotional(),
-                        row.contractMultiplier(),
-                        row.minSize());
-            }
-            return new ListingSpecHistory(starts, specs);
-        } catch (IOException e) {
-            throw new RuntimeException(e);
+    private ListingSpecs.Slot specSlot(final int listingId) {
+        ListingSpecs.Slot slot = this.listingSpecCache.get(listingId);
+        if (slot == null) {
+            slot = new ListingSpecs.Slot(listingId, ListingSpecs.fetchHistory(this.registryConnection, listingId));
+            this.listingSpecCache.put(listingId, slot);
+            this.createdSpecSlots.offer(slot);
         }
+        return slot;
+    }
+
+    /**
+     * A refresher for the specs this instance caches, to run on another thread with its own {@code connection}: one
+     * registry connection serves one thread. Make one per instance; specs this instance reads after it is made are
+     * refreshed too.
+     */
+    public ListingSpecRefresher listingSpecRefresher(final RegistryConnection connection) {
+        return new ListingSpecRefresher(connection, this.createdSpecSlots);
     }
 
     /**

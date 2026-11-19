@@ -10,6 +10,7 @@ import * as cognito from 'aws-cdk-lib/aws-cognito';
 import * as ssm from 'aws-cdk-lib/aws-ssm';
 import { join } from 'path';
 import { RECONCILER_QUEUE } from '../../lambda/endpoints/gateway-reconciler-queue';
+import { SPEC_REFRESH_QUEUE } from '../../lambda/endpoints/spec-refresh-queue';
 
 // Where gnome-orchestrator publishes its latest release (its StorageStack), in the primary region.
 const ORCHESTRATOR_LATEST_VERSION_PARAMETER = '/gnome/orchestrator/latest-version';
@@ -245,6 +246,24 @@ export class ApiStack extends cdk.Stack {
     }));
     this.route('gateways/ensure', new apigw.LambdaIntegration(gatewayWanted, { scopePermissionToMethod: false }),
       { POST: [SERVICE, PERSON] });
+    // A shard saw a venue announce a listing's new tick: queued for the spec sync (SpecSyncStack), which reads the venue
+    // and records the change dated when the shard saw it. Outside the VPC, to reach the queue, which it names.
+    const specRefresh = new lambda.NodejsFunction(this, 'listing-spec-refresh-lambda', {
+      entry: join(__dirname, '..', '..', 'lambda', 'endpoints', 'listing-spec-refresh.ts'),
+      ...this.nodeJsProps,
+      bundling: {
+        externalModules: ['pg-native', '@aws-sdk/*'],
+      },
+      environment: {
+        SPEC_REFRESH_QUEUE_URL: `https://sqs.${this.region}.${this.urlSuffix}/${this.account}/${SPEC_REFRESH_QUEUE}`,
+      },
+    });
+    specRefresh.addToRolePolicy(new iam.PolicyStatement({
+      actions: ['sqs:SendMessage'],
+      resources: [`arn:aws:sqs:${this.region}:${this.account}:${SPEC_REFRESH_QUEUE}`],
+    }));
+    this.route('listing-specs/refresh', new apigw.LambdaIntegration(specRefresh, { scopePermissionToMethod: false }),
+      { POST: [SERVICE] });
     // Which paper gateway a paper session links to on its venue, a venue running as many as its sessions need: the
     // launcher and a paper session about to say hello ask it. It reads the venue's paper gateways' endpoint items and
     // marks the chosen one wanted, as ensure does; outside the VPC, for the endpoints table and the reconciler's queue.

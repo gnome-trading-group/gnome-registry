@@ -88,6 +88,8 @@ export const ALERT_TYPES: Record<string, AlertType> = {
   FEE_SCHEDULE_MISSING: { severity: 'INFO', debounce: 1 },
   FEE_SCHEDULE_CHANGED: { severity: 'INFO', debounce: 1 },
   FEE_TYPE_UNSUPPORTED: { severity: 'INFO', debounce: 1 },
+  // Listings no order can be placed on until they have one; two ticks, past the spec sync's own retry.
+  LISTING_SPEC_MISSING: { severity: 'WARNING', debounce: 2 },
   // The tick's own: several sessions going silent at once is more likely the heartbeat path than the sessions.
   SESSIONS_SILENT_MULTIPLE: { severity: 'CRITICAL', debounce: 1 },
 
@@ -132,9 +134,10 @@ export const ALERT_TYPES: Record<string, AlertType> = {
   },
   GATEWAY_DEGRADED: { severity: 'ERROR', debounce: 1 },
   // A gateway or a production shard that hasn't placed in its exchange's home zone after 5 minutes (the reconciler
-  // waits before raising). Live order paths and the shards live sessions read only warn: they keep trying there, and a
-  // person moves the venue's home zone if the zone stays short. A paper gateway's is for the record.
-  HOME_ZONE_NO_CAPACITY: { severity: e => e.mode === 'paper' ? 'INFO' : 'WARNING', debounce: 1 },
+  // waits before raising): it keeps trying there, and a person moves the venue's home zone if the zone stays short.
+  // WARNING in every mode, never INFO: the reconciler re-sends it every tick while it holds, and an INFO it sends would
+  // be closed on arrival (for the record), so each tick would post anew; a WARNING stays one open alert.
+  HOME_ZONE_NO_CAPACITY: { severity: 'WARNING', debounce: 1 },
   GATEWAY_RECONCILE_FAILED: { severity: 'ERROR', debounce: 1 },
   // The order gateway's own. Kill switches already in force still hold while kills are stale, but one turned on now
   // isn't seen, so nothing can halt its sessions.

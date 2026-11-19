@@ -1,4 +1,5 @@
-import { AssetClass, ContractType, ExchangeAdapter, ExchangeFetch, ExchangeSecurityData, SecurityType } from './types';
+import { VenueSpec } from './specs';
+import { AssetClass, ContractType, ExchangeAdapter, ExchangeFetch, ExchangeSecurityData, SecurityType } from './exchange-types';
 
 const LIGHTER_MARKETS_URL = 'https://mainnet.zklighter.elliot.ai/api/v1/orderBookDetails';
 const LIGHTER_QUOTE_CURRENCY = 'USDC';
@@ -36,13 +37,17 @@ export class LighterAdapter implements ExchangeAdapter {
           continue;
         }
 
-        const tickSize = market.price_decimals > 9
-          ? (console.warn(`Lighter: market ${market.market_id} price_decimals=${market.price_decimals} exceeds PRICE_SCALING_FACTOR (1e9) — storing tickSize=0`), 0)
-          : Math.pow(10, 9 - market.price_decimals);
-        const lotSize = market.size_decimals > 6
-          ? (console.warn(`Lighter: market ${market.market_id} size_decimals=${market.size_decimals} exceeds SIZE_SCALING_FACTOR (1e6) — storing lotSize=0`), 0)
-          : Math.pow(10, 6 - market.size_decimals);
         const minNotional = Math.round(parseFloat(market.min_quote_amount) * 1e9);
+        // One tick everywhere; a market finer than the registry's units hold gets no spec.
+        const spec: VenueSpec | null = market.price_decimals > 9 || market.size_decimals > 6 || !Number.isFinite(minNotional)
+          ? null
+          : {
+            priceBands: [{ start: 0, end: null, step: Math.pow(10, 9 - market.price_decimals) }],
+            lotSize: Math.pow(10, 6 - market.size_decimals),
+            minNotional,
+            minSize: 0,
+            contractMultiplier: CONTRACT_MULTIPLIER,
+          };
         const suffix = isSpot ? 'SPOT' : 'PERP';
 
         // Spot symbols are full pairs like "ETH/USDC"; perp symbols are just the base like "ETH"
@@ -62,10 +67,7 @@ export class LighterAdapter implements ExchangeAdapter {
           isQuanto: false,
           exchangeSecurityId: String(market.market_id),
           exchangeSecuritySymbol: market.symbol,
-          tickSize,
-          lotSize,
-          minNotional,
-          contractMultiplier: CONTRACT_MULTIPLIER,
+          spec,
           active: market.status === 'active',
           volume24h: Number.isFinite(market.daily_quote_token_volume) ? market.daily_quote_token_volume : undefined,
         });
@@ -78,4 +80,14 @@ export class LighterAdapter implements ExchangeAdapter {
     // One call returns every market, so a market missing from it is gone.
     return { securities: result, covers: () => true };
   }
+}
+
+/** Specs for Lighter listings, from the one call that lists every market. */
+export async function readLighterSpecs(exchangeSecurityIds: string[]): Promise<Map<string, VenueSpec>> {
+  const wanted = new Set(exchangeSecurityIds);
+  const specs = new Map<string, VenueSpec>();
+  for (const security of (await new LighterAdapter().fetchSecurities()).securities) {
+    if (security.spec && wanted.has(security.exchangeSecurityId)) specs.set(security.exchangeSecurityId, security.spec);
+  }
+  return specs;
 }

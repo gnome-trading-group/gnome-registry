@@ -16,7 +16,7 @@ export function buildOrderListQuery(params: Record<string, string | undefined>):
   roleFilter(params, page, 'o.role');
   return {
     text: `
-      SELECT o.*, l.exchange_security_symbol AS symbol, spec.tick_size, spec.lot_size,
+      SELECT o.*, l.exchange_security_symbol AS symbol, spec.price_bands, spec.lot_size,
         COALESCE(f.fills, 0) AS fills, COALESCE(f.fill_qty, 0) AS fill_qty, f.avg_fill_price,
         COALESCE(f.fees, 0) AS fees
       FROM ledger.order o

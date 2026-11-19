@@ -12,6 +12,7 @@ import group.gnometrading.sm.Listing;
 import group.gnometrading.sm.ListingQuery;
 import group.gnometrading.sm.ListingSpec;
 import group.gnometrading.sm.ListingVolume;
+import group.gnometrading.sm.PriceGrid;
 import group.gnometrading.sm.PropositionFilter;
 import group.gnometrading.sm.Security;
 import group.gnometrading.sm.SecurityType;
@@ -723,11 +724,37 @@ class SecurityMasterTest {
         verify(registryConnection, times(3)).get(any()); // listing + exchange + security, only once each
     }
 
+    private static final String SPEC_HISTORY = "/api/listing-specs?listingId=42&history=true";
+    private static final String LINEAR_CENT = "[{\"start\": 0, \"end\": 1000000000, \"step\": 10000000}]";
+    private static final String TAPERED = "[{\"start\": 0, \"end\": 100000000, \"step\": 1000000},"
+            + " {\"start\": 100000000, \"end\": 900000000, \"step\": 10000000},"
+            + " {\"start\": 900000000, \"end\": 1000000000, \"step\": 1000000}]";
+
+    private static PriceGrid tapered() {
+        return PriceGrid.of(
+                new long[] {0, 100_000_000L, 900_000_000L},
+                new long[] {100_000_000L, 900_000_000L, 1_000_000_000L},
+                new long[] {1_000_000L, 10_000_000L, 1_000_000L});
+    }
+
+    private static String spec(final String bands, final String effectiveFrom, final String recordedAt) {
+        return spec(1, bands, effectiveFrom, recordedAt);
+    }
+
+    private static String spec(final long id, final String bands, final String effectiveFrom, final String recordedAt) {
+        return "{\"id\": " + id + ", \"listing_id\": 42, \"price_bands\": " + bands
+                + ", \"lot_size\": 10000, \"effective_from\": \"" + effectiveFrom + "\""
+                + (recordedAt == null ? "" : ", \"recorded_at\": \"" + recordedAt + "\"") + "}";
+    }
+
+    private void stubSpecs(final RegistryConnection connection, final String path, final String json) {
+        when(connection.get(new ViewString(path))).thenReturn(ByteBuffer.wrap(json.getBytes()));
+    }
+
     @ParameterizedTest
     @MethodSource("testGetListingSpecArguments")
     void testGetListingSpec(final int listingId, final String jsonResponse, final ListingSpec expected) {
-        when(registryConnection.get(
-                        new ViewString("/api/listing-specs?listingId=" + listingId + "&from=1970-01-01T00:00:00Z")))
+        when(registryConnection.get(new ViewString("/api/listing-specs?listingId=" + listingId + "&history=true")))
                 .thenReturn(ByteBuffer.wrap(jsonResponse.getBytes()));
         assertEquals(expected, securityMaster.getListingSpec(listingId));
         verify(registryConnection, times(1)).get(any());
@@ -739,50 +766,272 @@ class SecurityMasterTest {
                 Arguments.of(
                         42,
                         """
-                        [{"listing_id": 42, "tick_size": 100, "lot_size": 1000, "min_notional": 50000, "contract_multiplier": 1000000000, "min_size": 5000000}]""",
-                        new ListingSpec(42, 100L, 1000L, 50000L, 1_000_000_000L, 5_000_000L)),
+                        [{"listing_id": 42, "price_bands": [{"start": 0, "end": 1000000000, "step": 10000000}], "lot_size": 1000, "min_notional": 50000, "contract_multiplier": 1000000000, "min_size": 5000000}]""",
+                        new ListingSpec(
+                                42,
+                                PriceGrid.single(10_000_000L, 1_000_000_000L),
+                                1000L,
+                                50000L,
+                                1_000_000_000L,
+                                5_000_000L)),
                 Arguments.of(
                         99,
                         """
-                        [{"listing_id": 99, "tick_size": 10, "lot_size": 100}]""",
-                        new ListingSpec(99, 10L, 100L, 0L, 0L, 0L)));
+                        [{"listing_id": 99, "price_bands": [{"start": 0, "end": null, "step": 10}], "lot_size": 100}]""",
+                        new ListingSpec(99, PriceGrid.single(10L, PriceGrid.OPEN), 100L, 0L, 0L, 0L)));
+    }
+
+    @Test
+    void testGetListingSpecReadsEveryBand() {
+        stubSpecs(registryConnection, SPEC_HISTORY, "[" + spec(TAPERED, "1970-01-01T00:00:00.000Z", null) + "]");
+
+        final PriceGrid grid = securityMaster.getListingSpec(42).grid();
+        assertEquals(tapered(), grid);
+        assertTrue(grid.valid(47_000_000L));
+        assertFalse(grid.valid(475_000_000L));
     }
 
     @Test
     void testGetListingSpecCaching() {
-        when(registryConnection.get(new ViewString("/api/listing-specs?listingId=42&from=1970-01-01T00:00:00Z")))
-                .thenReturn(ByteBuffer.wrap(
-                        "[{\"listing_id\": 42, \"tick_size\": 100, \"lot_size\": 1000, \"min_notional\": 0, \"contract_multiplier\": 1000000000}]"
-                                .getBytes()));
+        stubSpecs(registryConnection, SPEC_HISTORY, "[" + spec(LINEAR_CENT, "1970-01-01T00:00:00.000Z", null) + "]");
         assertSame(securityMaster.getListingSpec(42), securityMaster.getListingSpec(42));
         verify(registryConnection, times(1)).get(any());
     }
 
     @Test
     void testGetListingSpecAtATime() {
-        when(registryConnection.get(new ViewString("/api/listing-specs?listingId=42&from=1970-01-01T00:00:00Z")))
-                .thenReturn(ByteBuffer.wrap(
-                        """
-                        [{"listing_id": 42, "tick_size": 10, "lot_size": 1, "effective_from": "1970-01-01T00:00:00.000Z"},
-                         {"listing_id": 42, "tick_size": 100, "lot_size": 1, "effective_from": "2026-07-01T00:00:00.000Z"}]"""
-                                .getBytes()));
+        stubSpecs(
+                registryConnection,
+                SPEC_HISTORY,
+                "[" + spec(LINEAR_CENT, "1970-01-01T00:00:00.000Z", null) + ","
+                        + spec(TAPERED, "2026-07-01T00:00:00.000Z", null) + "]");
         final long july = java.time.Instant.parse("2026-07-01T00:00:00Z").getEpochSecond() * 1_000_000_000L;
 
-        assertEquals(10L, securityMaster.getListingSpec(42, july - 1).tickSize());
-        assertEquals(100L, securityMaster.getListingSpec(42, july).tickSize());
-        assertEquals(100L, securityMaster.getListingSpec(42).tickSize());
+        assertEquals(
+                PriceGrid.single(10_000_000L, 1_000_000_000L),
+                securityMaster.getListingSpec(42, july - 1).grid());
+        assertEquals(tapered(), securityMaster.getListingSpec(42, july).grid());
+        assertEquals(tapered(), securityMaster.getListingSpec(42).grid());
         verify(registryConnection, times(1)).get(any());
     }
 
     @Test
     void testGetListingSpecBeforeItsFirstIsNull() {
-        when(registryConnection.get(new ViewString("/api/listing-specs?listingId=42&from=1970-01-01T00:00:00Z")))
-                .thenReturn(ByteBuffer.wrap(
-                        """
-                        [{"listing_id": 42, "tick_size": 10, "lot_size": 1, "effective_from": "2026-07-01T00:00:00.000Z"}]"""
-                                .getBytes()));
+        stubSpecs(registryConnection, SPEC_HISTORY, "[" + spec(LINEAR_CENT, "2026-07-01T00:00:00.000Z", null) + "]");
 
         assertNull(securityMaster.getListingSpec(42, 0));
+    }
+
+    @Test
+    void testRefresherSwapsInAChangedHistory() {
+        stubSpecs(
+                registryConnection,
+                SPEC_HISTORY,
+                "[" + spec(LINEAR_CENT, "1970-01-01T00:00:00.000Z", "2026-11-01T00:00:00.000Z") + "]");
+        assertEquals(
+                PriceGrid.single(10_000_000L, 1_000_000_000L),
+                securityMaster.getListingSpec(42).grid());
+
+        final RegistryConnection side = mock(RegistryConnection.class);
+        final ListingSpecRefresher refresher = securityMaster.listingSpecRefresher(side);
+        final String tickChange = spec(2, TAPERED, "2026-11-18T12:00:00.000Z", "2026-11-18T12:00:01.000Z");
+        stubSpecs(
+                side,
+                "/api/listing-specs?listingIds=42&history=true&recordedAfter=2026-10-31T23:50:00Z",
+                "[" + tickChange + "]");
+        stubSpecs(
+                side,
+                SPEC_HISTORY,
+                "[" + spec(LINEAR_CENT, "1970-01-01T00:00:00.000Z", "2026-11-01T00:00:00.000Z") + "," + tickChange
+                        + "]");
+
+        assertEquals(1, refresher.refresh().changed());
+        assertEquals(tapered(), securityMaster.getListingSpec(42).grid());
+        verify(registryConnection, times(1)).get(any());
+    }
+
+    @Test
+    void testAHistoryHandedToAnotherThreadSeesARefresh() throws Exception {
+        stubSpecs(
+                registryConnection,
+                SPEC_HISTORY,
+                "[" + spec(LINEAR_CENT, "1970-01-01T00:00:00.000Z", "2026-11-01T00:00:00.000Z") + "]");
+        final java.util.function.LongFunction<ListingSpec> history = securityMaster.listingSpecHistory(42);
+        final long now = System.currentTimeMillis() * 1_000_000L;
+        final java.util.concurrent.CompletableFuture<PriceGrid> seen = new java.util.concurrent.CompletableFuture<>();
+        final Thread reader = new Thread(() -> {
+            final long until = System.nanoTime() + 10_000_000_000L;
+            while (System.nanoTime() < until) {
+                final PriceGrid grid = history.apply(now).grid();
+                if (!grid.equals(PriceGrid.single(10_000_000L, 1_000_000_000L))) {
+                    seen.complete(grid);
+                    return;
+                }
+                Thread.onSpinWait();
+            }
+            seen.complete(null);
+        });
+        reader.start();
+
+        final RegistryConnection side = mock(RegistryConnection.class);
+        final String tickChange = spec(2, TAPERED, "2026-11-18T12:00:00.000Z", "2026-11-18T12:00:01.000Z");
+        stubSpecs(
+                side,
+                "/api/listing-specs?listingIds=42&history=true&recordedAfter=2026-10-31T23:50:00Z",
+                "[" + tickChange + "]");
+        stubSpecs(
+                side,
+                SPEC_HISTORY,
+                "[" + spec(LINEAR_CENT, "1970-01-01T00:00:00.000Z", "2026-11-01T00:00:00.000Z") + "," + tickChange
+                        + "]");
+        securityMaster.listingSpecRefresher(side).refresh();
+
+        assertEquals(tapered(), seen.get(15, java.util.concurrent.TimeUnit.SECONDS));
+        reader.join();
+        verify(registryConnection, times(1)).get(any());
+    }
+
+    @Test
+    void testRefresherAsksOnlyForRowsSinceItLastFoundThemAllCached() {
+        stubSpecs(
+                registryConnection,
+                SPEC_HISTORY,
+                "[" + spec(LINEAR_CENT, "1970-01-01T00:00:00.000Z", "2026-11-01T00:00:00.000Z") + "]");
+        securityMaster.getListingSpec(42);
+        final RegistryConnection side = mock(RegistryConnection.class);
+        final java.util.List<String> asked = new java.util.ArrayList<>();
+        when(side.get(any())).thenAnswer(call -> {
+            asked.add(call.getArgument(0).toString());
+            return ByteBuffer.wrap("[]".getBytes());
+        });
+        final ListingSpecRefresher refresher = securityMaster.listingSpecRefresher(side);
+
+        final long before = System.currentTimeMillis();
+        refresher.refresh();
+        refresher.refresh();
+
+        assertEquals("/api/listing-specs?listingIds=42&history=true&recordedAfter=2026-10-31T23:50:00Z", asked.get(0));
+        final String since = asked.get(1).substring(asked.get(1).indexOf("recordedAfter=") + "recordedAfter=".length());
+        final long sinceMillis = java.time.Instant.parse(since).toEpochMilli();
+        assertTrue(sinceMillis >= before - 10 * 60_000L, "from about the first refresh: " + since);
+    }
+
+    @Test
+    void testRefresherFindsARowStampedBeforeTheNewestItHas() {
+        stubSpecs(
+                registryConnection,
+                SPEC_HISTORY,
+                "[" + spec(1, LINEAR_CENT, "1970-01-01T00:00:00.000Z", "2026-11-01T00:00:00.000Z") + "]");
+        securityMaster.getListingSpec(42);
+
+        final RegistryConnection side = mock(RegistryConnection.class);
+        final String lateCommit = spec(2, TAPERED, "2026-10-31T23:59:00.000Z", "2026-10-31T23:58:00.000Z");
+        stubSpecs(
+                side,
+                "/api/listing-specs?listingIds=42&history=true&recordedAfter=2026-10-31T23:50:00Z",
+                "[" + lateCommit + "]");
+        stubSpecs(
+                side,
+                SPEC_HISTORY,
+                "[" + spec(1, LINEAR_CENT, "1970-01-01T00:00:00.000Z", "2026-11-01T00:00:00.000Z") + "," + lateCommit
+                        + "]");
+
+        assertEquals(1, securityMaster.listingSpecRefresher(side).refresh().changed());
+        assertEquals(tapered(), securityMaster.getListingSpec(42).grid());
+    }
+
+    @Test
+    void testRefresherLeavesAnUnchangedHistory() {
+        stubSpecs(
+                registryConnection,
+                SPEC_HISTORY,
+                "[" + spec(LINEAR_CENT, "1970-01-01T00:00:00.000Z", "2026-11-01T00:00:00.000Z") + "]");
+        final ListingSpec before = securityMaster.getListingSpec(42);
+
+        final RegistryConnection side = mock(RegistryConnection.class);
+        final ListingSpecRefresher refresher = securityMaster.listingSpecRefresher(side);
+        stubSpecs(side, "/api/listing-specs?listingIds=42&history=true&recordedAfter=2026-10-31T23:50:00Z", "[]");
+
+        assertEquals(0, refresher.refresh().changed());
+        assertSame(before, securityMaster.getListingSpec(42));
+        verify(side, times(1)).get(any());
+    }
+
+    @Test
+    void testRefresherIgnoresARowItAlreadyHas() {
+        final String only = spec(LINEAR_CENT, "1970-01-01T00:00:00.000Z", "2026-11-01T00:00:00.000Z");
+        stubSpecs(registryConnection, SPEC_HISTORY, "[" + only + "]");
+        securityMaster.getListingSpec(42);
+
+        final RegistryConnection side = mock(RegistryConnection.class);
+        stubSpecs(
+                side,
+                "/api/listing-specs?listingIds=42&history=true&recordedAfter=2026-10-31T23:50:00Z",
+                "[" + only + "]");
+
+        assertEquals(0, securityMaster.listingSpecRefresher(side).refresh().changed());
+        verify(side, times(1)).get(any());
+    }
+
+    @Test
+    void testACorrectionReplacesTheRowItFixesAndIsNotRefetchedForever() {
+        final String original = spec(1, LINEAR_CENT, "1970-01-01T00:00:00.000Z", "2026-11-01T12:00:00.000Z");
+        final String correction = spec(2, TAPERED, "1970-01-01T00:00:00.000Z", "2026-11-01T12:05:00.000Z");
+        stubSpecs(registryConnection, SPEC_HISTORY, "[" + correction + "," + original + "]");
+        assertEquals(tapered(), securityMaster.getListingSpec(42, 0).grid());
+
+        final RegistryConnection side = mock(RegistryConnection.class);
+        stubSpecs(
+                side,
+                "/api/listing-specs?listingIds=42&history=true&recordedAfter=2026-11-01T11:55:00Z",
+                "[" + correction + "," + original + "]");
+        final ListingSpecRefresher refresher = securityMaster.listingSpecRefresher(side);
+        assertEquals(0, refresher.refresh().changed());
+        assertEquals(0, refresher.refresh().changed());
+        verify(side, times(2)).get(any());
+    }
+
+    @Test
+    void testRefresherKeepsAListingsHistoryWhenItCantReloadIt() {
+        stubSpecs(
+                registryConnection,
+                SPEC_HISTORY,
+                "[" + spec(1, LINEAR_CENT, "1970-01-01T00:00:00.000Z", "2026-11-01T00:00:00.000Z") + "]");
+        final ListingSpec before = securityMaster.getListingSpec(42);
+        final RegistryConnection side = mock(RegistryConnection.class);
+        stubSpecs(
+                side,
+                "/api/listing-specs?listingIds=42&history=true&recordedAfter=2026-10-31T23:50:00Z",
+                "[" + spec(2, TAPERED, "2026-11-18T00:00:00.000Z", "2026-11-18T00:00:01.000Z") + "]");
+        when(side.get(new ViewString(SPEC_HISTORY))).thenThrow(new IllegalStateException("registry down"));
+
+        final ListingSpecRefresher.Result result =
+                securityMaster.listingSpecRefresher(side).refresh();
+        assertEquals(0, result.changed());
+        assertEquals(1, result.failed());
+        assertEquals("registry down", result.lastError().getMessage());
+        assertSame(before, securityMaster.getListingSpec(42));
+    }
+
+    @Test
+    void testAListingWithNoSpecYetIsCheckedFromAboutWhenItWasRead() {
+        stubSpecs(registryConnection, "/api/listing-specs?listingId=7&history=true", "[]");
+        assertNull(securityMaster.getListingSpec(7));
+        final RegistryConnection side = mock(RegistryConnection.class);
+        when(side.get(any())).thenReturn(ByteBuffer.wrap("[]".getBytes()));
+
+        securityMaster.listingSpecRefresher(side).refresh();
+        verify(side)
+                .get(argThat(path -> path.toString().contains("listingIds=7&")
+                        && !path.toString().contains("recordedAfter=1969")
+                        && !path.toString().contains("recordedAfter=1970")));
+    }
+
+    @Test
+    void testRefresherDoesNothingBeforeAnySpecIsRead() {
+        final RegistryConnection side = mock(RegistryConnection.class);
+        assertEquals(0, securityMaster.listingSpecRefresher(side).refresh().changed());
+        verifyNoInteractions(side);
     }
 
     @Test
@@ -1000,7 +1249,7 @@ class SecurityMasterTest {
 
     @Test
     void testGetListingSpecEmptyCaching() {
-        when(registryConnection.get(new ViewString("/api/listing-specs?listingId=1&from=1970-01-01T00:00:00Z")))
+        when(registryConnection.get(new ViewString("/api/listing-specs?listingId=1&history=true")))
                 .thenReturn(ByteBuffer.wrap("[]".getBytes()));
 
         assertNull(securityMaster.getListingSpec(1));

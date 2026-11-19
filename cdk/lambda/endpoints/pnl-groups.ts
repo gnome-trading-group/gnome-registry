@@ -6,6 +6,7 @@ import { lifetimePnl, sessionPnl } from './pnl-math';
 import {
   ListingInfo, loadListingInfo, loadSessionStates, loadStrategyState, SessionListingState, StrategyListingState,
 } from './pnl-state';
+import { PriceBand } from './price-bands';
 import { closeRelation, Relation, RelationEdge } from './relation-closure';
 import { BINARY, buildGroups, ContractFacts, EventOutcomes, Literal, MULTI_OUTCOME, strongest } from './risk-groups';
 import { sameVoidRule, voidRule } from './void-rules';
@@ -288,7 +289,7 @@ interface HeldRow {
   listingId: number;
   symbol: string | null;
   exchangeId: number | null;
-  tickSize: string | null;
+  priceBands: PriceBand[] | null;
   lotSize: string | null;
   netQuantity: string;
   avgEntryPrice: string;
@@ -302,7 +303,7 @@ function heldRow(holding: Holding, info: ListingInfo | undefined): HeldRow {
     listingId: holding.listingId,
     symbol: info?.symbol ?? null,
     exchangeId: info?.exchangeId ?? null,
-    tickSize: info?.tickSize ?? null,
+    priceBands: info?.priceBands ?? null,
     lotSize: info?.lotSize ?? null,
     netQuantity: holding.position.netQuantity.toString(),
     avgEntryPrice: avgEntryPrice(holding.position).toString(),

@@ -1,0 +1,73 @@
+{
+ "markets": [
+  {
+   "ticker": "KXUCLWBTTS-26NOV19PARKOE-BTTS",
+   "price_level_structure": "linear_cent",
+   "price_ranges": [
+    {
+     "end": "1.0000",
+     "start": "0.0000",
+     "step": "0.0100"
+    }
+   ],
+   "status": "active"
+  },
+  {
+   "ticker": "KXNBAESCALATOR3PT-26NOV18GSWDAL-GSWBPODZIEMSKI2",
+   "price_level_structure": "center_centi_edge_centi_cent",
+   "price_ranges": [
+    {
+     "end": "1.0000",
+     "start": "0.0000",
+     "step": "0.0001"
+    }
+   ],
+   "status": "active"
+  },
+  {
+   "ticker": "KXFDANOM-27-NSAP",
+   "price_level_structure": "tapered_deci_cent",
+   "price_ranges": [
+    {
+     "end": "0.1000",
+     "start": "0.0000",
+     "step": "0.0010"
+    },
+    {
+     "end": "0.9000",
+     "start": "0.1000",
+     "step": "0.0100"
+    },
+    {
+     "end": "1.0000",
+     "start": "0.9000",
+     "step": "0.0010"
+    }
+   ],
+   "status": "active"
+  },
+  {
+   "ticker": "KXMVECROSSCATEGORY-S20264EBC3W3ELYUEPZDQ-FSA45HWOZ",
+   "price_level_structure": "center_deci_edge_centi_cent",
+   "price_ranges": [
+    {
+     "end": "0.0100",
+     "start": "0.0000",
+     "step": "0.0001"
+    },
+    {
+     "end": "0.9900",
+     "start": "0.0100",
+     "step": "0.0010"
+    },
+    {
+     "end": "1.0000",
+     "start": "0.9900",
+     "step": "0.0001"
+    }
+   ],
+   "status": "active"
+  }
+ ],
+ "cursor": ""
+}

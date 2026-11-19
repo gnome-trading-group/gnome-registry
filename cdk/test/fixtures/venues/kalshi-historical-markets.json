@@ -1,0 +1,17 @@
+{
+ "markets": [
+  {
+   "ticker": "PRES-2024-DJT",
+   "price_level_structure": "linear_cent",
+   "price_ranges": [
+    {
+     "end": "1.0000",
+     "start": "0.0000",
+     "step": "0.0100"
+    }
+   ],
+   "status": "finalized"
+  }
+ ],
+ "cursor": ""
+}

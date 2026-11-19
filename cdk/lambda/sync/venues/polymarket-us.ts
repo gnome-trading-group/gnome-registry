@@ -5,6 +5,7 @@ import {
   PRICE_SCALE, scaleDecimal, SETTLEMENT_LOOKBACK_MS, SIZE_SCALE, unclassifiedCredit, VenueCredit, VenueReading,
   VenueSettlement,
 } from './types';
+import { chunks, pause, PRICE_SCALE as SPEC_PRICE_SCALE, SIZE_SCALE as SPEC_SIZE_SCALE, units, VenueSpec } from './specs';
 
 // Polymarket US reports balances per currency, and positions as an object keyed by market slug, paged by cursor,
 // each with a signed net position (a short is negative: selling a contract the account doesn't hold opens one). A
@@ -413,4 +414,53 @@ export async function readPolymarketUsIncentivePrograms(): Promise<PolymarketUsI
 export function polymarketUsUnlistedEnd(program: IncentiveProgramReading, now: Date, stopped: Set<string>): Date {
   if (program.rewardPer === 'PERIOD') return now;
   return stopped.has(program.venueMarket) ? nextEasternMidnight(now) : easternDayStart(now);
+}
+
+// ----- listing specs -----
+
+const MARKETS_URL = 'https://gateway.polymarket.us/v1/markets';
+// Slugs per request, as the classifier looks markets up.
+const SLUGS_PER_REQUEST = 50;
+const PAUSE_BETWEEN_REQUESTS_MS = 250;
+
+/** The market a listing trades (`{slug}:long` or `{slug}:short`). */
+export function polymarketUsMarketOf(exchangeSecurityId: string): string {
+  return exchangeSecurityId.slice(0, exchangeSecurityId.lastIndexOf(':'));
+}
+
+/**
+ * Specs for Polymarket US listings: each market's tick and minimum trade quantity, the same on both legs (a short is
+ * priced in its own terms on the same grid). Looked up by slug, which answers open and closed markets alike.
+ */
+export async function readPolymarketUsSpecs(exchangeSecurityIds: string[]): Promise<Map<string, VenueSpec>> {
+  const listingsBySlug = new Map<string, string[]>();
+  for (const id of exchangeSecurityIds) {
+    const slug = polymarketUsMarketOf(id);
+    listingsBySlug.set(slug, [...(listingsBySlug.get(slug) ?? []), id]);
+  }
+  const specs = new Map<string, VenueSpec>();
+  for (const batch of chunks([...listingsBySlug.keys()], SLUGS_PER_REQUEST)) {
+    const query = batch.map(slug => `slug=${encodeURIComponent(slug)}`).join('&');
+    const res = await fetchWithRetry(`${MARKETS_URL}?${query}&limit=${batch.length}`);
+    if (!res.ok) throw new Error(`Polymarket US GET /v1/markets failed: ${res.status} ${await res.text()}`);
+    for (const market of ((await res.json()) as { markets?: Record<string, any>[] }).markets ?? []) {
+      const tick = units(market.orderPriceMinTickSize, SPEC_PRICE_SCALE);
+      const lot = units(market.minimumTradeQty, SPEC_SIZE_SCALE);
+      if (tick === null || tick <= 0 || lot === null || lot <= 0) {
+        console.warn(`Polymarket US market ${market.slug} has no usable tick or minimum trade quantity`);
+        continue;
+      }
+      for (const id of listingsBySlug.get(String(market.slug)) ?? []) {
+        specs.set(id, {
+          priceBands: [{ start: 0, end: SPEC_PRICE_SCALE, step: tick }],
+          lotSize: lot,
+          minNotional: 0,
+          minSize: 0,
+          contractMultiplier: SPEC_PRICE_SCALE,
+        });
+      }
+    }
+    await pause(PAUSE_BETWEEN_REQUESTS_MS);
+  }
+  return specs;
 }

@@ -74,44 +74,100 @@ describeDb('Fee schedules and point-in-time listing specs, against Postgres', ()
   }
 
   describe('listing specs', () => {
-    const spec = (extra: Record<string, unknown> = {}) => JSON.stringify({ listingId: 500, tickSize: 10, lotSize: 1, ...extra });
+    const bands = (step: number) => [{ start: 0, end: 1_000_000_000, step }];
+    const spec = (step: number, extra: Record<string, unknown> = {}) =>
+      JSON.stringify({ listingId: 500, priceBands: bands(step), lotSize: 1, ...extra });
+    const stepOf = (row: any) => row.price_bands[0].step;
     const effective = async () => (await client.query(
-      `SELECT tick_size::int AS tick, effective_from FROM sm.listing_spec ORDER BY id`)).rows;
+      `SELECT price_bands, effective_from FROM sm.listing_spec ORDER BY id`)).rows;
 
-    it('dates a first spec from the epoch and later ones from now, unless told otherwise', async () => {
-      await specs.createOne(spec());
-      await specs.createOne(spec({ tickSize: 20 }));
-      await specs.createOne(spec({ tickSize: 30, effectiveFrom: '2026-01-01T00:00:00Z' }));
+    it('dates a first spec from the epoch and refuses a later one that is neither dated nor a correction', async () => {
+      await specs.createOne(spec(10));
+      await expect(specs.createOne(spec(20))).rejects.toMatchObject({ code: '22023' });
+      await specs.createOne(spec(40, { effectiveFrom: '2026-01-01T00:00:00Z' }));
       const rows = await effective();
-      expect(rows[0].effective_from.toISOString()).toBe('1970-01-01T00:00:00.000Z');
-      expect(Date.now() - rows[1].effective_from.getTime()).toBeLessThan(60_000);
-      expect(rows[2].effective_from.toISOString()).toBe('2026-01-01T00:00:00.000Z');
+      expect(rows.map((r: any) => [stepOf(r), r.effective_from.toISOString()])).toEqual([
+        [10, '1970-01-01T00:00:00.000Z'],
+        [40, '2026-01-01T00:00:00.000Z'],
+      ]);
     });
 
-    it('a direct insert without effective_from (the classifier) is dated by the same rule', async () => {
-      await client.query(`INSERT INTO sm.listing_spec (listing_id, tick_size, lot_size) VALUES (500, 10, 1), (501, 10, 1)`);
+    it('a direct insert without effective_from is dated by the same rule', async () => {
+      await client.query(`INSERT INTO sm.listing_spec (listing_id, price_bands, lot_size)
+        VALUES (500, '[{"start":0,"end":1000000000,"step":10}]', 1), (501, '[{"start":0,"end":1000000000,"step":10}]', 1)`);
       const rows = await effective();
       expect(rows.map((r: any) => r.effective_from.toISOString())).toEqual(['1970-01-01T00:00:00.000Z', '1970-01-01T00:00:00.000Z']);
+      await expect(client.query(`INSERT INTO sm.listing_spec (listing_id, price_bands, lot_size)
+        VALUES (500, '[{"start":0,"end":1000000000,"step":10}]', 1)`)).rejects.toMatchObject({ code: '22023' });
     });
 
     it('a correction replaces the spec in force for all time; a venue change only from when it happened', async () => {
-      await specs.createOne(spec({ tickSize: 1 }));
-      await specs.createOne(spec({ tickSize: 10, correction: true }));
-      await specs.createOne(spec({ tickSize: 100, effectiveFrom: '2026-07-01T00:00:00Z' }));
-      const at = async (time: string) => JSON.parse((await specs.get({ listingId: '500', at: time })).body)[0].tick_size;
-      expect(await at('2025-01-01T00:00:00Z')).toBe('10');
-      expect(await at('2026-06-30T23:59:59Z')).toBe('10');
-      expect(await at('2026-07-01T00:00:00Z')).toBe('100');
-      expect(JSON.parse((await specs.get({ listingId: '500' })).body)[0].tick_size).toBe('100');
+      await specs.createOne(spec(1));
+      await specs.createOne(spec(10, { correction: true }));
+      await specs.createOne(spec(100, { effectiveFrom: '2026-07-01T00:00:00Z' }));
+      const at = async (time: string) => stepOf(JSON.parse((await specs.get({ listingId: '500', at: time })).body)[0]);
+      expect(await at('2025-01-01T00:00:00Z')).toBe(10);
+      expect(await at('2026-06-30T23:59:59Z')).toBe(10);
+      expect(await at('2026-07-01T00:00:00Z')).toBe(100);
+      expect(stepOf(JSON.parse((await specs.get({ listingId: '500' })).body)[0])).toBe(100);
 
       const range = JSON.parse((await specs.get({ listingId: '500', from: '2026-01-01T00:00:00Z', to: '2026-12-31T00:00:00Z' })).body);
-      expect(range.map((r: any) => r.tick_size)).toEqual(['10', '100']);
+      expect(range.map(stepOf)).toEqual([10, 100]);
       const before = JSON.parse((await specs.get({ listingId: '500', from: '2025-01-01T00:00:00Z', to: '2025-12-31T00:00:00Z' })).body);
-      expect(before.map((r: any) => r.tick_size)).toEqual(['10']);
+      expect(before.map(stepOf)).toEqual([10]);
+    });
+
+    it('stores every band of a tapered grid as given', async () => {
+      const tapered = [
+        { start: 0, end: 100_000_000, step: 1_000_000 },
+        { start: 100_000_000, end: 900_000_000, step: 10_000_000 },
+        { start: 900_000_000, end: 1_000_000_000, step: 1_000_000 },
+      ];
+      await specs.createOne(JSON.stringify({ listingId: 500, priceBands: tapered, lotSize: 10_000 }));
+      expect(JSON.parse((await specs.get({ listingId: '500' })).body)[0].price_bands).toEqual(tapered);
+    });
+
+    it.each([
+      ['no bands', []],
+      ['a gap', [{ start: 0, end: 50, step: 10 }, { start: 100, end: 1_000_000_000, step: 10 }]],
+      ['an edge off its step', [{ start: 0, end: 105, step: 10 }, { start: 105, end: 1_000_000_000, step: 1 }]],
+      ['an open band before the last', [{ start: 0, end: null, step: 10 }, { start: 100, end: null, step: 10 }]],
+      ['a zero step', [{ start: 0, end: 1_000_000_000, step: 0 }]],
+      ['a fractional step', [{ start: 0, end: 1_000_000_000, step: 2.5 }]],
+    ])('refuses priceBands with %s', async (_name, priceBands) => {
+      await expect(specs.createOne(JSON.stringify({ listingId: 500, priceBands, lotSize: 1 })))
+        .rejects.toThrow(ValidationError);
+    });
+
+    it('lists the rows several listings recorded after a time, for a session refreshing its specs', async () => {
+      await specs.createOne(spec(10));
+      await specs.createOne(JSON.stringify({ listingId: 501, priceBands: bands(10), lotSize: 1 }));
+      await client.query(`UPDATE sm.listing_spec SET recorded_at = '2026-11-01T00:00:00'`);
+      await specs.createOne(spec(1, { effectiveFrom: '2026-11-18T00:00:00Z' }));
+
+      const changed = JSON.parse((await specs.get({
+        listingIds: '500,501', history: 'true', recordedAfter: '2026-11-01T00:00:00Z',
+      })).body);
+      expect(changed.map((r: any) => [r.listing_id, stepOf(r)])).toEqual([[500, 1]]);
+      const all = JSON.parse((await specs.get({ listingIds: '500,501', history: 'true' })).body);
+      expect(all).toHaveLength(3);
+      await expect(specs.get({ listingIds: '500', recordedAfter: '2026-11-01T00:00:00Z' })).rejects.toThrow(ValidationError);
+    });
+
+    it("gives the specs in force of an exchange's listings that trade now", async () => {
+      await specs.createOne(spec(10));
+      await specs.createOne(JSON.stringify({ listingId: 501, priceBands: bands(10), lotSize: 1 }));
+      await specs.createOne(JSON.stringify({ listingId: 700, priceBands: [{ start: 0, end: null, step: 1 }], lotSize: 1 }));
+      await client.query(`UPDATE sm.listing SET active = false WHERE listing_id = 501`);
+      const active = JSON.parse((await specs.get({ exchangeId: '1', activeListings: 'true' })).body);
+      expect(active.map((r: any) => r.listing_id)).toEqual([500]);
+      await client.query(`UPDATE sm.listing SET active = true WHERE listing_id = 501`);
+      const after = JSON.parse((await specs.get({ exchangeId: '1', activeListings: 'true', afterListingId: '500' })).body);
+      expect(after.map((r: any) => r.listing_id)).toEqual([501]);
     });
 
     it('refuses effectiveFrom together with correction', async () => {
-      await expect(specs.createOne(spec({ effectiveFrom: '2026-01-01T00:00:00Z', correction: true })))
+      await expect(specs.createOne(spec(10, { effectiveFrom: '2026-01-01T00:00:00Z', correction: true })))
         .rejects.toThrow(ValidationError);
     });
   });

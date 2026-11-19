@@ -1,10 +1,67 @@
-import { AssetClass, ContractType, ExchangeAdapter, ExchangeFetch, ExchangeSecurityData, SecurityType } from './types';
+import { PriceBand } from '../../endpoints/price-bands';
+import { VenueSpec } from './specs';
+import { AssetClass, ContractType, ExchangeAdapter, ExchangeFetch, ExchangeSecurityData, SecurityType } from './exchange-types';
 
 const HYPERLIQUID_INFO_URL = 'https://api.hyperliquid.xyz/info';
 const PERPS_MAX_DECIMALS = 6;
 const SPOT_MAX_DECIMALS = 8;
 const CONTRACT_MULTIPLIER = 1_000_000_000;
 const PERPS_MIN_NOTIONAL = 10;
+const PRICE_DIGITS = 9;
+const SIZE_DIGITS = 6;
+// A price has at most this many significant figures, though a whole-dollar price is always allowed.
+const SIGNIFICANT_FIGURES = 5;
+// Outcome contracts (classifier listings `#<outcome><side>`) price 0 to 1 in thousandths, one share at a time.
+const OUTCOME_SPEC: VenueSpec = {
+  priceBands: [{ start: 0, end: 1_000_000_000, step: 1_000_000 }],
+  lotSize: 1_000_000,
+  minNotional: 0,
+  minSize: 0,
+  contractMultiplier: CONTRACT_MULTIPLIER,
+};
+
+const unitsOf = (digits: number) => Math.pow(10, digits);
+
+/**
+ * A market's price grid: at most 5 significant figures and at most maxDecimals - szDecimals decimals, and a whole
+ * dollar always allowed. So the step is the decimals' below 10^(5 - decimals) dollars, grows tenfold each decade above
+ * that, and stays $1 from $10,000 up. Null when the finest step is below a price unit (1e-9 dollars).
+ */
+export function hyperliquidPriceBands(maxDecimals: number, szDecimals: number): PriceBand[] | null {
+  const decimals = maxDecimals - szDecimals;
+  if (decimals > PRICE_DIGITS || decimals < 0) return null;
+  const dollar = unitsOf(PRICE_DIGITS);
+  const wholeFrom = SIGNIFICANT_FIGURES - 1;
+  const firstDecade = SIGNIFICANT_FIGURES - decimals;
+  if (firstDecade > wholeFrom) return [{ start: 0, end: null, step: dollar }];
+  const bands: PriceBand[] = [{ start: 0, end: unitsOf(PRICE_DIGITS + firstDecade), step: unitsOf(PRICE_DIGITS - decimals) }];
+  for (let decade = firstDecade; decade < wholeFrom; decade++) {
+    bands.push({
+      start: unitsOf(PRICE_DIGITS + decade),
+      end: unitsOf(PRICE_DIGITS + decade + 1),
+      step: unitsOf(PRICE_DIGITS + decade - wholeFrom),
+    });
+  }
+  bands.push({ start: unitsOf(PRICE_DIGITS + wholeFrom), end: null, step: dollar });
+  return bands;
+}
+
+function hyperliquidSpec(maxDecimals: number, szDecimals: number, minNotional: number): VenueSpec | null {
+  const priceBands = hyperliquidPriceBands(maxDecimals, szDecimals);
+  if (!priceBands || szDecimals > SIZE_DIGITS) return null;
+  return {
+    priceBands,
+    lotSize: unitsOf(SIZE_DIGITS - szDecimals),
+    minNotional,
+    minSize: 0,
+    contractMultiplier: CONTRACT_MULTIPLIER,
+  };
+}
+
+/** The spec of a Hyperliquid listing the exchange sync doesn't fetch: an outcome contract, or null for anything else. */
+export function hyperliquidOutcomeSpec(exchangeSecurityId: string): VenueSpec | null {
+  return exchangeSecurityId.startsWith('#') ? OUTCOME_SPEC : null;
+}
 
 interface HyperliquidAsset {
   name: string;
@@ -24,6 +81,7 @@ interface HyperliquidMeta {
 interface HyperliquidSpotToken {
   name: string;
   szDecimals: number;
+  index: number;
 }
 
 interface HyperliquidSpotPair {
@@ -88,13 +146,6 @@ function perpFromAsset(
   settleCurrency: string,
 ): ExchangeSecurityData {
   const exchangeSecuritySymbol = asset.name;
-  const priceDecimals = PERPS_MAX_DECIMALS - asset.szDecimals;
-  const tickSize = priceDecimals > 9
-    ? (console.warn(`Hyperliquid: "${exchangeSecuritySymbol}" priceDecimals=${priceDecimals} exceeds PRICE_SCALING_FACTOR (1e9) — storing tickSize=0`), 0)
-    : Math.pow(10, 9 - priceDecimals);
-  const lotSize = asset.szDecimals > 6
-    ? (console.warn(`Hyperliquid: "${exchangeSecuritySymbol}" szDecimals=${asset.szDecimals} exceeds SIZE_SCALING_FACTOR (1e6) — storing lotSize=0`), 0)
-    : Math.pow(10, 6 - asset.szDecimals);
 
   // Strip DEX prefix (e.g. "hyna:BTC" -> "BTC") to get the canonical base currency
   const colonIdx = asset.name.indexOf(':');
@@ -112,10 +163,7 @@ function perpFromAsset(
     isQuanto: false,
     exchangeSecurityId: exchangeSecuritySymbol,
     exchangeSecuritySymbol,
-    tickSize,
-    lotSize,
-    minNotional: PERPS_MIN_NOTIONAL * 1e9,
-    contractMultiplier: CONTRACT_MULTIPLIER,
+    spec: hyperliquidSpec(PERPS_MAX_DECIMALS, asset.szDecimals, PERPS_MIN_NOTIONAL * unitsOf(PRICE_DIGITS)),
     active: asset.isDelisted !== true,
     volume24h: dayVolume(ctx?.dayNtlVlm),
   };
@@ -129,8 +177,10 @@ export class HyperliquidAdapter implements ExchangeAdapter {
       fetchPerpDexs(),
     ]);
 
+    // Pairs and collateral name tokens by their index, which isn't their place in the list: the list has gaps.
+    const tokens = new Map(spot.tokens.map(token => [token.index, token]));
     const resolveSettle = (collateralToken: number): string =>
-      spot.tokens[collateralToken]?.name ?? 'USDC';
+      tokens.get(collateralToken)?.name ?? 'USDC';
 
     const result: ExchangeSecurityData[] = [];
 
@@ -142,17 +192,9 @@ export class HyperliquidAdapter implements ExchangeAdapter {
     const spotVolumeByPair = new Map<string, number | undefined>(
       spotCtxs.map(ctx => [ctx.coin, dayVolume(ctx.dayNtlVlm)]));
     for (const pair of spot.universe) {
-      const baseToken = spot.tokens[pair.tokens[0]];
-      const quoteToken = spot.tokens[pair.tokens[1]];
+      const baseToken = tokens.get(pair.tokens[0]);
+      const quoteToken = tokens.get(pair.tokens[1]);
       if (!baseToken || !quoteToken) continue;
-
-      const priceDecimals = SPOT_MAX_DECIMALS - baseToken.szDecimals;
-      const tickSize = priceDecimals > 9
-        ? (console.warn(`Hyperliquid: spot "${pair.name}" priceDecimals=${priceDecimals} exceeds PRICE_SCALING_FACTOR — storing tickSize=0`), 0)
-        : Math.pow(10, 9 - priceDecimals);
-      const lotSize = baseToken.szDecimals > 6
-        ? (console.warn(`Hyperliquid: spot "${pair.name}" szDecimals=${baseToken.szDecimals} exceeds SIZE_SCALING_FACTOR — storing lotSize=0`), 0)
-        : Math.pow(10, 6 - baseToken.szDecimals);
 
       result.push({
         baseCurrency: baseToken.name,
@@ -166,10 +208,7 @@ export class HyperliquidAdapter implements ExchangeAdapter {
         isQuanto: false,
         exchangeSecurityId: pair.name,
         exchangeSecuritySymbol: pair.name,
-        tickSize,
-        lotSize,
-        minNotional: 0,
-        contractMultiplier: CONTRACT_MULTIPLIER,
+        spec: hyperliquidSpec(SPOT_MAX_DECIMALS, baseToken.szDecimals, 0),
         feeGroup: 'spot',
         active: true,
         volume24h: spotVolumeByPair.get(pair.name),
@@ -199,4 +238,20 @@ export class HyperliquidAdapter implements ExchangeAdapter {
       },
     };
   }
+}
+
+/** Specs for Hyperliquid listings: perps and spot from the venue's metadata, outcome contracts by rule. */
+export async function readHyperliquidSpecs(exchangeSecurityIds: string[]): Promise<Map<string, VenueSpec>> {
+  const specs = new Map<string, VenueSpec>();
+  const wanted = new Set<string>();
+  for (const id of exchangeSecurityIds) {
+    const outcome = hyperliquidOutcomeSpec(id);
+    if (outcome) specs.set(id, outcome);
+    else wanted.add(id);
+  }
+  if (wanted.size === 0) return specs;
+  for (const security of (await new HyperliquidAdapter().fetchSecurities()).securities) {
+    if (security.spec && wanted.has(security.exchangeSecurityId)) specs.set(security.exchangeSecurityId, security.spec);
+  }
+  return specs;
 }

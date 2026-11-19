@@ -253,7 +253,8 @@ describeDb('monitoring rules against Postgres', () => {
       'REBALANCE_DRIFT', 'ALLOCATION_EXCEEDS_BALANCE',
       'DRAINING_EXPOSURE', 'ACCOUNT_DUE_FOR_ROTATION', 'ACCOUNT_READY_TO_RETIRE', 'FEE_MISMATCH',
       'FEE_SCHEDULE_MISSING', 'FEE_SCHEDULE_CHANGED', 'FEE_TYPE_UNSUPPORTED', 'HOST_CPU_HIGH', 'HOST_MEMORY_LOW',
-      'DISK_LOW', 'JOURNAL_BACKLOG', 'CLOCK_UNSYNCED', 'VENUE_CREDIT_UNCLASSIFIED', 'REWARD_UNALLOCATED'];
+      'DISK_LOW', 'JOURNAL_BACKLOG', 'CLOCK_UNSYNCED', 'VENUE_CREDIT_UNCLASSIFIED', 'REWARD_UNALLOCATED',
+      'LISTING_SPEC_MISSING'];
     const rulesDir = path.join(__dirname, '..', 'lambda', 'monitoring', 'rules');
     const source = fs.readdirSync(rulesDir).filter(f => f.endsWith('.ts'))
       .map(f => fs.readFileSync(path.join(rulesDir, f), 'utf8')).join('\n');

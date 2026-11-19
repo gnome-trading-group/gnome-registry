@@ -1,3 +1,5 @@
+import { VenueSpec } from './specs';
+
 export const SecurityType = {
   SPOT: 0,
   PERPETUAL: 1,
@@ -40,11 +42,9 @@ export interface ExchangeSecurityData {
   isQuanto: boolean;
   exchangeSecurityId: string;
   exchangeSecuritySymbol: string;
-  tickSize: number;
-  lotSize: number;
-  // Price units (1e9 = $1), like every money value; not price scale × size scale.
-  minNotional: number;
-  contractMultiplier: number;
+  // What its orders must respect, or null when it is finer than the registry's units hold; the spec sync records it,
+  // not the exchange sync.
+  spec: VenueSpec | null;
   // The venue's group fee schedules target (sm.listing.fee_group), when it prices this kind of market apart.
   feeGroup?: string;
   // Whether the venue trades it now; a delisted market is still listed by some venues (sm.listing.active).
@@ -93,11 +93,4 @@ export interface ListingResponse {
   volume_24h: number | null;
 }
 
-export interface ListingSpecResponse {
-  listing_id: number;
-  tick_size: number;
-  lot_size: number;
-  min_notional: number;
-  contract_multiplier: number;
-}
 

@@ -1,6 +1,7 @@
 import { PoolClient } from 'pg';
 import { accrualDeltas } from '../rewards/accruals';
 import { MarkInputs, PositionState, pricedMark, toBigInt } from './ledger-math';
+import { PriceBand } from './price-bands';
 
 // Reads the ledger state PnL is derived from: positions from fills (GAP rows carry no position of their own) and
 // marks as of a moment. Every lookup is an as-of query on an indexed (key, time) pair.
@@ -9,7 +10,7 @@ export interface ListingInfo {
   listingId: number;
   symbol: string | null;
   exchangeId: number | null;
-  tickSize: string | null;
+  priceBands: PriceBand[] | null;
   lotSize: string | null;
 }
 
@@ -78,11 +79,11 @@ export async function loadListingInfo(client: PoolClient, listingIds: number[]):
   const info = new Map<number, ListingInfo>();
   if (listingIds.length === 0) return info;
   const rows = (await client.query(`
-    SELECT l.listing_id, l.exchange_security_symbol AS symbol, l.exchange_id, spec.tick_size, spec.lot_size
+    SELECT l.listing_id, l.exchange_security_symbol AS symbol, l.exchange_id, spec.price_bands, spec.lot_size
     FROM sm.listing l
     LEFT JOIN LATERAL (
-      SELECT tick_size, lot_size FROM sm.listing_spec s WHERE s.listing_id = l.listing_id
-      ORDER BY recorded_at DESC LIMIT 1
+      SELECT price_bands, lot_size FROM sm.listing_spec s WHERE s.listing_id = l.listing_id AND s.effective_from <= NOW()
+      ORDER BY effective_from DESC, recorded_at DESC LIMIT 1
     ) spec ON TRUE
     WHERE l.listing_id = ANY($1::int[])`, [listingIds])).rows;
   for (const r of rows) {
@@ -90,7 +91,7 @@ export async function loadListingInfo(client: PoolClient, listingIds: number[]):
       listingId: r.listing_id,
       symbol: r.symbol,
       exchangeId: r.exchange_id,
-      tickSize: r.tick_size === null ? null : String(r.tick_size),
+      priceBands: r.price_bands,
       lotSize: r.lot_size === null ? null : String(r.lot_size),
     });
   }

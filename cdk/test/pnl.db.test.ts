@@ -55,8 +55,8 @@ describeDb('PnL derived from the ledger, against Postgres', () => {
     await client.query(`INSERT INTO sm.security (security_id, symbol, type) VALUES (1, 'X', 0)`);
     await client.query(`INSERT INTO sm.listing (listing_id, exchange_id, security_id, exchange_security_symbol)
       VALUES (500, 1, 1, 'KX-YES')`);
-    await client.query(`INSERT INTO sm.listing_spec (listing_id, tick_size, lot_size) VALUES (500, $1, $2)`,
-      [CENT, UNIT]);
+    await client.query(`INSERT INTO sm.listing_spec (listing_id, price_bands, lot_size) VALUES (500, $1, $2)`,
+      [JSON.stringify([{ start: 0, end: 1_000_000_000, step: CENT }]), UNIT]);
     await client.query(`INSERT INTO strategy.strategy (name) VALUES ('arb')`);
   });
 
@@ -106,7 +106,8 @@ describeDb('PnL derived from the ledger, against Postgres', () => {
       trading: cents(-5), openingUnrealized: cents(100),
     });
     const row = summary.listings[0];
-    expect([row.symbol, row.tickSize, row.lotSize]).toEqual(['KX-YES', String(CENT), String(UNIT)]);
+    expect([row.symbol, row.priceBands, row.lotSize])
+      .toEqual(['KX-YES', [{ start: 0, end: 1_000_000_000, step: CENT }], String(UNIT)]);
     expect([row.netQuantity, row.markPrice, row.opening.netQuantity, row.opening.markPrice])
       .toEqual([String(6 * UNIT), cents(55), String(10 * UNIT), cents(50)]);
     expect(summary.counts.fills).toBe(1);

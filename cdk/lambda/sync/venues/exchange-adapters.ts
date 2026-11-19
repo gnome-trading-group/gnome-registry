@@ -1,4 +1,4 @@
-import { ExchangeAdapter } from './types';
+import { ExchangeAdapter } from './exchange-types';
 import { HyperliquidAdapter } from './hyperliquid';
 import { LighterAdapter } from './lighter';
 

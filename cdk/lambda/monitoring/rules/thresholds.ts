@@ -48,3 +48,6 @@ export const JOURNAL_BACKLOG_AGE_MS = 5 * 60_000;
 // against another host is mostly clock error. The status is rewritten every 10 s, so a minute old is a stopped writer.
 export const CLOCK_ERROR_BOUND_MAX_NANOS = 1_000_000;
 export const CLOCK_STATUS_MAX_AGE_MS = 60_000;
+// The spec sync gives a new listing its spec within a minute; a listing still without one this much later can't be
+// traded (the OMS refuses orders on a listing with no spec).
+export const SPEC_MISSING_AFTER_MS = 5 * 60_000;

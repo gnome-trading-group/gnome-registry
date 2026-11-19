@@ -49,13 +49,17 @@ synth step, so run `npm test` yourself before handing off.
 - `cdk/lambda/db-init/migrations/NNN_*.sql` - schema migrations, applied in filename order
 - `cdk/lambda/alerts/` - ingest, router, store, sinks (Slack, incident.io), `alert-types.ts` (type catalog + severity)
 - `cdk/lambda/monitoring/rules/` - findings shared by the controller overview and the alert tick
-- `cdk/lambda/sync/` - scheduled jobs: exchange sync (`exchanges/` adapters), venue poller (`venues/`), mark poller,
-  incentive sync (readers in `venues/`), settlement sweeper, strategy-session monitor, sample partitions
+- `cdk/lambda/sync/` - scheduled jobs: exchange sync, venue poller, mark poller, incentive sync, spec sync, settlement
+  sweeper, strategy-session monitor, sample partitions. What each job reads from a venue lives in that venue's file in
+  `sync/venues/` (`kalshi.ts`, `polymarket-intl.ts`, `polymarket-us.ts`, `hyperliquid.ts`, `lighter.ts`); exchange
+  sync's adapter interface and registry are `exchange-types.ts` and `exchange-adapters.ts` there
 - `cdk/lambda/fees/`, `cdk/lambda/simulation/` - fee calculator/timeline and simulation-parameter resolution
 - `cdk/test/` - jest tests; `*.db.test.ts` need Postgres; `fixtures/` holds venue payloads and test cases
 - `src/main/java/group/gnometrading/` - Java client: `RegistryConnection`, `SecurityMaster`, `risk/`, `account/`,
   `sm/` (incl. `sm/fee/`), `md/`
 - `src/test/resources/fee-vectors.json` - fee cases shared by `fee-calculator.test.ts` and `FeeVectorsTest.java`
+- `src/test/resources/price-grid-vectors.json` - price-grid cases shared by `PriceGridTest.java`, `spec-sync.test.ts`
+  (Hyperliquid grids) and gnomepy's `tests/fixtures/price_grid_vectors.json`; keep them identical
 - `docs/runbooks/` - alert runbooks (read by the router build and by on-call)
 
 ## Conventions and invariants
@@ -109,7 +113,7 @@ synth step, so run `npm test` yourself before handing off.
 - Deploys: push to `main` runs the Maven release (bump + publish jar + tag); the tag push force-updates the `release`
   branch, which `RegistryPipeline` (in the InfraPipelines account) builds: synth, `Dev` stage, manual `ApproveProd`,
   `Prod` stage. Dev and prod are separate AWS accounts. Stacks per stage: `Dev-`/`Prod-` + `DatabaseStack`,
-  `ApiStack`, `ExchangeSyncStack`, `StrategySessionMonitorStack`, `SettlementSweeperStack`, `VenuePollerStack`,
+  `ApiStack`, `ExchangeSyncStack`, `SpecSyncStack`, `StrategySessionMonitorStack`, `SettlementSweeperStack`, `VenuePollerStack`,
   `MarkPollerStack`, `IncentiveSyncStack`, `SamplesApiStack`, `MonitoringStack`, `AlertingStack`. New migrations apply
   during the `DatabaseStack` deploy of each stage (see Migrations).
 - What runs:
@@ -190,10 +194,21 @@ synth step, so run `npm test` yourself before handing off.
   - DatabaseStack: RDS Postgres 16 (`gnome` db) in isolated subnets, plus the migration Lambda and a query Lambda
     (`{"query": "..."}`, returns rows) for read-only inspection.
   - ExchangeSyncStack: security-master sync every 15 minutes (Hyperliquid, Lighter adapters); in prod it reports to `#gnome-security-master`.
-    Besides creating securities, listings and specs, it writes each listing's `active` flag (the venue's delisted or
+    Besides creating securities and listings (never specs: the spec sync writes those), it writes each listing's `active` flag (the venue's delisted or
     status flag) and `volume_24h` (the venue's 24h notional, which market-data `listing_filter` rules rank by), and
     retires an active listing the venue stopped returning, only of a security type the fetch returned and only where
     the fetch covered it (a Hyperliquid sub-DEX that failed to load covers nothing).
+  - SpecSyncStack: the only writer of listing specs (`sm.listing_spec`; migration 084: each spec's prices are
+    `price_bands`, contiguous `{start, end, step}` bands from 0, the Java client's `PriceGrid`). Readers per venue in
+    `sync/venues/<venue>.ts` (Kalshi `price_ranges`, mirrored for `:no`; Polymarket Intl Gamma then the CLOB, never a
+    default; Polymarket US by slug; Hyperliquid's significant-figure decade grid, outcome contracts by rule; Lighter).
+    Mode `full` every 15 minutes checks every active listing against its venue; mode `missing` every minute gives
+    listings with no spec their first. A listing's first spec holds since the epoch; a
+    change is dated when seen. `POST /listing-specs/refresh` (shards; outside the VPC) puts a listing a venue announced
+    a new tick for on FIFO queue `listing-spec-refresh.fifo`, whose Lambda reads the venue and dates the change when
+    the shard saw it; one the venue never confirms goes to `listing-spec-refresh-dlq.fifo` (alarmed). After a listing's
+    first spec, the insert trigger refuses a spec that is neither dated (`effectiveFrom`) nor a `correction`. Running
+    sessions see new specs through `SecurityMaster.listingSpecRefresher`, which reads `listingIds` + `recordedAfter`.
   - VenuePollerStack: every 5 min, reads each venue account's balances/positions and posts treasury snapshots for
     reconciliation. On Kalshi it reads cash per exchange shard and keeps the account's shard rebalancing targets
     (`treasury.account_config.partition_targets`) set on Kalshi, with the read key (scopes `read` + `write::transfer`,
@@ -261,7 +276,8 @@ synth step, so run `npm test` yourself before handing off.
   `alertrouter`). Orchestrator logs, which this API's own `strategy-sessions/logs` route reads, are under `/gnome/orchestrator/*`.
 - Alarms and alerts it raises:
   - `Registry-*` (MonitoringStack): API 5xx (Error), Lambda faults for ExchangeSync, SettlementSweeper, VenuePoller,
-    MarkPoller, IncentiveSync, StrategySessionMonitor, SamplePartitions (Error); samples API 5xx (Warning), RDS free storage < 5 GiB and CPU > 80% (Warning). No actions; they
+    MarkPoller, IncentiveSync, SpecSync, SpecRefresh, StrategySessionMonitor, SamplePartitions (Error); a spec refresh in
+    the dead-letter queue (Warning); samples API 5xx (Warning), RDS free storage < 5 GiB and CPU > 80% (Warning). No actions; they
     reach the router as `CLOUDWATCH_ALARM`. Runbook: `docs/runbooks/cloudwatch/Registry.md`.
   - `AlertingMeta-<RouterErrors|StoreErrors|IngestErrors|Dlq|TickNotRunning|Undelivered>-Critical`: alerting's own
     health; bypass the router (SNS to incident.io in prod, and email). Runbook: `docs/runbooks/cloudwatch/AlertingMeta.md`.

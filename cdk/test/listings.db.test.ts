@@ -45,6 +45,13 @@ describeDb('listings by 24h volume, against Postgres', () => {
     return JSON.parse(response.body).map((row: { listing_id: number }) => row.listing_id);
   }
 
+  it('lists the listings no spec has been recorded for yet', async () => {
+    await client.query(`INSERT INTO sm.listing_spec (listing_id, price_bands, lot_size)
+      VALUES (10, '[{"start":0,"end":null,"step":100000000}]', 10), (16, '[{"start":0,"end":1000000000,"step":10000000}]', 10000)`);
+    expect((await ids({ withoutSpec: 'true' })).sort()).toEqual([11, 12, 13, 14, 15]);
+    expect((await ids({ withoutSpec: 'true', exchangeId: '3', active: 'true' })).sort()).toEqual([11, 12]);
+  });
+
   it('ranks active listings of the given exchanges and security types by volume, largest first', async () => {
     expect(await ids({ exchangeIds: '3,4', securityTypes: '1', active: 'true', sortBy: 'volume_24h', sortOrder: 'desc' }))
       .toEqual([10, 13, 11, 14]);

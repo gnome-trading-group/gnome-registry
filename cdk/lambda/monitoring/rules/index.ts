@@ -8,6 +8,7 @@ import { settlement } from './settlement';
 import { treasury } from './treasury';
 import { fees, feeScheduleChanges } from './fees';
 import { lifecycle } from './lifecycle';
+import { listingSpecs } from './specs';
 
 export * from './types';
 
@@ -24,5 +25,6 @@ export async function runRules(client: PoolClient, now: Date): Promise<Finding[]
     ...await treasury(client, now),
     ...await fees(client, now),
     ...await feeScheduleChanges(client, now),
+    ...await listingSpecs(client, now),
   ];
 }

@@ -33,3 +33,16 @@ export async function registryFetch<T>(path: string, method: string, apiKey: str
   }
   return res.json() as Promise<T>;
 }
+
+const PAGE_SIZE = 5000;
+
+/** Every row a GET lists, page by page (the API pages by limit and offset). */
+export async function registryFetchAll<T>(path: string, apiKey: string): Promise<T[]> {
+  let items: T[] = [];
+  for (let offset = 0; ; offset += PAGE_SIZE) {
+    const separator = path.includes('?') ? '&' : '?';
+    const page = await registryFetch<T[]>(`${path}${separator}limit=${PAGE_SIZE}&offset=${offset}`, 'GET', apiKey);
+    items = items.concat(page);
+    if (page.length < PAGE_SIZE) return items;
+  }
+}

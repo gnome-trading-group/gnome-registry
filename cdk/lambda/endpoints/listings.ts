@@ -82,6 +82,8 @@ export class ListingHandler extends ResourceHandler {
       params?.exchangeSecuritySymbol && sql`l.exchange_security_symbol = ${params.exchangeSecuritySymbol}`,
       params?.search && params?.denormalize === 'true' && sql`l.exchange_security_symbol ILIKE ${pattern}`,
       params?.active !== undefined && sql`l.active = ${params.active === 'true'}`,
+      // Listings no spec has been recorded for yet: the spec sync gives each its first.
+      params?.withoutSpec === 'true' && sql`NOT EXISTS (SELECT 1 FROM sm.listing_spec s WHERE s.listing_id = l.listing_id)`,
     ])}`;
     // By volume, listings with none yet sort last either way, and ties keep a stable order for paging.
     if (params?.sortBy === 'volume_24h') {

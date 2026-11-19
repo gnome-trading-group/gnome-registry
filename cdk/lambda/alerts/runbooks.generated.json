@@ -446,6 +446,14 @@
       ],
       "url": "https://github.com/gnome-trading-group/gnome-registry/blob/main/docs/runbooks/alerts/LISTING_HALT.md"
     },
+    "LISTING_SPEC_MISSING": {
+      "summary": "Active listings on an exchange have no listing spec, so the OMS refuses every order on them.",
+      "firstSteps": [
+        "Check the spec sync's latest runs in its Lambda log (`SpecSyncStack`, the `spec-sync-lambda` function).",
+        "Look at one of the example listings at its venue: does the venue still list the market?"
+      ],
+      "url": "https://github.com/gnome-trading-group/gnome-registry/blob/main/docs/runbooks/alerts/LISTING_SPEC_MISSING.md"
+    },
     "MARKET_DATA_BAD": {
       "summary": "A session's book for a listing has been flagged bad data for over a minute, so its OMS refuses new orders there.",
       "firstSteps": [

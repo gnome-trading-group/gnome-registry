@@ -47,8 +47,9 @@ const CORS_HEADERS = {
 
 export const UNKNOWN_ACTOR = 'unknown';
 
-// A value Postgres can't read as its column's type (?exchangeId=abc, a malformed timestamp, an id past int range).
-const BAD_INPUT_CODES = new Set(['22P02', '22007', '22008', '22003']);
+// A value Postgres can't read as its column's type (?exchangeId=abc, a malformed timestamp, an id past int range), or
+// one a trigger refuses as invalid (22023).
+const BAD_INPUT_CODES = new Set(['22P02', '22007', '22008', '22003', '22023']);
 
 /** A request the handler can't act on; reported to the caller as a 400 rather than a server error. */
 export class ValidationError extends Error {}

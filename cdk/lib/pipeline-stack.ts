@@ -12,6 +12,7 @@ import { SamplesApiStack } from "./stacks/samples-api-stack";
 import { VenuePollerStack } from "./stacks/venue-poller-stack";
 import { MarkPollerStack } from "./stacks/mark-poller-stack";
 import { IncentiveSyncStack } from "./stacks/incentive-sync-stack";
+import { SpecSyncStack } from "./stacks/spec-sync-stack";
 import { MonitoringStack } from "./stacks/monitoring-stack";
 import { AlertingStack } from "./stacks/alerting-stack";
 import { GITHUB_REPO, GITHUB_BRANCH, CONFIGS, RegistryConfig } from "./config";
@@ -74,6 +75,11 @@ class AppStage extends cdk.Stage {
       apiKey: apiStack.apiKey,
     });
 
+    const specSyncStack = new SpecSyncStack(this, "SpecSyncStack", {
+      api: apiStack.api,
+      apiKey: apiStack.apiKey,
+    });
+
     new MonitoringStack(this, "MonitoringStack", {
       api: apiStack.api,
       syncLambda: exchangeSyncStack.syncLambda,
@@ -81,6 +87,10 @@ class AppStage extends cdk.Stage {
       venuePollerLambda: venuePollerStack.pollerLambda,
       markPollerLambda: markPollerStack.pollerLambda,
       incentiveSyncLambda: incentiveSyncStack.syncLambda,
+      specSyncLambda: specSyncStack.syncLambda,
+      specRefreshLambda: specSyncStack.refreshLambda,
+      specRefreshQueue: specSyncStack.refreshQueue,
+      specRefreshDeadLetters: specSyncStack.refreshDeadLetters,
       sessionMonitorLambda: sessionMonitorStack.monitorLambda,
       samplesApi: samplesApiStack.api,
       samplePartitionsLambda: samplesApiStack.partitionsLambda,

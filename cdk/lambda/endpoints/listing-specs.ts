@@ -1,11 +1,12 @@
 import { APIGatewayProxyEvent, APIGatewayProxyEventQueryStringParameters } from 'aws-lambda';
-import { ResourceHandler, ValidationError } from './base';
+import { parseIdList, ResourceHandler, ValidationError } from './base';
 import { isoTimestamp } from './fees';
-import { NOW, Sql, sql, where } from './sql';
+import { validatePriceBands } from './price-bands';
+import { anyId, NOW, Sql, sql, where } from './sql';
 
 interface IListingSpec {
   listingId: number;
-  tickSize: number;
+  priceBands: unknown;
   lotSize: number;
   minNotional?: number;
   contractMultiplier?: number;
@@ -19,10 +20,21 @@ interface IListingSpec {
 // correction (same effective_from as the row it fixes) replaces that row for all time.
 export class ListingSpecHandler extends ResourceHandler {
   generateSelectQuery(params: APIGatewayProxyEventQueryStringParameters | null): Sql {
+    // Applied before picking each listing's spec in force, it would answer "the latest row recorded since", not "the
+    // spec in force of listings that changed since"; rows are what a refreshing session wants.
+    if (params?.recordedAfter && params.history !== 'true') {
+      throw new ValidationError('recordedAfter needs history=true');
+    }
     const filters = [
       params?.listingId && sql`listing_id = ${params.listingId}`,
+      params?.listingIds !== undefined && anyId('listing_id', parseIdList(params.listingIds)),
       params?.exchangeId && sql`listing_id IN (SELECT listing_id FROM sm.listing WHERE exchange_id = ${params.exchangeId})`,
-      params?.knownAsOf && sql`recorded_at <= ${isoTimestamp('knownAsOf', params.knownAsOf)}::timestamptz`,
+      // Specs of the listings that trade now: what the spec sync checks against the venue every pass.
+      params?.activeListings === 'true' && sql`listing_id IN (SELECT listing_id FROM sm.listing WHERE active)`,
+      // Pages by listing: an offset deep into an exchange's specs sorts every row before it.
+      params?.afterListingId && sql`listing_id > ${params.afterListingId}`,
+      // What changed since a reader last looked: its sessions refresh the specs they cached.
+      params?.recordedAfter && sql`recorded_at > ${isoTimestamp('recordedAfter', params.recordedAfter)}::timestamptz`,
     ];
     if (params?.history === 'true') {
       return sql`
@@ -58,13 +70,14 @@ export class ListingSpecHandler extends ResourceHandler {
     `;
   }
 
-  // effectiveFrom dates a venue change; correction=true fixes the spec in force now. With neither, a listing's first
-  // spec holds since the epoch and later ones from now (the insert trigger).
+  // effectiveFrom dates a venue change; correction=true fixes the spec in force now. A listing's first spec may give
+  // neither and holds since the epoch; a later one must give one (the insert trigger refuses it otherwise).
   generateInsertQuery(body: string): Sql {
     const spec = JSON.parse(body) as IListingSpec;
     if (spec.effectiveFrom != null && spec.correction) {
       throw new ValidationError('a spec takes effectiveFrom or correction, not both');
     }
+    const priceBands = validatePriceBands(spec.priceBands);
     const effectiveFrom = spec.effectiveFrom != null
       ? sql`${isoTimestamp('effectiveFrom', spec.effectiveFrom)}::timestamptz`
       : spec.correction
@@ -72,9 +85,9 @@ export class ListingSpecHandler extends ResourceHandler {
             ORDER BY effective_from DESC, recorded_at DESC LIMIT 1)`
         : null;
     return sql`
-      INSERT INTO sm.listing_spec (listing_id, tick_size, lot_size, min_notional, contract_multiplier, min_size,
+      INSERT INTO sm.listing_spec (listing_id, price_bands, lot_size, min_notional, contract_multiplier, min_size,
         effective_from)
-      VALUES (${spec.listingId}, ${spec.tickSize}, ${spec.lotSize}, ${spec.minNotional ?? 0},
+      VALUES (${spec.listingId}, ${JSON.stringify(priceBands)}::jsonb, ${spec.lotSize}, ${spec.minNotional ?? 0},
         ${spec.contractMultiplier ?? 1000000000}, ${spec.minSize ?? 0}, ${effectiveFrom})
       RETURNING *`;
   }

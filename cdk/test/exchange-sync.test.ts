@@ -1,7 +1,7 @@
 import { listingPatches } from '../lambda/sync/exchange-sync';
-import { HyperliquidAdapter } from '../lambda/sync/exchanges/hyperliquid';
-import { LighterAdapter } from '../lambda/sync/exchanges/lighter';
-import { ExchangeFetch, ExchangeSecurityData, ListingResponse, SecurityType } from '../lambda/sync/exchanges/types';
+import { HyperliquidAdapter } from '../lambda/sync/venues/hyperliquid';
+import { LighterAdapter } from '../lambda/sync/venues/lighter';
+import { ExchangeFetch, ExchangeSecurityData, ListingResponse, SecurityType } from '../lambda/sync/venues/exchange-types';
 
 // The venues' public market data as they answered on 2026-11-11, trimmed to the fields read.
 const hyperliquid: Record<string, unknown> = {
@@ -14,8 +14,18 @@ const hyperliquid: Record<string, unknown> = {
   ],
   spotMetaAndAssetCtxs: [
     {
-      tokens: [{ name: 'USDC', szDecimals: 8 }, { name: 'PURR', szDecimals: 0 }, { name: 'HYPE', szDecimals: 2 }],
-      universe: [{ name: 'PURR/USDC', tokens: [1, 0] }, { name: '@107', tokens: [2, 0] }],
+      // Tokens go by their index, not their place: the venue's list has gaps (index 610 sits at place 3).
+      tokens: [
+        { name: 'USDC', szDecimals: 8, index: 0 },
+        { name: 'PURR', szDecimals: 0, index: 1 },
+        { name: 'HYPE', szDecimals: 2, index: 150 },
+        { name: 'GAP', szDecimals: 1, index: 610 },
+      ],
+      universe: [
+        { name: 'PURR/USDC', tokens: [1, 0] },
+        { name: '@107', tokens: [150, 0] },
+        { name: '@465', tokens: [610, 0] },
+      ],
     },
     [
       { coin: 'PURR/USDC', dayNtlVlm: '468067.69' },
@@ -56,6 +66,10 @@ describe('Hyperliquid adapter', () => {
     // A spot pair's context is found by its name, not its position: there are more contexts than pairs.
     expect(securities.get('PURR/USDC')).toMatchObject({ securityType: SecurityType.SPOT, volume24h: 468067.69 });
     expect(securities.get('@107')).toMatchObject({ securitySymbol: 'HYPE-USDC-SPOT', volume24h: 91000000 });
+    expect(securities.get('@465')).toMatchObject({ securitySymbol: 'GAP-USDC-SPOT' });
+    // Its grid and lot are its own token's: one size decimal, so seven price decimals.
+    expect(securities.get('@465')?.spec).toMatchObject({ lotSize: 100_000 });
+    expect(securities.get('@465')?.spec?.priceBands[0]).toEqual({ start: 0, end: 10_000_000, step: 100 });
   });
 
   it('covers every listing but those of a DEX that failed to load', async () => {
@@ -98,8 +112,7 @@ describe('listing patches', () => {
   const sec = (exchangeSecurityId: string, overrides: Partial<ExchangeSecurityData> = {}): ExchangeSecurityData => ({
     baseCurrency: 'X', quoteCurrency: 'USDC', settleCurrency: 'USDC', securitySymbol: `${exchangeSecurityId}-PERP`,
     securityType: SecurityType.PERPETUAL, contractType: 1, assetClass: 0, inverse: false, isQuanto: false,
-    exchangeSecurityId, exchangeSecuritySymbol: exchangeSecurityId, tickSize: 1, lotSize: 1, minNotional: 0,
-    contractMultiplier: 1, active: true, volume24h: 100, ...overrides,
+    exchangeSecurityId, exchangeSecuritySymbol: exchangeSecurityId, spec: null, active: true, volume24h: 100, ...overrides,
   });
   const listing = (listing_id: number, exchange_security_id: string, active: boolean, volume_24h: number | null):
     ListingResponse => ({

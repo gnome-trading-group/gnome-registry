@@ -4,11 +4,10 @@ import {
   ExchangeFetch,
   ExchangeResponse,
   ListingResponse,
-  ListingSpecResponse,
   SecurityResponse,
-} from './exchanges/types';
-import { getAdapter } from './exchanges/index';
-import { registryFetch, resolveApiKey } from './registry-client';
+} from './venues/exchange-types';
+import { getAdapter } from './venues/exchange-adapters';
+import { registryFetch, registryFetchAll, resolveApiKey } from './registry-client';
 
 const smClient = new SecretsManagerClient({});
 let cachedSlackToken: string | undefined;
@@ -23,23 +22,7 @@ async function resolveSlackToken(): Promise<string | undefined> {
   return cachedSlackToken;
 }
 
-const PAGE_SIZE = 5000;
 const PATCH_BATCH_SIZE = 200;
-
-async function registryFetchAll<T>(path: string, apiKey: string): Promise<T[]> {
-  const items: T[] = [];
-  let offset = 0;
-  while (true) {
-    const separator = path.includes('?') ? '&' : '?';
-    const page = await registryFetch<T[]>(
-      `${path}${separator}limit=${PAGE_SIZE}&offset=${offset}`, 'GET', apiKey
-    );
-    items.push(...page);
-    if (page.length < PAGE_SIZE) break;
-    offset += PAGE_SIZE;
-  }
-  return items;
-}
 
 async function batchExecute<T>(items: T[], batchSize: number, fn: (item: T) => Promise<void>): Promise<void> {
   for (let i = 0; i < items.length; i += batchSize) {
@@ -93,7 +76,7 @@ async function postSlackNotification(
   newListings: ListingNote[],
   deactivated: ListingNote[],
   reactivated: ListingNote[],
-  summary: { currencies: number; specCreated: number; specUpdated: number; volumes: number; errors: number },
+  summary: { currencies: number; volumes: number; errors: number },
 ): Promise<void> {
   const channel = process.env.SLACK_CHANNEL;
   if (!channel) return;
@@ -130,8 +113,6 @@ async function postSlackNotification(
 
   const parts: string[] = [];
   if (summary.currencies > 0) parts.push(`${summary.currencies} currencies`);
-  if (summary.specCreated > 0) parts.push(`${summary.specCreated} specs created`);
-  if (summary.specUpdated > 0) parts.push(`${summary.specUpdated} specs updated`);
   if (summary.volumes > 0) parts.push(`${summary.volumes} volumes`);
   if (summary.errors > 0) parts.push(`${summary.errors} errors`);
   if (parts.length > 0) {
@@ -164,14 +145,9 @@ export const handler = async () => {
     .map(e => e.exchange_id);
 
   const listings: (ListingResponse & { security_type: number })[] = [];
-  const existingSpecs: ListingSpecResponse[] = [];
   for (const id of adapterExchangeIds) {
-    const [l, s] = await Promise.all([
-      registryFetchAll<ListingResponse & { security_type: number }>(`/listings?exchangeId=${id}&denormalize=true`, apiKey),
-      registryFetchAll<ListingSpecResponse>(`/listing-specs?exchangeId=${id}`, apiKey),
-    ]);
-    listings.push(...l);
-    existingSpecs.push(...s);
+    listings.push(...await registryFetchAll<ListingResponse & { security_type: number }>(
+      `/listings?exchangeId=${id}&denormalize=true`, apiKey));
   }
   const securityTypeByListing = new Map<number, number>(listings.map(l => [l.listing_id, Number(l.security_type)]));
 
@@ -180,7 +156,6 @@ export const handler = async () => {
   const listingByKey = new Map<string, ListingResponse>(
     listings.map(l => [`${l.exchange_id}:${l.exchange_security_id}`, l])
   );
-  const specByListingId = new Map<number, ListingSpecResponse>(existingSpecs.map(s => [s.listing_id, s]));
   const exchangeNameById = new Map<number, string>(exchanges.map(e => [e.exchange_id, e.exchange_name]));
 
   const byExchange: Array<{ exchangeId: number; fetched: ExchangeFetch; data: ExchangeFetch['securities'] }> = [];
@@ -201,10 +176,7 @@ export const handler = async () => {
   let currencyCreated = 0;
   let securityCreated = 0;
   let listingCreated = 0;
-  let specCreated = 0;
-  let specUpdated = 0;
   let volumesWritten = 0;
-  let skipped = 0;
   let errors = 0;
   const newSecuritySymbols: string[] = [];
   const newListings: ListingNote[] = [];
@@ -299,40 +271,7 @@ export const handler = async () => {
     });
   }
 
-  // Phase 4: Listing specs (prediction market contracts are handled by the classifier Lambda)
-  for (const { exchangeId, data } of byExchange) {
-    await batchExecute(data, 10, async (sec) => {
-
-      const key = `${exchangeId}:${sec.exchangeSecurityId}`;
-      const listing = listingByKey.get(key);
-      if (!listing) return;
-      const existing = specByListingId.get(listing.listing_id);
-      const changed = !existing
-        || Number(existing.tick_size) !== sec.tickSize
-        || Number(existing.lot_size) !== sec.lotSize
-        || Number(existing.min_notional) !== sec.minNotional
-        || Number(existing.contract_multiplier) !== sec.contractMultiplier;
-      if (!changed) {
-        skipped++;
-        return;
-      }
-      try {
-        await registryFetch('/listing-specs', 'POST', apiKey, {
-          listingId: listing.listing_id,
-          tickSize: sec.tickSize,
-          lotSize: sec.lotSize,
-          minNotional: sec.minNotional,
-          contractMultiplier: sec.contractMultiplier,
-        });
-        if (existing) { specUpdated++; } else { specCreated++; }
-      } catch (err) {
-        console.error(`Failed to record spec for listingId=${listing.listing_id}:`, err);
-        errors++;
-      }
-    });
-  }
-
-  // Phase 5: Existing listings' active flag and 24h volume (new listings were created with both)
+  // Phase 4: Existing listings' active flag and 24h volume (new listings were created with both)
   for (const { exchangeId, fetched } of byExchange) {
     const existing = listings.filter(l => l.exchange_id === exchangeId);
     const patches = listingPatches(fetched, existing, securityTypeByListing);
@@ -358,13 +297,13 @@ export const handler = async () => {
 
   console.log(
     `Exchange sync complete — currencies=${currencyCreated} securities=${securityCreated} ` +
-    `listings=${listingCreated} specs.created=${specCreated} specs.updated=${specUpdated} ` +
+    `listings=${listingCreated} ` +
     `volumes=${volumesWritten} deactivated=${deactivated.length} reactivated=${reactivated.length} ` +
-    `skipped=${skipped} errors=${errors}`
+    `errors=${errors}`
   );
 
   if (newSecuritySymbols.length > 0 || newListings.length > 0 || deactivated.length > 0 || reactivated.length > 0) {
     await postSlackNotification(newSecuritySymbols, newListings, deactivated, reactivated,
-      { currencies: currencyCreated, specCreated, specUpdated, volumes: volumesWritten, errors });
+      { currencies: currencyCreated, volumes: volumesWritten, errors });
   }
 };

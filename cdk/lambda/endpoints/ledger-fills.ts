@@ -30,7 +30,7 @@ const orderOfFill = (session: string) => `LEFT JOIN LATERAL (
 const ORDER_OF_FILL = orderOfFill(`CASE f.source WHEN 'VENUE' THEN f.session_id WHEN 'RECOVERY' THEN f.origin_session_id END`);
 
 const selectFills = (orderJoin: string) => `
-  SELECT f.*, l.exchange_security_symbol AS symbol, l.exchange_id, spec.tick_size, spec.lot_size,
+  SELECT f.*, l.exchange_security_symbol AS symbol, l.exchange_id, spec.price_bands, spec.lot_size,
     mk.bid AS mark_bid, mk.ask AS mark_ask, mk.last_trade AS mark_last_trade,
     ord.role AS order_role, ord.episode_id AS order_episode_id
   FROM ledger.fill f

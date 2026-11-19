@@ -60,8 +60,9 @@ export function listingColumns(alias: string): string {
   return `
     LEFT JOIN sm.listing l ON l.listing_id = ${alias}.listing_id
     LEFT JOIN LATERAL (
-      SELECT tick_size, lot_size FROM sm.listing_spec s WHERE s.listing_id = ${alias}.listing_id
-      ORDER BY recorded_at DESC LIMIT 1
+      SELECT price_bands, lot_size FROM sm.listing_spec s
+      WHERE s.listing_id = ${alias}.listing_id AND s.effective_from <= NOW()
+      ORDER BY effective_from DESC, recorded_at DESC LIMIT 1
     ) spec ON TRUE`;
 }
 

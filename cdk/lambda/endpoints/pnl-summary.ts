@@ -51,7 +51,7 @@ function listingFields(info: ListingInfo | undefined, listingId: number) {
     listingId,
     symbol: info?.symbol ?? null,
     exchangeId: info?.exchangeId ?? null,
-    tickSize: info?.tickSize ?? null,
+    priceBands: info?.priceBands ?? null,
     lotSize: info?.lotSize ?? null,
   };
 }

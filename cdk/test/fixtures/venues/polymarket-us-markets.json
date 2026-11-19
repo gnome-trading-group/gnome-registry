@@ -1,0 +1,25 @@
+{
+ "markets": [
+  {
+   "slug": "aec-nfl-lac-ten-2025-11-02",
+   "orderPriceMinTickSize": 0.001,
+   "minimumTradeQty": 1,
+   "active": false,
+   "closed": true
+  },
+  {
+   "slug": "aec-nfl-car-gb-2025-11-02",
+   "orderPriceMinTickSize": 0.001,
+   "minimumTradeQty": 1,
+   "active": false,
+   "closed": true
+  },
+  {
+   "slug": "aec-nfl-min-det-2025-11-02",
+   "orderPriceMinTickSize": 0.001,
+   "minimumTradeQty": 1,
+   "active": false,
+   "closed": true
+  }
+ ]
+}

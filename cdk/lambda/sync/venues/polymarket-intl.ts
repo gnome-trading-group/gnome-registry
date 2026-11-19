@@ -5,6 +5,7 @@ import {
   PRICE_SCALE, scaleDecimal, SETTLEMENT_LOOKBACK_MS, SIZE_SCALE, VenueCredit, VenueReading, VenueSettlement,
 } from './types';
 import { IncentiveProgramReading } from './types';
+import { chunks, pause, PRICE_SCALE as SPEC_PRICE_SCALE, SIZE_SCALE as SPEC_SIZE_SCALE, units, VenueSpec } from './specs';
 
 // Polymarket Intl holds everything on chain, so an account is read with no credentials: its collateral is the
 // funder wallet's pUSD balance on Polygon, and the public data API lists the outcome tokens that wallet holds.
@@ -334,4 +335,94 @@ export async function readPolymarketIntlIncentivePrograms(): Promise<IncentivePr
     if (!cursor || cursor === LAST_CURSOR || markets.length === 0) return programs;
   }
   throw new Error(`Polymarket rewards ran past ${MAX_REWARD_PAGES} pages`);
+}
+
+// ----- listing specs -----
+
+const GAMMA_API = 'https://gamma-api.polymarket.com';
+// Every token trades in ten-thousandths of a share; resting orders need the market's orderMinSize shares. The CLOB's
+// $1 minimum applies only to marketable orders, which the OMS can't tell apart, so min_notional stays 0.
+const POLYMARKET_INTL_LOT_SIZE = 10_000;
+// Markets per Gamma request: about 80 characters each in the URL.
+const CONDITIONS_PER_REQUEST = 100;
+const PAUSE_BETWEEN_REQUESTS_MS = 250;
+
+/** The market and token a listing trades: `{condition_id}:{token_id}`. */
+export function polymarketIntlMarketOf(exchangeSecurityId: string): { conditionId: string; tokenId: string } {
+  const colon = exchangeSecurityId.indexOf(':');
+  return { conditionId: exchangeSecurityId.slice(0, colon), tokenId: exchangeSecurityId.slice(colon + 1) };
+}
+
+async function gammaMarkets(conditionIds: string[], closed: boolean): Promise<Record<string, any>[]> {
+  const query = conditionIds.map(id => `condition_ids=${encodeURIComponent(id)}`).join('&');
+  const res = await fetchWithRetry(`${GAMMA_API}/markets?${query}&limit=${conditionIds.length}${closed ? '&closed=true' : ''}`);
+  if (!res.ok) throw new Error(`Polymarket Gamma GET /markets failed: ${res.status} ${await res.text()}`);
+  return await res.json() as Record<string, any>[];
+}
+
+// Gamma sometimes leaves a market's tick or minimum out; the CLOB's market has both, and a default would be a guess.
+// Only a 404 means the CLOB doesn't know the market: any other failure throws, since reading it as "unknown" would
+// quietly leave the listing on whatever spec it had.
+async function clobMarket(conditionId: string): Promise<{ tick: number | null; minSize: number | null }> {
+  const res = await fetchWithRetry(`${CLOB_API}/markets/${encodeURIComponent(conditionId)}`);
+  if (res.status === 404) return { tick: null, minSize: null };
+  if (!res.ok) throw new Error(`Polymarket CLOB GET /markets/${conditionId} failed: ${res.status} ${await res.text()}`);
+  const market = await res.json() as Record<string, unknown>;
+  return { tick: units(market.minimum_tick_size, SPEC_PRICE_SCALE), minSize: units(market.minimum_order_size, SPEC_SIZE_SCALE) };
+}
+
+/**
+ * Specs for Polymarket Intl listings: one tick for the whole market (both tokens) at a time, which the venue makes finer
+ * near 0 and 1; read from Gamma, open markets first and then closed ones, with the CLOB filling in what Gamma omits,
+ * whole markets included (Gamma stops listing old closed markets the CLOB still knows).
+ */
+export async function readPolymarketIntlSpecs(exchangeSecurityIds: string[]): Promise<Map<string, VenueSpec>> {
+  const listingsByCondition = new Map<string, string[]>();
+  for (const id of exchangeSecurityIds) {
+    const { conditionId } = polymarketIntlMarketOf(id);
+    listingsByCondition.set(conditionId, [...(listingsByCondition.get(conditionId) ?? []), id]);
+  }
+  const found = new Map<string, { tick: number | null; minSize: number | null }>();
+  for (const closed of [false, true]) {
+    const wanted = [...listingsByCondition.keys()].filter(c => !found.has(c));
+    for (const batch of chunks(wanted, CONDITIONS_PER_REQUEST)) {
+      for (const market of await gammaMarkets(batch, closed)) {
+        found.set(String(market.conditionId), {
+          tick: units(market.orderPriceMinTickSize, SPEC_PRICE_SCALE),
+          minSize: units(market.orderMinSize, SPEC_SIZE_SCALE),
+        });
+      }
+      await pause(PAUSE_BETWEEN_REQUESTS_MS);
+    }
+  }
+  const specs = new Map<string, VenueSpec>();
+  for (const [conditionId, ids] of listingsByCondition) {
+    let terms = found.get(conditionId) ?? { tick: null, minSize: null };
+    if (terms.tick === null || terms.minSize === null) {
+      const clob = await clobMarket(conditionId);
+      terms = { tick: terms.tick ?? clob.tick, minSize: terms.minSize ?? clob.minSize };
+      await pause(PAUSE_BETWEEN_REQUESTS_MS);
+    }
+    if (terms.tick === null || terms.tick <= 0 || terms.minSize === null) {
+      console.warn(`Polymarket Intl market ${conditionId} has no tick or minimum size on Gamma or the CLOB`);
+      continue;
+    }
+    for (const id of ids) {
+      specs.set(id, {
+        priceBands: [{ start: 0, end: SPEC_PRICE_SCALE, step: terms.tick }],
+        lotSize: POLYMARKET_INTL_LOT_SIZE,
+        minNotional: 0,
+        minSize: terms.minSize,
+        contractMultiplier: SPEC_PRICE_SCALE,
+      });
+    }
+  }
+  return specs;
+}
+
+/** A token's tick on the CLOB now, which a shard's tick_size_change refresh checks against; null if it can't say. */
+export async function readPolymarketIntlTick(tokenId: string): Promise<number | null> {
+  const res = await fetchWithRetry(`${CLOB_API}/tick-size?token_id=${encodeURIComponent(tokenId)}`);
+  if (!res.ok) return null;
+  return units(((await res.json()) as Record<string, unknown>).minimum_tick_size, SPEC_PRICE_SCALE);
 }

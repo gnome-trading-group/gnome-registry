@@ -1,4 +1,4 @@
-import { isAutomaticActor, normalizeType, severityOf } from '../lambda/alerts/alert-types';
+import { isAutomaticActor, isForTheRecord, normalizeType, severityOf } from '../lambda/alerts/alert-types';
 import { sinksFor } from '../lambda/alerts/routes';
 import { deliveredEvent, deliverUnrecorded, fromAlarm, fromCostNotification } from '../lambda/alerts/alert-router';
 import { acknowledgedMessage, escape, firingMessage, resolvedMessage, sendToSlack } from '../lambda/alerts/sinks/slack';
@@ -31,12 +31,13 @@ describe('alert severity', () => {
     expect(down({ workingOrders: '0', linkedSessions: '1', cleanStop: 'true' })).toBe('WARNING');
   });
 
-  it('warns when a live gateway or production shard has no home-zone capacity, and only records a paper gateway', () => {
+  it('warns when a gateway or production shard has no home-zone capacity, paper too, never for the record', () => {
     const short = (mode: 'live' | 'paper' | null) =>
-      severityOf({ ...base, type: 'HOME_ZONE_NO_CAPACITY', mode, labels: { zoneId: 'use2-az2' } }, null, 'prod');
+      severityOf({ ...base, type: 'HOME_ZONE_NO_CAPACITY', mode, labels: { zoneId: 'use2-az2' } }, mode, 'prod');
     expect(short('live')).toBe('WARNING');
     expect(short(null)).toBe('WARNING');
-    expect(short('paper')).toBe('INFO');
+    expect(short('paper')).toBe('WARNING');
+    expect(isForTheRecord('ingest', short('paper'))).toBe(false);
   });
 
   it('caps paper, dev and custom alerts below paging', () => {

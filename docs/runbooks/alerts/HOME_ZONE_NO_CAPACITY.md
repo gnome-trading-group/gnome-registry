@@ -16,7 +16,7 @@ Research shards (Spot) have no zone and never raise this.
 ## Impact
 
 - A live gateway: sessions that trade the venue can't link, so no new orders reach it; the session launch that wanted it waits or fails. A gateway that is already running is not affected (its host exists): this only happens on a start.
-- A paper gateway: paper sessions on the venue can't link (INFO).
+- A paper gateway: paper sessions on the venue can't link (WARNING too, as one open alert while it lasts; paper alerts never page).
 - A production shard: the streams it would carry stay on the shards they are on (a move to the new shard waits) or stay unplaced (`LEASED_STREAM_UNPLACED`), so a live session may miss market data.
 
 ## Diagnose
