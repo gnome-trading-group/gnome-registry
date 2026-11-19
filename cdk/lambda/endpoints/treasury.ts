@@ -12,8 +12,9 @@ import { allocatePending, BreakdownInput } from './treasury-allocate';
 // short (Kalshi books it as a NO; Polymarket US holds it as margin, which the poller counts as spent), and every
 // venue credits a settled market before the sweeper books its SETTLEMENT, often before the classifier has even
 // recorded its value: until it does, the venue's own settlement price stands in for it, within the account's
-// settlement grace. The venue's side counts resolved Polymarket positions waiting to be redeemed as the cash they will
-// become.
+// settlement grace. Kalshi and Polymarket US settle the one netted position they hold, whose pairs they already paid
+// back, so a settled market there counts its pairs once. The venue's side counts resolved Polymarket positions waiting
+// to be redeemed as the cash they will become.
 //
 // Positions: what the venue holds on each market against the ledger's live positions on the account, summed across
 // strategies. A Kalshi market is one signed position (YES positive, NO negative), so its ledger side is YES - NO.
@@ -189,11 +190,23 @@ async function fingerprint(client: PoolClient, accountId: number): Promise<strin
   return `${row.fill}:${row.transfer}`;
 }
 
-// Each market's two sides, summed across the account's strategies, as of a moment (null = now): YES and NO on
-// Kalshi, long and short on Polymarket US. Both venues hold one signed position per market, so a pair pays its
+// A market's settlement value as the classifier recorded it, in terms of its positive side (YES, long).
+interface RecordedSettlement {
+  price: bigint;
+  settledAt: Date;
+}
+
+// One market's two sides, summed across the account's strategies.
+interface MarketHolding {
+  yes: bigint;
+  no: bigint;
+  settlement: RecordedSettlement | null;
+}
+
+// Each market's two sides as of a moment (null = now): YES and NO on Kalshi, long and short on Polymarket US, with
+// what the classifier recorded it settled at. Both venues hold one signed position per market, so a pair pays its
 // dollar back at once, and a short costs one.
-async function marketPairs(client: PoolClient, account: AccountRow, at: Date | null): Promise<bigint> {
-  const accountId = account.account_id;
+async function marketHoldings(client: PoolClient, account: AccountRow, at: Date | null): Promise<Map<string, MarketHolding>> {
   const rows = (await client.query(
     `WITH held AS (
        SELECT DISTINCT ON (f.strategy_id, f.listing_id) f.listing_id, f.net_quantity_after AS net
@@ -201,20 +214,50 @@ async function marketPairs(client: PoolClient, account: AccountRow, at: Date | n
        WHERE f.account_id = $1 AND f.mode = 'live' AND f.source <> 'GAP' AND ($2::timestamptz IS NULL OR f.recorded_at < $2)
        ORDER BY f.strategy_id, f.listing_id, f.fill_id DESC
      )
-     SELECT l.exchange_security_id, SUM(h.net) AS net FROM held h JOIN sm.listing l USING (listing_id)
-     GROUP BY l.exchange_security_id`,
-    [accountId, at])).rows;
-  const markets = new Map<string, { yes: bigint; no: bigint }>();
+     SELECT l.exchange_security_id, SUM(h.net) AS net, ec.settlement_price, ec.settled_at
+     FROM held h
+     JOIN sm.listing l USING (listing_id)
+     LEFT JOIN LATERAL (
+       SELECT settlement_price, settled_at FROM sm.event_contract
+       WHERE security_id = l.security_id AND settlement_price IS NOT NULL LIMIT 1
+     ) ec ON TRUE
+     GROUP BY l.exchange_security_id, ec.settlement_price, ec.settled_at`,
+    [account.account_id, at])).rows;
+  const markets = new Map<string, MarketHolding>();
+  // The classifier records each side at its own payout, so the NO side's is the dollar less the YES side's.
+  const recorded = new Map<string, { yes?: RecordedSettlement; no?: RecordedSettlement }>();
   for (const r of rows) {
     const { key, sign } = venueKeyOf(account.exchange_code, r.exchange_security_id ?? '');
-    const market = markets.get(key) ?? { yes: 0n, no: 0n };
+    const market = markets.get(key) ?? { yes: 0n, no: 0n, settlement: null };
     if (sign < 0n) market.no += toBigInt(r.net);
     else market.yes += toBigInt(r.net);
     markets.set(key, market);
+    if (r.settlement_price !== null) {
+      const sides = recorded.get(key) ?? {};
+      const price = toBigInt(r.settlement_price);
+      if (sign < 0n) sides.no = { price: PRICE_SCALE - price, settledAt: r.settled_at };
+      else sides.yes = { price, settledAt: r.settled_at };
+      recorded.set(key, sides);
+    }
   }
-  let paired = 0n;
-  for (const m of markets.values()) paired += notional(PRICE_SCALE, m.yes < m.no ? m.yes : m.no);
-  return paired;
+  for (const [key, { yes, no }] of recorded) {
+    if (yes && no && yes.price !== no.price) {
+      console.error(`${account.label} market ${key} settled at ${yes.price} on its YES side but ${no.price} on its NO`);
+    }
+    (markets.get(key) as MarketHolding).settlement = yes ?? no ?? null;
+  }
+  return markets;
+}
+
+function pairValue(m: MarketHolding): bigint {
+  return notional(PRICE_SCALE, m.yes < m.no ? m.yes : m.no);
+}
+
+// What a settled market pays: the venue settles the one position it holds, both sides netted, since it paid each
+// pair's dollar back when the pair formed. Paying each side at its own price would count those pairs twice.
+function netSettlementValue(m: MarketHolding, price: bigint): bigint {
+  const net = m.yes - m.no;
+  return net >= 0n ? notional(price, net) : notional(PRICE_SCALE - price, -net);
 }
 
 export interface CashExpectation {
@@ -240,7 +283,20 @@ export async function expectedCash(
     [account.account_id, since, BOOKED_SOURCES])).rows[0];
   let expected = toBigInt(flows.transfers) + toBigInt(flows.fills);
   if (SIGNED_POSITION_VENUES.includes(account.exchange_code)) {
-    expected += await marketPairs(client, account, null) - await marketPairs(client, account, since);
+    for (const m of (await marketHoldings(client, account, since)).values()) expected -= pairValue(m);
+    let unpaidWithinGrace = 0n;
+    for (const [key, m] of await marketHoldings(client, account, null)) {
+      expected += pairValue(m);
+      if (m.settlement !== null) {
+        const value = netSettlementValue(m, m.settlement.price);
+        expected += value;
+        if (now.getTime() - m.settlement.settledAt.getTime() < account.settlement_grace_ms) unpaidWithinGrace += value;
+        continue;
+      }
+      const venuePrice = venueSettled.get(key);
+      if (venuePrice !== undefined) expected += netSettlementValue(m, venuePrice);
+    }
+    return { expected, unpaidWithinGrace };
   }
   const settled = (await client.query(
     `SELECT p.net_quantity, ec.settlement_price, ec.settled_at

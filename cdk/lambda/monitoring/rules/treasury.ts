@@ -1,4 +1,5 @@
 import { PoolClient } from 'pg';
+import { abs, toBigInt } from '../../endpoints/ledger-math';
 import { accountTreasury, sweptPartitions } from '../../endpoints/treasury';
 import { RebalanceTargets, sameTargets } from '../../sync/venues/types';
 import { Finding, finding, money } from './types';
@@ -45,7 +46,8 @@ export async function treasury(client: PoolClient, now: Date): Promise<Finding[]
     const cash = recon.find(r => r.account_id === a.accountId);
     if (cash?.cash_status === 'BREAK') {
       on('critical', 'RECON_MISMATCH', 'cash', `${a.label} cash differs from the ledger`, {
-        detail: `The venue holds ${money(cash.cash_diff)} more than the ledger and transfers explain`,
+        detail: `The venue holds ${money(abs(toBigInt(cash.cash_diff)))} ${toBigInt(cash.cash_diff) < 0n ? 'less' : 'more'}`
+          + ' than the ledger and transfers explain',
         since: cash.ran_at.toISOString(),
       });
     }

@@ -295,6 +295,109 @@ describeDb('treasury, against Postgres', () => {
     expect((await client.query(`SELECT 1 FROM treasury.position_check WHERE venue_key = 'T'`)).rowCount).toBe(0);
   });
 
+  async function settleT(yesCents: number, settledAt: Date) {
+    await client.query(`INSERT INTO sm.event (event_id, title, exchange_id, native_event_id) VALUES (1, 'T?', 1, 'T')`);
+    await client.query(`INSERT INTO sm.event_contract (event_id, security_id, outcome_label, settlement_price, settled_at)
+      VALUES (1, 1, 'Yes', $1, $3), (1, 2, 'No', $2, $3)`,
+    [Math.round(yesCents * CENT), DOLLAR - Math.round(yesCents * CENT), settledAt]);
+  }
+
+  it('counts a settled Kalshi YES and NO pair once: the venue paid its dollar back and settles only the rest', async () => {
+    const kalshi = await account(1, 'steady-heron-01');
+    await open(kalshi, 100);
+    await live('a', [500, 501]);
+    // 10 YES at 40c and 4 NO at 55c: the venue pays the 4 pairs back and holds 6 YES, so $97.80.
+    await trade('a', 500, 0, 10, 40, 10);
+    await trade('a', 501, 0, 4, 55, 4);
+    expect((await snapshot(kalshi, 9780, new Date(), { positions: [{ venueKey: 'T', quantity: 6 * UNIT }] })).cashStatus)
+      .toBe('OK');
+    // YES wins: the 6 YES pay $6, not the $10 the 10 YES and 4 NO would at their own prices.
+    await settleT(100, new Date());
+    expect((await snapshot(kalshi, 10380, new Date())).cashStatus).toBe('OK');
+  });
+
+  it('counts a settled Kalshi pair once when NO wins', async () => {
+    const kalshi = await account(1, 'steady-heron-01');
+    await open(kalshi, 100);
+    await live('a', [500, 501]);
+    await trade('a', 500, 0, 10, 40, 10);
+    await trade('a', 501, 0, 4, 55, 4);
+    // The 6 YES the venue holds pay nothing; the 4 NO paid their dollar back when they paired.
+    await settleT(0, new Date());
+    expect((await snapshot(kalshi, 9780, new Date())).cashStatus).toBe('OK');
+  });
+
+  it('settles a Kalshi short the venue paid before the classifier records it at its netted NO', async () => {
+    const kalshi = await account(1, 'steady-heron-01');
+    await open(kalshi, 100);
+    await live('a', [500, 501]);
+    // As in the pairs test: 10 YES and 10 NO, then 15 YES sold, leave the venue holding 15 NO and $91.50.
+    await trade('a', 500, 0, 10, 40, 10);
+    await trade('a', 501, 0, 10, 55, 10);
+    await trade('a', 500, 1, 15, 40, -5);
+    // NO wins and the venue pays the 15 NO it held: $106.50.
+    const now = new Date();
+    const result = await snapshot(kalshi, 10650, now, {
+      positions: [], settlements: [{ venueKey: 'T', settledAt: new Date(now.getTime() - MINUTE).toISOString(), price: '0' }],
+    });
+    expect(result.cashStatus).toBe('OK');
+  });
+
+  it('expects only a settled pair\'s netted payout while the venue hasn\'t paid it', async () => {
+    const kalshi = await account(1, 'steady-heron-01');
+    await open(kalshi, 100);
+    await live('a', [500, 501]);
+    await trade('a', 500, 0, 10, 40, 10);
+    await trade('a', 501, 0, 4, 55, 4);
+    const settledAt = new Date();
+    await settleT(100, settledAt);
+    // $6 unpaid is the venue not having paid yet, within the grace; past it, a break.
+    const read = async (minutes: number) =>
+      (await snapshot(kalshi, 9780, new Date(settledAt.getTime() + minutes * MINUTE))).cashStatus;
+    expect(await read(1)).toBe('PENDING');
+    expect(await read(7)).toBe('PENDING');
+    expect(await read(121)).toBe('BREAK');
+  });
+
+  it('a settled Polymarket US market held on both sides reconciles before, during and after the sweep', async () => {
+    await client.query(`INSERT INTO sm.exchange (exchange_id, exchange_name, region, exchange_code)
+      VALUES (3, 'Polymarket US', 'us-east-1', 'POLYMARKET_US')`);
+    await client.query(`INSERT INTO sm.security (security_id, symbol, type, contract_type)
+      VALUES (5, 'LYNX', 4, 7), (6, 'TSA', 4, 7)`);
+    await client.query(`INSERT INTO sm.listing (listing_id, exchange_id, security_id, exchange_security_id)
+      VALUES (700, 3, 5, 'aec-dota2-lynx-tsa-2026-11-19:long'), (701, 3, 6, 'aec-dota2-lynx-tsa-2026-11-19:short')`);
+    const us = await account(3, 'brisk-badger-01');
+    await open(us, 100);
+    await live('u', [700, 701]);
+    // 16.18 long at 35c and 35.64 short at 64c: the venue pays the 16.18 pairs back and holds 19.46 short.
+    await trade('u', 700, 0, 16.18, 35, 16.18);
+    await trade('u', 701, 0, 35.64, 64, 35.64);
+    const venueKey = 'aec-dota2-lynx-tsa-2026-11-19';
+    const held = [{ venueKey, quantity: -19.46 * UNIT }];
+    let t = Date.now();
+    const read = async (cents: number, extra: Partial<SnapshotInput>) => {
+      t += 6 * MINUTE;
+      return (await snapshot(us, cents, new Date(t), extra)).cashStatus;
+    };
+    expect(await read(8770.74, { positions: held })).toBe('OK');
+
+    // The short side wins and the venue pays the 19.46 it held, $107.1674, before the classifier records it.
+    const settlements = [{ venueKey, settledAt: new Date(t).toISOString(), price: '0' }];
+    expect(await read(10716.74, { positions: [], settlements })).toBe('OK');
+    expect(await read(10716.74, { positions: [], settlements })).toBe('OK');
+
+    await client.query(`INSERT INTO sm.event (event_id, title, exchange_id, native_event_id) VALUES (2, 'Lynx?', 3, 'lynx')`);
+    await client.query(`INSERT INTO sm.event_contract (event_id, security_id, outcome_label, settlement_price, settled_at)
+      VALUES (2, 5, 'Lynx', 0, $2), (2, 6, 'TSA', $1, $2)`, [DOLLAR, new Date(t)]);
+    expect(await read(10716.74, { positions: [] })).toBe('OK');
+
+    // The sweeper books one side, then the other.
+    await trade('u', 700, 1, 16.18, 0, 0);
+    expect(await read(10716.74, { positions: [] })).toBe('OK');
+    await trade('u', 701, 1, 35.64, 100, 0);
+    expect(await read(10716.74, { positions: [] })).toBe('OK');
+  });
+
   it('expects a redeemed Polymarket Intl winner\'s pUSD, and no tokens, before the classifier records it', async () => {
     const pm = await account(2, 'quiet-falcon-01');
     await open(pm, 100);
