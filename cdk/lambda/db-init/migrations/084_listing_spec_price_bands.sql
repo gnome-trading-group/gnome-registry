@@ -4,6 +4,14 @@
 -- or null for none. A listing with one tick is one band. The listing-specs endpoint validates the shape.
 ALTER TABLE sm.listing_spec ADD COLUMN price_bands JSONB;
 
+-- Rewriting every row with the indexes in place inserts each new row version into them in the join's order: a random
+-- read per row once the indexes outgrow the buffer cache, long past the migration Lambda's 15 minutes. Without them the
+-- update only appends, and each index is then built once from sorted input.
+SET LOCAL work_mem = '64MB';
+SET LOCAL maintenance_work_mem = '256MB';
+DROP INDEX sm.idx_listing_spec_lookup;
+ALTER TABLE sm.listing_spec DROP CONSTRAINT listing_spec_pkey;
+
 UPDATE sm.listing_spec spec
 SET price_bands = jsonb_build_array(jsonb_build_object(
       'start', 0,
@@ -12,6 +20,9 @@ SET price_bands = jsonb_build_array(jsonb_build_object(
 FROM sm.listing listing
 JOIN sm.security security USING (security_id)
 WHERE listing.listing_id = spec.listing_id;
+
+ALTER TABLE sm.listing_spec ADD CONSTRAINT listing_spec_pkey PRIMARY KEY (id);
+CREATE INDEX idx_listing_spec_lookup ON sm.listing_spec (listing_id, effective_from DESC, recorded_at DESC);
 
 ALTER TABLE sm.listing_spec ALTER COLUMN price_bands SET NOT NULL;
 ALTER TABLE sm.listing_spec ADD CONSTRAINT chk_listing_spec_price_bands
