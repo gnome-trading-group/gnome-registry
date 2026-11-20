@@ -64,6 +64,28 @@ export class ListingSpecHandler extends ResourceHandler {
       `;
     }
     const at = params?.at ? sql`${isoTimestamp('at', params.at)}::timestamptz` : NOW;
+    // Filtered by listing (its exchange, whether it trades), the read goes a page of listings at a time, each listing's
+    // spec in force found by its index: filtering the specs by those listings first read every active listing on
+    // every page.
+    if (params?.exchangeId || params?.activeListings === 'true') {
+      return sql`
+        SELECT spec.*
+        FROM sm.listing l
+        CROSS JOIN LATERAL (
+          SELECT * FROM sm.listing_spec s
+          WHERE s.listing_id = l.listing_id AND s.effective_from <= ${at}
+          ORDER BY s.effective_from DESC, s.recorded_at DESC
+          LIMIT 1
+        ) spec${where([
+          params?.listingId && sql`l.listing_id = ${params.listingId}`,
+          params?.listingIds !== undefined && anyId('l.listing_id', parseIdList(params.listingIds)),
+          params?.exchangeId && sql`l.exchange_id = ${params.exchangeId}`,
+          params?.activeListings === 'true' && sql`l.active`,
+          params?.afterListingId && sql`l.listing_id > ${params.afterListingId}`,
+        ])}
+        ORDER BY l.listing_id
+      `;
+    }
     return sql`
       SELECT DISTINCT ON (listing_id) *
       FROM sm.listing_spec${where([...filters, sql`effective_from <= ${at}`])}

@@ -167,6 +167,19 @@ describeDb('Fee schedules and point-in-time listing specs, against Postgres', ()
       expect(after.map((r: any) => r.listing_id)).toEqual([501]);
     });
 
+    it("picks each listing's spec in force when filtered by exchange, as unfiltered", async () => {
+      await specs.createOne(spec(10));
+      await specs.createOne(JSON.stringify({ listingId: 500, priceBands: bands(5), lotSize: 1, effectiveFrom: '2026-06-01T00:00:00Z' }));
+      await specs.createOne(JSON.stringify({ listingId: 500, priceBands: bands(2), lotSize: 1, effectiveFrom: '2026-06-01T00:00:00Z' }));
+      await specs.createOne(JSON.stringify({ listingId: 500, priceBands: bands(1), lotSize: 1, effectiveFrom: '2099-01-01T00:00:00Z' }));
+      const filtered = JSON.parse((await specs.get({ exchangeId: '1', activeListings: 'true' })).body);
+      const unfiltered = JSON.parse((await specs.get({ listingId: '500' })).body);
+      expect(filtered.map(stepOf)).toEqual([2]);
+      expect(filtered).toEqual(unfiltered);
+      const earlier = JSON.parse((await specs.get({ exchangeId: '1', at: '2026-01-01T00:00:00Z' })).body);
+      expect(earlier.map(stepOf)).toEqual([10]);
+    });
+
     it.each([
       ['a binary contract whose grid ends below $1', 500, [{ start: 0, end: 900_000_000, step: 10_000_000 }]],
       ['a binary contract whose grid is open', 500, [{ start: 0, end: null, step: 10_000_000 }]],
