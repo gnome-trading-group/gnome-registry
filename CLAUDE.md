@@ -114,7 +114,7 @@ synth step, so run `npm test` yourself before handing off.
   branch, which `RegistryPipeline` (in the InfraPipelines account) builds: synth, `Dev` stage, manual `ApproveProd`,
   `Prod` stage. Dev and prod are separate AWS accounts. Stacks per stage: `Dev-`/`Prod-` + `DatabaseStack`,
   `ApiStack`, `ExchangeSyncStack`, `SpecSyncStack`, `StrategySessionMonitorStack`, `SettlementSweeperStack`, `VenuePollerStack`,
-  `MarkPollerStack`, `IncentiveSyncStack`, `SamplesApiStack`, `MonitoringStack`, `AlertingStack`. New migrations apply
+  `MarkPollerStack`, `IncentiveSyncStack`, `CacheStack`, `SamplesApiStack`, `MonitoringStack`, `AlertingStack`. New migrations apply
   during the `DatabaseStack` deploy of each stage (see Migrations).
 - What runs:
   - ApiStack: the Registry API (stage `api`), one Lambda per resource in the VPC; the strategy-session launcher
@@ -202,13 +202,27 @@ synth step, so run `npm test` yourself before handing off.
     `price_bands`, contiguous `{start, end, step}` bands from 0, the Java client's `PriceGrid`). Readers per venue in
     `sync/venues/<venue>.ts` (Kalshi `price_ranges`, mirrored for `:no`; Polymarket Intl Gamma then the CLOB, never a
     default; Polymarket US by slug; Hyperliquid's significant-figure decade grid, outcome contracts by rule; Lighter).
-    Mode `full` every 15 minutes checks every active listing against its venue; mode `missing` every minute gives
-    listings with no spec their first. A listing's first spec holds since the epoch; a
-    change is dated when seen. `POST /listing-specs/refresh` (shards; outside the VPC) puts a listing a venue announced
+    Modes, per venue except `new`; no recurring pass reads every active listing from the database more than hourly:
+    - `new` every minute: first specs for active listings created in the last 2 hours (`createdAfter`).
+    - `sweep` every 15 minutes: reads the venue for every listing in the venue's snapshot plus those created since,
+      and reads and writes the registry only for listings whose venue spec moved.
+    - `full` hourly, staggered: every active listing (keyset-paged, paced) against its venue; it rebuilds the
+      venue's snapshot.
+    - `missing` daily at 08:xx UTC: first specs for older listings still without one.
+    A snapshot (`specs/<EXCHANGE>.json.gz` in CacheStack's `gnome-registry-cache-<stage>`, `sync/metadata/`) holds,
+    per active listing, the hash of the spec its venue last gave. It is derived: a lost one costs a full pass. Each run
+    emits `Registry/MetadataSync` metrics (Kind, Mode, Venue: Ok, Listings, Moved, Written, Refused, Unknown). A
+    listing's first spec holds since the epoch; a change is dated when seen. `POST /listing-specs/refresh` (shards; outside the VPC) puts a listing a venue announced
     a new tick for on FIFO queue `listing-spec-refresh.fifo`, whose Lambda reads the venue and dates the change when
     the shard saw it; one the venue never confirms goes to `listing-spec-refresh-dlq.fifo` (alarmed). After a listing's
     first spec, the insert trigger refuses a spec that is neither dated (`effectiveFrom`) nor a `correction`. Running
     sessions see new specs through `SecurityMaster.listingSpecRefresher`, which reads `listingIds` + `recordedAfter`.
+  - Listings awaiting settlement (`sm.listing.awaiting_settlement`, migration 085): set by the listings endpoint when it
+    turns a listing off while its outcome (`sm.event_contract.settlement_price`) is unset, cleared when it turns one on
+    and by the event-contracts endpoint when it records the settlement value. The classifier's settle and reactivate
+    passes read only these through `idx_listing_awaiting_settlement`.
+  - CacheStack: bucket `gnome-registry-cache-<stage>`, what venue syncs last read from their venues (a prefix per kind,
+    e.g. `specs/`), so a sync reads the database only for changes. Versioned (old versions kept 7 days).
   - VenuePollerStack: every 5 min, reads each venue account's balances/positions and posts treasury snapshots for
     reconciliation. On Kalshi it reads cash per exchange shard and keeps the account's shard rebalancing targets
     (`treasury.account_config.partition_targets`) set on Kalshi, with the read key (scopes `read` + `write::transfer`,

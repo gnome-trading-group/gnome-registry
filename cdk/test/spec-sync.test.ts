@@ -6,8 +6,10 @@ import { readLighterSpecs } from '../lambda/sync/venues/lighter';
 import { SQSEvent } from 'aws-lambda';
 import { SPEC_SYNC_EXCHANGES } from '../lambda/endpoints/spec-refresh-queue';
 import {
-  NEW_LISTING_WINDOW_MS, planSpecs, postInChunks, READERS, refreshes, refreshListing, Registry, scheduled, SpecRow, syncVenue, Target,
+  NEW_LISTING_WINDOW_MS, planSpecs, postInChunks, READERS, refreshes, refreshListing, Registry, scheduled, SpecRow,
+  SpecSnapshot, SpecSnapshots, syncVenue, Target,
 } from '../lambda/sync/spec-sync';
+import { hashOf, SnapshotStore, Stored } from '../lambda/sync/metadata/snapshot';
 import { kalshiPriceBands, readKalshiSpecs } from '../lambda/sync/venues/kalshi';
 import { readPolymarketIntlSpecs } from '../lambda/sync/venues/polymarket-intl';
 import { readPolymarketUsSpecs } from '../lambda/sync/venues/polymarket-us';
@@ -24,6 +26,24 @@ const spec = (priceBands = LINEAR, extra: Partial<VenueSpec> = {}): VenueSpec =>
   ({ priceBands, lotSize: 10_000, minNotional: 0, minSize: 0, contractMultiplier: 1_000_000_000, ...extra });
 
 afterEach(() => jest.restoreAllMocks());
+
+/** Snapshots held in memory, one per venue, versioned so a save over a stale version fails as on S3. */
+function memorySnapshots(initial: Record<string, SpecSnapshot> = {}) {
+  const held = new Map<string, Stored<SpecSnapshot>>(
+    Object.entries(initial).map(([venue, value]) => [venue, { value: structuredClone(value), version: '1' }]));
+  let versions = 1;
+  const snapshots: SpecSnapshots = (venue): SnapshotStore<SpecSnapshot> => ({
+    load: async () => { const s = held.get(venue); return s ? structuredClone(s) : null; },
+    save: async (value, version) => {
+      if ((held.get(venue)?.version ?? null) !== version) return false;
+      held.set(venue, { value: structuredClone(value), version: String(++versions) });
+      return true;
+    },
+    replace: async (value) => { held.set(venue, { value: structuredClone(value), version: String(++versions) }); },
+  });
+  return { snapshots, held: (venue: string) => held.get(venue)?.value };
+}
+const noSnapshots = () => memorySnapshots().snapshots;
 
 describe('Kalshi specs', () => {
   const markets: Record<string, any>[] = fixture('kalshi-markets.json').markets;
@@ -220,7 +240,7 @@ describe('postInChunks', () => {
       sent.push(body);
       if (Array.isArray(body) || body.listingId === 2) throw new Error('refused');
     });
-    expect(result).toEqual({ written: 2, failed: 1 });
+    expect(result).toEqual({ written: 2, refused: [2] });
     expect(sent).toHaveLength(4);
   });
 });
@@ -232,7 +252,9 @@ describe('a refresh', () => {
     activeTargets: async () => [],
     unspeccedTargets: async () => [],
     target: async (_id, exchangeSecurityId) => (exists ? { listingId: 9, exchangeSecurityId, current } : null),
-    post: async (rows) => { posted.push(rows); return { written: rows.length, failed: 0 }; },
+    createdListings: async () => [],
+    currentSpecs: async () => new Map(),
+    post: async (rows) => { posted.push(rows); return { written: rows.length, refused: [] }; },
   });
   const exchangeIds = new Map([['POLYMARKET_INTL', 7]]);
   const fine = spec([{ start: 0, end: 1_000_000_000, step: 1_000_000 }]);
@@ -254,7 +276,7 @@ describe('a refresh', () => {
 
   it('is read again when the registry refuses the write', async () => {
     const readers = { POLYMARKET_INTL: async () => new Map([['0xa:1', fine]]) };
-    const refusing = { ...registry(spec()), post: async (rows: SpecRow[]) => ({ written: 0, failed: rows.length }) };
+    const refusing = { ...registry(spec()), post: async (rows: SpecRow[]) => ({ written: 0, refused: rows.map(r => r.listingId) }) };
     await expect(refreshListing(request, refusing, exchangeIds, readers)).rejects.toThrow('refused');
   });
 
@@ -290,11 +312,12 @@ describe('a pass', () => {
         { listingId: 1, exchangeSecurityId: 'M1', current: spec() },
         { listingId: 2, exchangeSecurityId: 'M2', current: null },
       ],
-      post: async (rows: SpecRow[]) => { posted.push(...rows); return { written: rows.length, failed: 0 }; },
+      post: async (rows: SpecRow[]) => { posted.push(...rows); return { written: rows.length, refused: [] }; },
     } as unknown as Registry;
-    expect(await syncVenue('KALSHI', 1, 'missing', registry, new Date(), { KALSHI: read })).toEqual({ venue: 'KALSHI', targets: 0 });
+    expect(await syncVenue('KALSHI', 1, 'missing', registry, new Date(), { KALSHI: read }, noSnapshots()))
+      .toEqual({ venue: 'KALSHI', targets: 0 });
     expect(read).not.toHaveBeenCalled();
-    expect(await syncVenue('KALSHI', 1, 'full', registry, new Date(), { KALSHI: read }))
+    expect(await syncVenue('KALSHI', 1, 'full', registry, new Date(), { KALSHI: read }, noSnapshots()))
       .toMatchObject({ venue: 'KALSHI', targets: 1, written: 1 });
     expect(read).toHaveBeenCalledWith(['M1'], { listedOnly: true });
     expect(posted.map(r => r.listingId)).toEqual([1]);
@@ -311,10 +334,10 @@ describe('a pass', () => {
         asked.push(created);
         return [{ listingId: 1, exchangeSecurityId: 'M1', current: null }];
       },
-      post: async (rows: SpecRow[]) => { posted.push(...rows); return { written: rows.length, failed: 0 }; },
+      post: async (rows: SpecRow[]) => { posted.push(...rows); return { written: rows.length, refused: [] }; },
     } as unknown as Registry;
-    await syncVenue('KALSHI', 1, 'new', registry, now, { KALSHI: read });
-    await syncVenue('KALSHI', 1, 'missing', registry, now, { KALSHI: read });
+    await syncVenue('KALSHI', 1, 'new', registry, now, { KALSHI: read }, noSnapshots());
+    await syncVenue('KALSHI', 1, 'missing', registry, now, { KALSHI: read }, noSnapshots());
     expect(asked).toEqual([{ after: windowStart }, { before: windowStart }]);
     expect(read).toHaveBeenCalledWith(['M1'], { listedOnly: false });
     expect(posted).toEqual([{ listingId: 1, ...spec() }, { listingId: 1, ...spec() }]);
@@ -326,15 +349,122 @@ describe('a pass', () => {
     const registry = {
       exchangeIds: async () => new Map([['KALSHI', 1], ['LIGHTER', 2]]),
       activeTargets: async () => [{ listingId: 1, exchangeSecurityId: 'M1', current: spec() }],
-      post: async () => ({ written: 0, failed: 0 }),
+      post: async () => ({ written: 0, refused: [] }),
     } as unknown as Registry;
-    await scheduled('full', registry, 'LIGHTER', { KALSHI: kalshi, LIGHTER: lighter });
+    await scheduled('full', registry, noSnapshots(), 'LIGHTER', { KALSHI: kalshi, LIGHTER: lighter });
     expect(kalshi).not.toHaveBeenCalled();
     expect(lighter).toHaveBeenCalledTimes(1);
   });
 
+  it('fails the run and reports it when the registry refuses a write', async () => {
+    const lines: string[] = [];
+    jest.spyOn(console, 'log').mockImplementation((line: unknown) => { lines.push(String(line)); });
+    jest.spyOn(console, 'error').mockImplementation(() => undefined);
+    const registry = {
+      exchangeIds: async () => new Map([['LIGHTER', 2]]),
+      activeTargets: async () => [{ listingId: 1, exchangeSecurityId: 'M1', current: spec() }],
+      post: async () => ({ written: 0, refused: [1] }),
+    } as unknown as Registry;
+    const lighter = async () => new Map([['M1', spec(TAPERED)]]);
+    await expect(scheduled('full', registry, noSnapshots(), 'LIGHTER', { LIGHTER: lighter })).rejects.toThrow('LIGHTER');
+    const metrics = lines.map(l => { try { return JSON.parse(l); } catch { return null; } }).find(m => m?._aws);
+    expect(metrics).toMatchObject({ Kind: 'specs', Mode: 'full', Venue: 'LIGHTER', Ok: 0, Refused: 1, Listings: 1 });
+  });
+
   it('has a reader for exactly the exchanges the refresh endpoint takes', () => {
     expect(Object.keys(READERS).sort()).toEqual([...SPEC_SYNC_EXCHANGES].sort());
+  });
+});
+
+describe('the snapshot', () => {
+  const now = new Date('2026-11-18T12:00:00Z');
+  const tick = spec([{ start: 0, end: 1_000_000_000, step: 1_000_000 }]);
+
+  function fakeRegistry(opts: { current?: Map<number, VenueSpec>; created?: Omit<Target, 'current'>[]; refuse?: number[] } = {}) {
+    const posted: SpecRow[] = [];
+    const confirmed: number[][] = [];
+    const createdSince: Date[] = [];
+    const registry = {
+      activeTargets: async () => [
+        { listingId: 1, exchangeSecurityId: 'M1', current: spec() },
+        { listingId: 2, exchangeSecurityId: 'M2', current: spec() },
+        { listingId: 3, exchangeSecurityId: 'M3', current: null },
+      ],
+      createdListings: async (_id: number, after: Date) => { createdSince.push(after); return opts.created ?? []; },
+      currentSpecs: async (ids: number[]) => {
+        confirmed.push(ids);
+        return new Map([...(opts.current ?? new Map())].filter(([id]) => ids.includes(id)));
+      },
+      post: async (rows: SpecRow[]) => {
+        posted.push(...rows);
+        const refused = rows.map(r => r.listingId).filter(id => opts.refuse?.includes(id));
+        return { written: rows.length - refused.length, refused };
+      },
+    } as unknown as Registry;
+    return { registry, posted, confirmed, createdSince };
+  }
+
+  it('is rebuilt by a full pass from every active listing, recording nothing where the write was refused', async () => {
+    const { snapshots, held } = memorySnapshots();
+    const { registry } = fakeRegistry({ refuse: [2] });
+    const read = async () => new Map([['M1', spec()], ['M2', tick]]);
+    await syncVenue('KALSHI', 1, 'full', registry, now, { KALSHI: read }, snapshots);
+    expect(held('KALSHI')).toEqual({
+      listedThrough: now.toISOString(),
+      listings: { 1: ['M1', hashOf(spec())], 2: ['M2', null], 3: ['M3', null] },
+    });
+  });
+
+  it('lets a sweep check the registry only for listings whose venue spec moved, and records what it wrote', async () => {
+    const { snapshots, held } = memorySnapshots({ KALSHI: {
+      listedThrough: '2026-11-18T11:45:00.000Z',
+      listings: { 1: ['M1', hashOf(spec())], 2: ['M2', hashOf(spec())], 3: ['M3', null] },
+    } });
+    const { registry, posted, confirmed, createdSince } = fakeRegistry({
+      current: new Map([[1, spec()], [2, spec()]]),
+      created: [{ listingId: 4, exchangeSecurityId: 'M4' }],
+    });
+    const read = jest.fn(async () => new Map([['M1', spec()], ['M2', tick], ['M3', spec()], ['M4', spec()]]));
+    const result = await syncVenue('KALSHI', 1, 'sweep', registry, now, { KALSHI: read }, snapshots);
+
+    expect(createdSince).toEqual([new Date('2026-11-18T11:40:00.000Z')]);
+    expect(read).toHaveBeenCalledWith(['M1', 'M2', 'M3', 'M4'], { listedOnly: true });
+    // M3 and M4 have no spec yet: theirs are the new and missing passes' to give.
+    expect(confirmed).toEqual([[2, 3, 4]]);
+    expect(posted).toEqual([{ listingId: 2, ...tick, effectiveFrom: now.toISOString() }]);
+    expect(result).toMatchObject({ targets: 4, moved: 3, written: 1, snapshotSaved: true });
+    expect(held('KALSHI')).toEqual({
+      listedThrough: now.toISOString(),
+      listings: { 1: ['M1', hashOf(spec())], 2: ['M2', hashOf(tick)], 3: ['M3', null], 4: ['M4', null] },
+    });
+  });
+
+  it('keeps nothing recorded for a listing the registry refused, so the next sweep tries it again', async () => {
+    const { snapshots, held } = memorySnapshots({ KALSHI: { listedThrough: now.toISOString(), listings: { 2: ['M2', hashOf(spec())] } } });
+    const { registry } = fakeRegistry({ current: new Map([[2, spec()]]), refuse: [2] });
+    await syncVenue('KALSHI', 1, 'sweep', registry, now, { KALSHI: async () => new Map([['M2', tick]]) }, snapshots);
+    expect(held('KALSHI')!.listings[2]).toEqual(['M2', null]);
+  });
+
+  it('lets a sweep do nothing until a full pass has made the snapshot', async () => {
+    const { registry } = fakeRegistry();
+    const read = jest.fn(async () => new Map());
+    jest.spyOn(console, 'warn').mockImplementation(() => undefined);
+    expect(await syncVenue('KALSHI', 1, 'sweep', registry, now, { KALSHI: read }, noSnapshots())).toEqual({ venue: 'KALSHI', targets: 0 });
+    expect(read).not.toHaveBeenCalled();
+  });
+
+  it("doesn't save a sweep over a snapshot another run saved meanwhile", async () => {
+    const { snapshots, held } = memorySnapshots({ KALSHI: { listedThrough: now.toISOString(), listings: { 1: ['M1', null] } } });
+    const { registry } = fakeRegistry({ current: new Map([[1, spec()]]) });
+    jest.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const read = async () => {
+      await snapshots('KALSHI').replace({ listedThrough: 'rebuilt', listings: {} });
+      return new Map([['M1', spec()]]);
+    };
+    const result = await syncVenue('KALSHI', 1, 'sweep', registry, now, { KALSHI: read }, snapshots);
+    expect(result.snapshotSaved).toBe(false);
+    expect(held('KALSHI')!.listedThrough).toBe('rebuilt');
   });
 });
 

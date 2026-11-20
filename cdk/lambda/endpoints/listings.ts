@@ -111,12 +111,20 @@ export class ListingHandler extends ResourceHandler {
     // Volume is the sync's reading, not an edit of the listing, so a patch of volume alone leaves date_modified alone.
     const volumeRead = volume24h !== undefined;
     const edited = Object.values(edits).some((value) => value !== undefined);
+    // A listing turned off before its outcome settles is one the classifier settles, or turns back on if its venue
+    // lists it again (migration 085); one turned on, or with nothing left to settle, isn't.
+    const securityId = listing.securityId ? sql`${listing.securityId}` : raw('listing.security_id');
+    const awaitingSettlement = listing.active === true ? false
+      : listing.active === false
+        ? sql`EXISTS (SELECT 1 FROM sm.event_contract ec WHERE ec.security_id = ${securityId} AND ec.settlement_price IS NULL)`
+        : undefined;
     return sql`UPDATE sm.listing SET ${set({
       exchange_id: listing.exchangeId || undefined,
       exchange_security_id: listing.exchangeSecurityId || undefined,
       exchange_security_symbol: listing.exchangeSecuritySymbol || undefined,
       security_id: listing.securityId || undefined,
       active: listing.active ?? undefined,
+      awaiting_settlement: awaitingSettlement,
       // Present-but-null clears a fee key: a venue that stops grouping a listing's fees.
       fee_group: 'feeGroup' in listing ? listing.feeGroup ?? null : undefined,
       fee_event: 'feeEvent' in listing ? listing.feeEvent ?? null : undefined,

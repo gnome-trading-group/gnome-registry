@@ -52,8 +52,16 @@ export class EventContractHandler extends ResourceHandler {
     if (ec.outcomeLabel === undefined && ec.settlementPrice === undefined) {
       throw new ValidationError('Nothing to modify: give outcomeLabel or settlementPrice');
     }
-    return sql`UPDATE sm.event_contract SET ${set(fields)}
+    const update = sql`UPDATE sm.event_contract SET ${set(fields)}
       WHERE event_contract_id = ${row['event_contract_id']} RETURNING *`;
+    if (ec.settlementPrice === undefined) return update;
+    // A settled outcome's listings no longer await settlement (migration 085). Not an edit of the listing, so its
+    // date_modified stays.
+    return sql`WITH updated AS (${update}), settled AS (
+        UPDATE sm.listing SET awaiting_settlement = false
+        WHERE awaiting_settlement AND security_id IN (SELECT security_id FROM updated WHERE settlement_price IS NOT NULL)
+      )
+      SELECT * FROM updated`;
   }
 }
 

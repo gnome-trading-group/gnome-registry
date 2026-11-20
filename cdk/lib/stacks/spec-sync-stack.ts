@@ -7,6 +7,7 @@ import * as iam from 'aws-cdk-lib/aws-iam';
 import { Runtime } from 'aws-cdk-lib/aws-lambda';
 import { SqsEventSource } from 'aws-cdk-lib/aws-lambda-event-sources';
 import * as lambda from 'aws-cdk-lib/aws-lambda-nodejs';
+import * as s3 from 'aws-cdk-lib/aws-s3';
 import * as sqs from 'aws-cdk-lib/aws-sqs';
 import { join } from 'path';
 import { SPEC_REFRESH_QUEUE, SPEC_SYNC_EXCHANGES } from '../../lambda/endpoints/spec-refresh-queue';
@@ -15,12 +16,13 @@ import { ApiStack } from './api-stack';
 interface Props extends cdk.StackProps {
   api: apigw.RestApi;
   apiKey: apigw.ApiKey;
+  cache: s3.IBucket;
 }
 
-// The spec sync, the only writer of listing specs: every minute it gives new listings their first spec, hourly it checks
-// every active listing's spec against its venue, daily it looks for older listings still without one, and it checks a
-// listing a shard saw change as soon as the refresh queue has it. Outside the VPC, like the other venue readers; it
-// needs no venue credentials.
+// The spec sync, the only writer of listing specs: every minute it gives new listings their first spec, every 15 minutes
+// it sweeps each venue for specs that moved, hourly it checks every active listing's spec against its venue, daily it
+// looks for older listings still without one, and it checks a listing a shard saw change as soon as the refresh queue
+// has it. Outside the VPC, like the other venue readers; it needs no venue credentials.
 export class SpecSyncStack extends cdk.Stack {
   public readonly syncLambda: lambda.NodejsFunction;
   public readonly refreshLambda: lambda.NodejsFunction;
@@ -50,9 +52,13 @@ export class SpecSyncStack extends cdk.Stack {
     // A failed pass isn't retried: the next one is due anyway, and a retry of a timed-out pass could run into it,
     // reading the same venue twice at once.
     this.syncLambda = new lambda.NodejsFunction(this, 'spec-sync-lambda', {
-      ...shared, timeout: cdk.Duration.minutes(15), retryAttempts: 0,
+      ...shared,
+      environment: { ...shared.environment, CACHE_BUCKET: props.cache.bucketName },
+      timeout: cdk.Duration.minutes(15),
+      retryAttempts: 0,
     });
     this.syncLambda.addToRolePolicy(readApiKey);
+    props.cache.grantReadWrite(this.syncLambda, 'specs/*');
     const minutesApart = Math.floor(60 / SPEC_SYNC_EXCHANGES.length);
     SPEC_SYNC_EXCHANGES.forEach((venue, i) => {
       const minute = String(i * minutesApart);
@@ -63,10 +69,19 @@ export class SpecSyncStack extends cdk.Stack {
           event: events.RuleTargetInput.fromObject({ mode: 'full', venue }),
         })],
       });
-      // Off the full passes' minutes, at night in the US.
+      // Halfway between full passes, so a sweep never reads the venue while its full pass does.
+      const sweepMinutes = [0, 15, 30, 45].map(m => (i * minutesApart + Math.floor(minutesApart / 2) + m) % 60);
+      new events.Rule(this, `SpecSyncSweepRule${venue}`, {
+        description: `Spec sync: sweeps ${venue} for listing specs that moved`,
+        schedule: events.Schedule.cron({ minute: sweepMinutes.sort((a, b) => a - b).join(',') }),
+        targets: [new targets.LambdaFunction(this.syncLambda, {
+          event: events.RuleTargetInput.fromObject({ mode: 'sweep', venue }),
+        })],
+      });
+      // Off the full passes' and the venue's sweeps' minutes, at night in the US.
       new events.Rule(this, `SpecSyncMissingRule${venue}`, {
         description: `Spec sync: gives older active ${venue} listings still without a spec their first`,
-        schedule: events.Schedule.cron({ minute: String(i * minutesApart + Math.floor(minutesApart / 2)), hour: '8' }),
+        schedule: events.Schedule.cron({ minute: String(i * minutesApart + Math.floor(minutesApart / 4)), hour: '8' }),
         targets: [new targets.LambdaFunction(this.syncLambda, {
           event: events.RuleTargetInput.fromObject({ mode: 'missing', venue }),
         })],

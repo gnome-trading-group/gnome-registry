@@ -7,6 +7,8 @@ import { registryFetch, registryFetchAll, resolveApiKey } from './registry-clien
 import { readKalshiSpecs } from './venues/kalshi';
 import { readPolymarketIntlSpecs } from './venues/polymarket-intl';
 import { readPolymarketUsSpecs } from './venues/polymarket-us';
+import { emitSyncMetrics } from './metadata/metrics';
+import { hashOf, s3Snapshot, SnapshotStore } from './metadata/snapshot';
 import { chunks, pause, ReadSpecs, sameSpec, VenueSpec } from './venues/specs';
 
 // The one writer of listing specs (sm.listing_spec): each venue's reader says what the venue publishes for a listing
@@ -15,7 +17,9 @@ import { chunks, pause, ReadSpecs, sameSpec, VenueSpec } from './venues/specs';
 // - mode `new` (every minute): active listings created in the last NEW_LISTING_WINDOW_MS with no spec yet, so a new
 //   listing is tradable within a minute and one its venue doesn't list yet is tried again each minute meanwhile;
 // - mode `full` (hourly, one run per venue): every active listing the venue lists as trading, against its spec in
-//   force now;
+//   force now; it also rebuilds the venue's snapshot (what the venue gave for each active listing);
+// - mode `sweep` (every 15 minutes, one run per venue): reads the venue for the snapshot's listings and the ones
+//   created since, and checks against the registry only the listings whose venue spec moved;
 // - mode `missing` (daily, one run per venue): active listings older than that window still without a spec;
 // - the refresh queue: one listing a shard saw change (POST /listing-specs/refresh), checked against the venue.
 // Only the minute's pass runs every minute, and it reads only recent listings; the passes over every active listing
@@ -33,6 +37,9 @@ export const READERS: Record<string, ReadSpecs> = {
 const POST_CHUNK = 200;
 // Long enough that a listing whose venue is slow to list it gets many tries before the daily pass is its backstop.
 export const NEW_LISTING_WINDOW_MS = 2 * 60 * 60_000;
+// A listing is dated when its insert starts, so one committed a moment after a sweep looked can carry an earlier date.
+const LISTED_OVERLAP_MS = 5 * 60_000;
+const CONFIRM_CHUNK = 200;
 
 export interface Target {
   listingId: number;
@@ -100,9 +107,28 @@ export interface Registry {
   activeTargets(exchangeId: number): Promise<Target[]>;
   // Active listings with no spec, created in [after, before).
   unspeccedTargets(exchangeId: number, created: { after?: Date; before?: Date }): Promise<Target[]>;
+  // Active listings created since `after`.
+  createdListings(exchangeId: number, after: Date): Promise<Omit<Target, 'current'>[]>;
+  // The specs in force now of these listings; one with none is left out.
+  currentSpecs(listingIds: number[]): Promise<Map<number, VenueSpec>>;
   target(exchangeId: number, exchangeSecurityId: string): Promise<Target | null>;
-  post(rows: SpecRow[]): Promise<{ written: number; failed: number }>;
+  post(rows: SpecRow[]): Promise<Posted>;
 }
+
+export interface Posted {
+  written: number;
+  refused: number[];
+}
+
+/** A venue's active listings and what the venue last gave for each, so a sweep reads the registry only for changes. */
+export interface SpecSnapshot {
+  // Active listings created before this are in `listings`; a sweep adds the ones created since.
+  listedThrough: string;
+  // listing id → [its exchange security id, the hash of the spec its venue last gave, or null: none, or not recorded]
+  listings: Record<string, [string, string | null]>;
+}
+
+export type SpecSnapshots = (exchangeCode: string) => SnapshotStore<SpecSnapshot>;
 
 export function specOf(row: SpecResponse): VenueSpec {
   return {
@@ -152,6 +178,19 @@ export function apiRegistry(apiKey: string): Registry {
         `/listings?exchangeId=${exchangeId}&active=true&withoutSpec=true&sortBy=listing_id${window}`, apiKey);
       return listings.map(l => ({ listingId: l.listing_id, exchangeSecurityId: l.exchange_security_id, current: null }));
     },
+    async createdListings(exchangeId, after) {
+      const listings = await pagesByListing<ListingRow>(
+        `/listings?exchangeId=${exchangeId}&active=true&sortBy=listing_id&createdAfter=${after.toISOString()}`, apiKey);
+      return listings.map(l => ({ listingId: l.listing_id, exchangeSecurityId: l.exchange_security_id }));
+    },
+    async currentSpecs(listingIds) {
+      const specs = new Map<number, VenueSpec>();
+      for (const ids of chunks(listingIds, CONFIRM_CHUNK)) {
+        const rows = await registryFetch<SpecResponse[]>(`/listing-specs?listingIds=${ids.join(',')}`, 'GET', apiKey);
+        for (const row of rows) specs.set(row.listing_id, specOf(row));
+      }
+      return specs;
+    },
     async target(exchangeId, exchangeSecurityId) {
       const [listing] = await registryFetch<ListingRow[]>(
         `/listings?exchangeId=${exchangeId}&exchangeSecurityId=${encodeURIComponent(exchangeSecurityId)}`, 'GET', apiKey);
@@ -166,8 +205,8 @@ export function apiRegistry(apiKey: string): Registry {
 }
 
 /** Posts rows a chunk at a time; a chunk the registry refuses goes again row by row, so one bad row costs only itself. */
-export async function postInChunks(rows: SpecRow[], send: (body: SpecRow[] | SpecRow) => Promise<unknown>) {
-  const result = { written: 0, failed: 0 };
+export async function postInChunks(rows: SpecRow[], send: (body: SpecRow[] | SpecRow) => Promise<unknown>): Promise<Posted> {
+  const result: Posted = { written: 0, refused: [] };
   for (const chunk of chunks(rows, POST_CHUNK)) {
     try {
       await send(chunk);
@@ -181,7 +220,7 @@ export async function postInChunks(rows: SpecRow[], send: (body: SpecRow[] | Spe
         await send(row);
         result.written++;
       } catch (error) {
-        result.failed++;
+        result.refused.push(row.listingId);
         console.error(`Spec for listing ${row.listingId} was refused:`, error instanceof Error ? error.message : error);
       }
     }
@@ -191,34 +230,119 @@ export async function postInChunks(rows: SpecRow[], send: (body: SpecRow[] | Spe
 
 // ----- passes -----
 
-export const MODES = ['new', 'full', 'missing'] as const;
+export const MODES = ['new', 'full', 'missing', 'sweep'] as const;
 export type Mode = typeof MODES[number];
 const isMode = (mode: unknown): mode is Mode => MODES.includes(mode as Mode);
 
-// Each listing without a spec belongs to exactly one pass, by when it was created, so no two passes race to give it a
-// first spec (the second would be refused): a full pass leaves them all to the other two.
-function targetsOf(mode: Mode, exchangeId: number, registry: Registry, now: Date): Promise<Target[]> {
+export interface VenueResult {
+  venue: string;
+  targets: number;
+  // Of the targets: listings whose venue spec moved since the last read (a sweep reads the registry only for these).
+  moved?: number;
+  unchanged?: number;
+  unknown?: number;
+  invalid?: number;
+  written?: number;
+  failed?: number;
+  // A sweep whose snapshot another run saved first: its reads are dropped, and the next sweep does them again.
+  snapshotSaved?: boolean;
+  seconds?: number;
+}
+
+function result(venue: string, targets: number, plan: Plan, posted: Posted, started: number): VenueResult {
+  return {
+    venue, targets, unchanged: plan.unchanged, unknown: plan.unknown, invalid: plan.invalid,
+    written: posted.written, failed: posted.refused.length, seconds: Math.round((Date.now() - started) / 1000),
+  };
+}
+
+// Each listing without a spec belongs to exactly one of `new` and `missing`, by when it was created, so no two passes
+// race to give it a first spec (the second would be refused): `full` and `sweep` leave them all to those two.
+async function firstSpecs(
+  exchangeCode: string, exchangeId: number, mode: 'new' | 'missing', registry: Registry, now: Date, read: ReadSpecs,
+): Promise<VenueResult> {
   const windowStart = new Date(now.getTime() - NEW_LISTING_WINDOW_MS);
-  switch (mode) {
-    case 'new': return registry.unspeccedTargets(exchangeId, { after: windowStart });
-    case 'missing': return registry.unspeccedTargets(exchangeId, { before: windowStart });
-    case 'full': return registry.activeTargets(exchangeId).then(targets => targets.filter(t => t.current !== null));
+  const targets = await registry.unspeccedTargets(exchangeId, mode === 'new' ? { after: windowStart } : { before: windowStart });
+  if (targets.length === 0) return { venue: exchangeCode, targets: 0 };
+  const started = Date.now();
+  const plan = planSpecs(targets, await read(targets.map(t => t.exchangeSecurityId), { listedOnly: false }), now);
+  return result(exchangeCode, targets.length, plan, await registry.post(plan.rows), started);
+}
+
+/** What the venue gave for each active listing, with none recorded where the registry refused the write. */
+export function snapshotOf(active: Omit<Target, 'current'>[], read: Map<string, VenueSpec>, refused: number[],
+  listedThrough: Date): SpecSnapshot {
+  const unrecorded = new Set(refused);
+  const listings: SpecSnapshot['listings'] = {};
+  for (const { listingId, exchangeSecurityId } of active) {
+    const spec = read.get(exchangeSecurityId);
+    listings[listingId] = [exchangeSecurityId, spec && !unrecorded.has(listingId) ? hashOf(spec) : null];
   }
+  return { listedThrough: listedThrough.toISOString(), listings };
+}
+
+async function fullPass(
+  exchangeCode: string, exchangeId: number, registry: Registry, now: Date, read: ReadSpecs, snapshots: SpecSnapshots,
+): Promise<VenueResult> {
+  const active = await registry.activeTargets(exchangeId);
+  const targets = active.filter(t => t.current !== null);
+  const started = Date.now();
+  const specs = targets.length > 0
+    ? await read(targets.map(t => t.exchangeSecurityId), { listedOnly: true })
+    : new Map<string, VenueSpec>();
+  const plan = planSpecs(targets, specs, now);
+  const posted = await registry.post(plan.rows);
+  // Rebuilt from every active listing, so it also drops the ones no longer active; a sweep saving meanwhile only
+  // loses work the next sweep redoes.
+  await snapshots(exchangeCode).replace(snapshotOf(active, specs, posted.refused, now));
+  return result(exchangeCode, targets.length, plan, posted, started);
+}
+
+async function sweep(
+  exchangeCode: string, exchangeId: number, registry: Registry, now: Date, read: ReadSpecs, snapshots: SpecSnapshots,
+): Promise<VenueResult> {
+  const store = snapshots(exchangeCode);
+  const stored = await store.load();
+  if (!stored) {
+    console.warn(`Spec sweep for ${exchangeCode}: no snapshot yet; the next full pass makes one`);
+    return { venue: exchangeCode, targets: 0 };
+  }
+  const { listings } = stored.value;
+  const since = new Date(Date.parse(stored.value.listedThrough) - LISTED_OVERLAP_MS);
+  for (const { listingId, exchangeSecurityId } of await registry.createdListings(exchangeId, since)) {
+    listings[listingId] ??= [exchangeSecurityId, null];
+  }
+  const entries = Object.entries(listings);
+  const started = Date.now();
+  const specs = await read(entries.map(([, [exchangeSecurityId]]) => exchangeSecurityId), { listedOnly: true });
+  const moved = entries.flatMap(([id, [exchangeSecurityId, hash]]) => {
+    const spec = specs.get(exchangeSecurityId);
+    return spec && hashOf(spec) !== hash ? [{ listingId: Number(id), exchangeSecurityId }] : [];
+  });
+  const current = await registry.currentSpecs(moved.map(m => m.listingId));
+  const targets = moved.filter(m => current.has(m.listingId)).map(m => ({ ...m, current: current.get(m.listingId)! }));
+  const plan = planSpecs(targets, specs, now);
+  const posted = await registry.post(plan.rows);
+  const refused = new Set(posted.refused);
+  for (const { listingId, exchangeSecurityId } of targets) {
+    listings[listingId][1] = refused.has(listingId) ? null : hashOf(specs.get(exchangeSecurityId));
+  }
+  const snapshotSaved = await store.save({ listedThrough: now.toISOString(), listings }, stored.version);
+  if (!snapshotSaved) console.warn(`Spec sweep for ${exchangeCode}: another run saved the snapshot first`);
+  return { ...result(exchangeCode, entries.length, plan, posted, started), moved: moved.length, snapshotSaved };
 }
 
 export async function syncVenue(
-  exchangeCode: string, exchangeId: number, mode: Mode, registry: Registry, now: Date, readers = READERS,
-) {
-  const targets = await targetsOf(mode, exchangeId, registry, now);
-  if (targets.length === 0) return { venue: exchangeCode, targets: 0 };
-  const started = Date.now();
-  const read = await readers[exchangeCode](targets.map(t => t.exchangeSecurityId), { listedOnly: mode === 'full' });
-  const plan = planSpecs(targets, read, now);
-  const posted = await registry.post(plan.rows);
-  return {
-    venue: exchangeCode, targets: targets.length, unchanged: plan.unchanged, unknown: plan.unknown,
-    invalid: plan.invalid, ...posted, seconds: Math.round((Date.now() - started) / 1000),
-  };
+  exchangeCode: string, exchangeId: number, mode: Mode, registry: Registry, now: Date, readers: Record<string, ReadSpecs>,
+  snapshots: SpecSnapshots,
+): Promise<VenueResult> {
+  const read = readers[exchangeCode];
+  switch (mode) {
+    case 'new':
+    case 'missing': return firstSpecs(exchangeCode, exchangeId, mode, registry, now, read);
+    case 'full': return fullPass(exchangeCode, exchangeId, registry, now, read, snapshots);
+    case 'sweep': return sweep(exchangeCode, exchangeId, registry, now, read, snapshots);
+  }
 }
 
 /** Checks one listing a shard saw change against its venue, dating any change when the shard saw it. */
@@ -242,7 +366,7 @@ export async function refreshListing(
   }
   const plan = planSpecs([target], specs, new Date(request.observedAt));
   const posted = await registry.post(plan.rows);
-  if (posted.failed > 0) throw new Error(`The registry refused the spec for ${request.exchangeCode} ${request.exchangeSecurityId}`);
+  if (posted.refused.length > 0) throw new Error(`The registry refused the spec for ${request.exchangeCode} ${request.exchangeSecurityId}`);
   return posted;
 }
 
@@ -254,20 +378,26 @@ function isSqsEvent(event: unknown): event is SQSEvent {
 
 // The passes over every active listing run one venue per invocation, so the slowest venue can't run the others past
 // the Lambda's timeout.
-export async function scheduled(mode: Mode, registry: Registry, venue?: string, readers = READERS) {
+export async function scheduled(
+  mode: Mode, registry: Registry, snapshots: SpecSnapshots, venue?: string, readers: Record<string, ReadSpecs> = READERS,
+) {
   const exchangeIds = await registry.exchangeIds();
   const now = new Date();
   const venues = Object.keys(readers).filter(code => exchangeIds.has(code) && (venue === undefined || code === venue));
   const settled = await Promise.allSettled(
-    venues.map(code => syncVenue(code, exchangeIds.get(code)!, mode, registry, now, readers)));
+    venues.map(code => syncVenue(code, exchangeIds.get(code)!, mode, registry, now, readers, snapshots)));
   const failed = venues.filter((code, i) => {
     const outcome = settled[i];
     if (outcome.status === 'rejected') {
       console.error(`Spec sync (${mode}) for ${code} failed:`, outcome.reason instanceof Error ? outcome.reason.stack : outcome.reason);
+      emitSyncMetrics('specs', mode, code, { Ok: 0 }, now);
       return true;
     }
+    const { targets, moved = 0, written = 0, failed = 0, unknown = 0 } = outcome.value;
     // Refused writes leave specs stale, so they fail the run like a venue that couldn't be read: the alarm fires.
-    return 'failed' in outcome.value && outcome.value.failed > 0;
+    emitSyncMetrics('specs', mode, code,
+      { Ok: failed > 0 ? 0 : 1, Listings: targets, Moved: moved, Written: written, Refused: failed, Unknown: unknown }, now);
+    return failed > 0;
   });
   console.log(`Spec sync (${mode}):`, JSON.stringify(settled.flatMap(s => (s.status === 'fulfilled' ? [s.value] : []))));
   if (failed.length > 0) throw new Error(`Spec sync (${mode}) failed for ${failed.join(', ')}`);
@@ -296,11 +426,17 @@ export async function refreshes(event: SQSEvent, registry: Registry, readers = R
   return { batchItemFailures };
 }
 
+export function s3SpecSnapshots(bucket: string): SpecSnapshots {
+  return exchangeCode => s3Snapshot<SpecSnapshot>(bucket, `specs/${exchangeCode}.json.gz`);
+}
+
 export const handler = async (event: { mode?: Mode; venue?: string } | SQSEvent) => {
   const registry = apiRegistry(await resolveApiKey());
   if (isSqsEvent(event)) return refreshes(event, registry);
   const { mode, venue } = event;
   if (!isMode(mode)) throw new Error(`Spec sync needs mode ${MODES.join(', ')}, not ${mode}`);
   if (venue !== undefined && !READERS[venue]) throw new Error(`Spec sync has no reader for venue ${venue}`);
-  return scheduled(mode, registry, venue);
+  const bucket = process.env.CACHE_BUCKET;
+  if (!bucket) throw new Error('Spec sync needs CACHE_BUCKET for its snapshots');
+  return scheduled(mode, registry, s3SpecSnapshots(bucket), venue);
 };
