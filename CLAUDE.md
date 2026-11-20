@@ -209,15 +209,16 @@ synth step, so run `npm test` yourself before handing off.
     status flag) and `volume_24h` (the venue's 24h notional, which market-data `listing_filter` rules rank by), and
     retires an active listing the venue stopped returning, only of a security type the fetch returned and only where
     the fetch covered it (a Hyperliquid sub-DEX that failed to load covers nothing).
-  - MetadataSyncStack: the venue metadata the registry keeps, one Lambda per kind (specs, incentives; fee schedules
-    and fee tiers to come), all in `sync/metadata/`. `kind.ts` runs a mode for a venue's units (a unit is a venue, or
+  - MetadataSyncStack: the venue metadata the registry keeps, one Lambda per kind (specs, incentives, fees; fee tiers
+    to come), all in `sync/metadata/`. `kind.ts` runs a mode for a venue's units (a unit is a venue, or
     an account on it), keeps each unit's snapshot (`<kind>/<venue>[/<scope>].json.gz` in the cache bucket, derived: a
     lost one costs a reconcile) and turns each unit's counts into `Registry/MetadataSync` metrics (Kind, Mode, Venue:
     `Ok` and the kind's counts); a refused write fails the run, a sweep that found no snapshot reports `Ok` 0 and
     `NoSnapshot` 1. `schedule.ts` places every kind × venue × mode run with a read budget so no two reads of one venue,
     and no two whole-population passes, overlap (the stack's test checks it); the daily passes run at 08:00 and 09:00
-    UTC, the hours the hourly specs reconcile skips. The stack holds its own alarms (fault per kind, a heartbeat per
-    kind × venue on sweep and reconcile, `NoSnapshot`, Kalshi `ChangedMissed`) and exports nothing.
+    UTC, the hours the hourly specs reconcile skips (the fees reconcile at 10:xx fits between them). The stack holds its
+    own alarms (fault per kind, a heartbeat per kind × venue on sweep and reconcile, `NoSnapshot`, Kalshi
+    `ChangedMissed`, fees `Unreadable`) and exports nothing.
   - Listing specs (the `specs` kind): the only writer of listing specs (`sm.listing_spec`; migration 084: each spec's prices are
     `price_bands`, contiguous `{start, end, step}` bands from 0, the Java client's `PriceGrid`). Readers per venue in
     `sync/venues/<venue>.ts` (Kalshi `price_ranges`, mirrored for `:no`; Polymarket Intl Gamma then the CLOB, never a
@@ -239,6 +240,22 @@ synth step, so run `npm test` yourself before handing off.
     the shard saw it; one the venue never confirms goes to `listing-spec-refresh-dlq.fifo` (alarmed). After a listing's
     first spec, the insert trigger refuses a spec that is neither dated (`effectiveFrom`) nor a `correction`. Running
     sessions see new specs through `SecurityMaster.listingSpecRefresher`, which reads `listingIds` + `recordedAfter`.
+  - Fee schedules (the `fees` kind): the only writer of `source = 'VENUE_API'` rows in `sm.fee_schedule` (append-only;
+    `MANUAL` rows are people's). Each venue's reader (`sync/venues/<venue>.ts`) gives its whole dated history:
+    Kalshi from `/series`, `/series/fee_changes` (with history) and `/events/fee_changes` (current overrides only; a
+    lifted one stays as written), with the unrecorded-series date, the rounding cutover rows (`:accumulator`) and
+    unsupported types (`:unsupported:<type>`, no definition, flagged by `FEE_TYPE_UNSUPPORTED`); Polymarket
+    International from a walk of Gamma's open events (`/events/keyset`, gzip, about 180 pages), one schedule per
+    `feeType` dated by its table of announced rates (each type's dated entries) or rebate table, else when first
+    seen, a type charging nothing a zero schedule. From 2026-11-20 23:59 UTC maker rebates are the account's (volume
+    tiers), not the market's: no schedule read after then carries one, and none dates from before then.
+    `sweep` hourly per venue posts the rows its snapshot (`fees/<venue>.json.gz`, the keys the registry holds) lacks
+    and reads nothing from the registry; `reconcile` daily at 10:xx UTC reads the exchange's VENUE_API rows
+    (`GET /fees?exchangeId=`), rebuilds the snapshot and posts what's missing. A row is known by its `source_ref`
+    (Kalshi, whose changes have ids) or by its target and definition, plus its date when the venue gave it (Polymarket
+    International). Counts: Read,
+    Written, Known, Unsupported, Unreadable (a charged type whose schedule couldn't be read; alarmed), and on
+    reconcile Held and NotRead.
   - Listings awaiting settlement (`sm.listing.awaiting_settlement`, migration 085): set by the listings endpoint when it
     turns a listing off while its outcome (`sm.event_contract.settlement_price`) is unset, cleared when it turns one on
     and by the event-contracts endpoint when it records the settlement value. The classifier's settle and reactivate

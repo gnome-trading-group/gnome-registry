@@ -498,6 +498,19 @@ describe('the snapshot', () => {
     expect(metrics).toMatchObject({ Kind: 'specs', Mode: 'sweep', Venue: 'KALSHI', Ok: 0, NoSnapshot: 1 });
   });
 
+  it('reports NoSnapshot 0 from a sweep that found its snapshot, so the warning clears', async () => {
+    const lines: string[] = [];
+    jest.spyOn(console, 'log').mockImplementation((line: unknown) => { lines.push(String(line)); });
+    const { registry } = fakeRegistry();
+    const withIds = { ...registry, exchangeIds: async () => new Map([['KALSHI', 1]]) } as Registry;
+    const { snapshots } = memorySnapshots<SpecSnapshot>({ KALSHI: { listedThrough: now.toISOString(), listings: {} } });
+    await runScheduled(specsKind(withIds, { KALSHI: async () => new Map() }, {}),
+      { mode: 'sweep', venue: 'KALSHI' }, { now, snapshots });
+    const metrics = lines.map(l => { try { return JSON.parse(l); } catch { return null; } }).find(m => m?._aws);
+    expect(metrics).toMatchObject({ Mode: 'sweep', Ok: 1, NoSnapshot: 0 });
+    expect(metrics._aws.CloudWatchMetrics[0].Metrics).toContainEqual({ Name: 'NoSnapshot', Unit: 'Count' });
+  });
+
   it("refuses a run the kind doesn't have", async () => {
     const kind = specsKind({} as Registry, { KALSHI: async () => new Map() }, {});
     const ctx = { now, snapshots: memorySnapshots<SpecSnapshot>().snapshots };

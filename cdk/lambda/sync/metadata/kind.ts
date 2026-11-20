@@ -101,7 +101,10 @@ export async function runScheduled<S>(kind: Kind<S>, request: RunRequest, ctx: {
       try {
         const counts = await kind.run(mode, unit, { now: ctx.now, snapshots: ctx.snapshots, variant });
         const healthy = !(counts.Refused > 0) && !(counts.NoSnapshot > 0);
-        emitSyncMetrics(kind.name, mode, unit.venue, { Ok: healthy ? 1 : 0, Seconds: seconds(), ...counts }, ctx.now);
+        // A sweep that found its snapshot reports a 0, so its NoSnapshot alarm clears on the next sweep: an alarm left
+        // with no new datapoints can hold its last state long after the one sweep that seeded it.
+        const seeded: Counts = mode === 'sweep' ? { NoSnapshot: 0 } : {};
+        emitSyncMetrics(kind.name, mode, unit.venue, { Ok: healthy ? 1 : 0, Seconds: seconds(), ...seeded, ...counts }, ctx.now);
         done.push({ unit, counts });
       } catch (error) {
         console.error(`The ${kind.name} sync (${mode}) for ${describe(unit)} failed:`,

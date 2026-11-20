@@ -161,7 +161,7 @@ interface IScheduleChangeRow {
 }
 
 const LISTED_CHANGES = 10;
-// The classifier dates a fee type it has no rollout date for from the sync that first sees it; a schedule taking
+// The fees sync dates a fee type it has no rollout date for from the sweep that first sees it; a schedule taking
 // effect this close to when it was recorded is one of those, not a change the venue announced ahead.
 const DATED_ON_SIGHT_MS = 3_600_000;
 

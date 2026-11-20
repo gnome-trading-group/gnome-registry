@@ -247,6 +247,22 @@
       ],
       "url": "https://github.com/gnome-trading-group/gnome-registry/blob/main/docs/runbooks/alerts/GATEWAY_FATAL.md"
     },
+    "GATEWAY_HELD_CHECK_CAPPED": {
+      "summary": "An order gateway found more held orders missing at the venue than it ends in one check, and left the rest for the next.",
+      "firstSteps": [
+        "Check the account's open orders on the venue (EmergencyCancel dry run) against what the gateway holds.",
+        "Read the gateway log's \"held-order check\" lines."
+      ],
+      "url": "https://github.com/gnome-trading-group/gnome-registry/blob/main/docs/runbooks/alerts/GATEWAY_HELD_CHECK_CAPPED.md"
+    },
+    "GATEWAY_HELD_CHECK_FAILED": {
+      "summary": "An order gateway hasn't been able to check its held orders against the venue for three checks in a row.",
+      "firstSteps": [
+        "Read the gateway log for \"held-order check failed\" and the error it gives.",
+        "Check the venue's status page."
+      ],
+      "url": "https://github.com/gnome-trading-group/gnome-registry/blob/main/docs/runbooks/alerts/GATEWAY_HELD_CHECK_FAILED.md"
+    },
     "GATEWAY_KILLS_STALE": {
       "summary": "An order gateway hasn't read the registry's kill switches for 30 seconds.",
       "firstSteps": [
@@ -263,6 +279,14 @@
         "Compare the account's open orders at the venue (`docs/runbooks/procedures/check-venue-orders.md`) with the sessions' open orders."
       ],
       "url": "https://github.com/gnome-trading-group/gnome-registry/blob/main/docs/runbooks/alerts/GATEWAY_ORDERS_UNANSWERED.md"
+    },
+    "GATEWAY_ORDER_GONE_AT_VENUE": {
+      "summary": "An order gateway ended an order it held because the venue no longer had it, and the venue never said the order had ended.",
+      "firstSteps": [
+        "Read the alert for the order (session-counter), its reason and the venue's fills against what was reported.",
+        "Check the gateway log for \"gone at the venue\" around then."
+      ],
+      "url": "https://github.com/gnome-trading-group/gnome-registry/blob/main/docs/runbooks/alerts/GATEWAY_ORDER_GONE_AT_VENUE.md"
     },
     "GATEWAY_RECONCILE_FAILED": {
       "summary": "The gateway reconciler failed to reconcile one gateway on 3 ticks in a row.",
@@ -313,6 +337,14 @@
         "Check the venue for fills on those orders before they were cancelled, against the session's ledger."
       ],
       "url": "https://github.com/gnome-trading-group/gnome-registry/blob/main/docs/runbooks/alerts/GATEWAY_UNATTRIBUTED_ORDERS.md"
+    },
+    "GATEWAY_UNBOOKED_FILL": {
+      "summary": "An order gateway ended an order the venue had filled beyond what the session was told, so those fills are missing from the ledger.",
+      "firstSteps": [
+        "Read the alert's venueFilled and reported labels, and the order's session and counter.",
+        "Compare the venue's trades for the order with ledger.fill."
+      ],
+      "url": "https://github.com/gnome-trading-group/gnome-registry/blob/main/docs/runbooks/alerts/GATEWAY_UNBOOKED_FILL.md"
     },
     "GATEWAY_VENUE_RATE_LIMITED": {
       "summary": "A venue answered an order gateway's requests on an account with 429s in the last minute.",

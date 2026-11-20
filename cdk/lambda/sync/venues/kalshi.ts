@@ -5,6 +5,8 @@ import {
   SETTLEMENT_LOOKBACK_MS, SIZE_SCALE, unclassifiedCredit, VenueCredit, VenueReading, VenueSettlement,
 } from './types';
 import { IncentiveProgramReading } from './types';
+import { byEffectiveFrom, feeRate, VenueFeeRead, VenueFeeSchedule } from './fees';
+import { IFeeDefinition, IFeeRounding } from '../../fees/definition';
 import { PriceBand } from '../../endpoints/price-bands';
 import { chunks, complementBands, pause, PRICE_SCALE as SPEC_PRICE_SCALE, ReadOptions, units, VenueSpec } from './specs';
 
@@ -397,4 +399,181 @@ export async function readKalshiChangedSpecs(since: Date): Promise<Map<string, V
     await pause(PAUSE_BETWEEN_REQUESTS_MS);
   }
   throw new Error(`Kalshi changed-since read ran past ${MAX_CHANGED_PAGES} pages`);
+}
+
+// ----- fee schedules -----
+
+const SERIES_PATH = '/trade-api/v2/series';
+const SERIES_FEE_CHANGES_PATH = '/trade-api/v2/series/fee_changes';
+const EVENT_FEE_CHANGES_PATH = '/trade-api/v2/events/fee_changes';
+const SERIES_PAGE_LIMIT = 1000;
+const MAX_SERIES_PAGES = 200;
+
+const KALSHI_TAKER_RATE = 0.07;
+const KALSHI_DEFAULT_FEE: KalshiFee = ['quadratic', 1];
+// Maker fees as a share of the taker fee, by Kalshi's fee_type (GET /series). 'flat' series follow a fee table no
+// definition expresses; none are listed today.
+const KALSHI_MAKER_SHARE: Record<string, number> = {
+  quadratic: 0,
+  quadratic_with_maker_fees: 0.25,
+  quadratic_with_combo_maker_fees: 0.5,
+};
+// Kalshi rounded every fee up to the cent until it began rounding balances to $0.0001 and carrying the overpayment
+// across an order's fills (docs.kalshi.com/getting_started/fee_rounding). The date is its changelog's, not confirmed.
+export const KALSHI_ACCUMULATOR_FROM = new Date('2026-03-03T00:00:00Z');
+// Kalshi's series fee history starts in October 2025, but some series have charged maker fees since before it and have
+// never changed. Kalshi moved maker fees to the 0.0175 curve on 2025-07-01, so that is as far back as their current fee
+// is known to hold.
+export const KALSHI_UNRECORDED_FEE_FROM = new Date('2025-07-01T00:00:00Z');
+const CENT_ROUNDING: IFeeRounding = { mode: 'CEIL', increment: 0.01, scope: 'FILL' };
+const ACCUMULATOR_ROUNDING: IFeeRounding = { mode: 'CEIL', increment: 0.0001, scope: 'ORDER_ACCUMULATOR' };
+
+type KalshiFee = [feeType: string, multiplier: number];
+
+/** A Kalshi series or event fee schedule in force from `at`, or null for a fee type no definition expresses. */
+export function kalshiFeeDefinition(feeType: string, multiplier: number, at: Date): IFeeDefinition | null {
+  const makerShare = KALSHI_MAKER_SHARE[feeType];
+  if (makerShare === undefined) return null;
+  const taker = feeRate(KALSHI_TAKER_RATE * multiplier);
+  return {
+    currency: 'USD',
+    components: [{ kind: 'PRICE_CURVE', taker, maker: feeRate(taker * makerShare), exponent: 1 }],
+    rounding: { ...(at.getTime() >= KALSHI_ACCUMULATOR_FROM.getTime() ? ACCUMULATOR_ROUNDING : CENT_ROUNDING) },
+  };
+}
+
+interface Priced extends VenueFeeSchedule {
+  fee?: KalshiFee;
+}
+
+// For a target whose schedule from before the rounding cutover is still in force at it, the same rates under the new
+// rounding from the cutover. `rows` are this target's, in effective order.
+function withRoundingCutover(rows: Priced[]): Priced[] {
+  const cutover = KALSHI_ACCUMULATOR_FROM.getTime();
+  const before = rows.filter(r => Date.parse(r.effectiveFrom) < cutover);
+  if (before.length === 0 || rows.some(r => Date.parse(r.effectiveFrom) === cutover)) return rows;
+  const inForce = before[before.length - 1];
+  if (inForce.definition === null || !inForce.fee) return rows;
+  const definition = kalshiFeeDefinition(inForce.fee[0], inForce.fee[1], KALSHI_ACCUMULATOR_FROM);
+  if (definition === null) return rows;
+  const { fee: _fee, ...scope } = inForce;
+  return byEffectiveFrom([...rows, {
+    ...scope, effectiveFrom: KALSHI_ACCUMULATOR_FROM.toISOString(), definition, sourceRef: `${inForce.sourceRef}:accumulator`,
+  }]);
+}
+
+// A fee type no definition expresses, recorded with no definition so the target falls through to the next scope (as if
+// Kalshi had set nothing) and the registry's fee monitoring flags it by its source_ref.
+function unsupported(row: Omit<VenueFeeSchedule, 'definition'>, feeType: string): Priced {
+  return { ...row, definition: null, sourceRef: `${row.sourceRef}:unsupported:${feeType}` };
+}
+
+function seriesFee(series: Record<string, any>): KalshiFee {
+  const { fee_type: feeType, fee_multiplier: multiplier } = series;
+  if (feeType == null || multiplier == null) return KALSHI_DEFAULT_FEE;
+  return [String(feeType), Number(multiplier)];
+}
+
+const isDefault = ([feeType, multiplier]: KalshiFee) =>
+  feeType === KALSHI_DEFAULT_FEE[0] && multiplier === KALSHI_DEFAULT_FEE[1];
+
+function groupBy<T>(items: T[], key: (item: T) => string): Map<string, T[]> {
+  const groups = new Map<string, T[]>();
+  for (const item of items) groups.set(key(item), [...(groups.get(key(item)) ?? []), item]);
+  return groups;
+}
+
+const byScheduled = (changes: Record<string, any>[]) =>
+  [...changes].sort((a, b) => Date.parse(a.scheduled_ts) - Date.parse(b.scheduled_ts));
+
+/**
+ * Fee schedules from Kalshi's series (GET /series), their recorded fee changes (GET /series/fee_changes with history)
+ * and event overrides (GET /events/fee_changes), each keyed by the change's id. A series charging other than the
+ * default with no recorded change holds its fee from KALSHI_UNRECORDED_FEE_FROM.
+ *
+ * An event override replaces its series' fee type, multiplier or both; one with neither lifts the override (a null
+ * definition). The part an override leaves out is taken from the series as it stood when the override began.
+ */
+export function kalshiFeeSchedules(
+  series: Record<string, any>[], seriesChanges: Record<string, any>[], eventChanges: Record<string, any>[],
+): VenueFeeSchedule[] {
+  const recorded = new Set(seriesChanges.map(c => c.series_ticker));
+  const allSeriesChanges = [
+    ...seriesChanges,
+    ...series.filter(s => s.ticker && !recorded.has(s.ticker) && !isDefault(seriesFee(s))).map(s => ({
+      series_ticker: s.ticker, fee_type: seriesFee(s)[0], fee_multiplier: seriesFee(s)[1],
+      scheduled_ts: KALSHI_UNRECORDED_FEE_FROM.toISOString(), id: `unrecorded-${s.ticker}`,
+    })),
+  ];
+  const bySeries = new Map([...groupBy(allSeriesChanges, c => c.series_ticker)].map(([k, v]) => [k, byScheduled(v)]));
+  const seriesAt = (ticker: string, at: Date): KalshiFee => {
+    let state: KalshiFee = [...KALSHI_DEFAULT_FEE];
+    for (const c of bySeries.get(ticker) ?? []) {
+      if (Date.parse(c.scheduled_ts) <= at.getTime()) state = [c.fee_type, Number(c.fee_multiplier)];
+    }
+    return state;
+  };
+
+  const schedules: Priced[] = [];
+  for (const [ticker, changes] of bySeries) {
+    const rows = changes.map((c): Priced => {
+      const at = new Date(c.scheduled_ts);
+      const row = { feeGroup: ticker, effectiveFrom: at.toISOString(), sourceRef: `kalshi:series_fee_change:${c.id}` };
+      const fee: KalshiFee = [c.fee_type, Number(c.fee_multiplier)];
+      const definition = kalshiFeeDefinition(fee[0], fee[1], at);
+      if (definition === null) {
+        console.warn(`Kalshi series ${ticker} has fee type ${fee[0]} from ${c.scheduled_ts}, which no schedule expresses`);
+        return unsupported(row, fee[0]);
+      }
+      return { ...row, definition, fee };
+    });
+    schedules.push(...withRoundingCutover(rows));
+  }
+
+  for (const [event, changes] of groupBy(eventChanges, c => c.event_ticker)) {
+    const rows = byScheduled(changes).map((c): Priced => {
+      const at = new Date(c.scheduled_ts);
+      const row = { feeEvent: event, effectiveFrom: at.toISOString(), sourceRef: `kalshi:event_fee_change:${c.id}` };
+      const typeOverride = c.fee_type_override, multiplierOverride = c.fee_multiplier_override;
+      if (typeOverride == null && multiplierOverride == null) return { ...row, definition: null };
+      const [seriesType, seriesMultiplier] = seriesAt(c.series_ticker, at);
+      const fee: KalshiFee = [typeOverride ?? seriesType, multiplierOverride != null ? Number(multiplierOverride) : seriesMultiplier];
+      const definition = kalshiFeeDefinition(fee[0], fee[1], at);
+      if (definition === null) {
+        console.warn(`Kalshi event ${event} has fee type ${fee[0]} from ${c.scheduled_ts}, which no schedule expresses`);
+        return unsupported(row, fee[0]);
+      }
+      return { ...row, definition, fee };
+    });
+    schedules.push(...withRoundingCutover(rows));
+  }
+  return schedules.map(({ fee: _fee, ...row }) => row);
+}
+
+async function kalshiPages(path: string, field: string): Promise<Record<string, any>[]> {
+  let rows: Record<string, any>[] = [];
+  let cursor = '';
+  for (let page = 0; page < MAX_SERIES_PAGES; page++) {
+    const query = `limit=${SERIES_PAGE_LIMIT}${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`;
+    const res = await fetchWithRetry(`${kalshiPublicUrl()}${path}?${query}`);
+    if (!res.ok) throw new Error(`Kalshi GET ${path} failed: ${res.status} ${await res.text()}`);
+    const body = await res.json() as Record<string, any>;
+    const items: Record<string, any>[] = body[field] ?? [];
+    rows = rows.concat(items);
+    cursor = body.cursor ?? '';
+    if (!cursor || items.length === 0) return rows;
+  }
+  throw new Error(`Kalshi ${path} ran past ${MAX_SERIES_PAGES} pages`);
+}
+
+/** Every fee schedule Kalshi's history gives, from its series, series fee changes and current event overrides. */
+export async function readKalshiFeeSchedules(): Promise<VenueFeeRead> {
+  const series = await kalshiPages(SERIES_PATH, 'series');
+  const res = await fetchWithRetry(`${kalshiPublicUrl()}${SERIES_FEE_CHANGES_PATH}?show_historical=true`);
+  if (!res.ok) throw new Error(`Kalshi GET ${SERIES_FEE_CHANGES_PATH} failed: ${res.status} ${await res.text()}`);
+  const seriesChanges = ((await res.json()) as { series_fee_change_arr?: Record<string, any>[] }).series_fee_change_arr ?? [];
+  // Kalshi lists only the overrides in force or scheduled; one lifted earlier is known only from the rows written then.
+  const eventChanges = await kalshiPages(EVENT_FEE_CHANGES_PATH, 'event_fee_changes');
+  // A fee type no definition expresses is recorded as unsupported and flagged by the fee monitoring, not unreadable.
+  return { schedules: kalshiFeeSchedules(series, seriesChanges, eventChanges), unreadable: [] };
 }

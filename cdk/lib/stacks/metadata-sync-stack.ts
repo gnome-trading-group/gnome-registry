@@ -25,10 +25,11 @@ interface Props extends cdk.StackProps {
 const KINDS = {
   specs: 'specs.ts',
   incentives: 'incentives.ts',
+  fees: 'fees.ts',
 } as const;
 type KindName = keyof typeof KINDS;
 
-// The venue metadata the registry keeps (listing specs, incentive programs; fee schedules and fee tiers to come): one
+// The venue metadata the registry keeps (listing specs, incentive programs, fee schedules; fee tiers to come): one
 // Lambda per kind, run by the rules of one schedule (lambda/sync/metadata/schedule.ts, which keeps any two reads of
 // one venue, and any two passes over a whole population, from overlapping), with each kind's snapshots in the cache
 // bucket under its own prefix. Specs also read the refresh queue shards post tick changes to. Outside the VPC, like
@@ -65,7 +66,7 @@ export class MetadataSyncStack extends cdk.Stack {
       props.cache.grantReadWrite(fn, `${kind}/*`);
       return fn;
     };
-    this.lambdas = { specs: kindLambda('specs'), incentives: kindLambda('incentives') };
+    this.lambdas = { specs: kindLambda('specs'), incentives: kindLambda('incentives'), fees: kindLambda('fees') };
 
     for (const entry of schedule()) {
       const { kind, mode, venue, variant } = entry;
@@ -160,6 +161,17 @@ export class MetadataSyncStack extends cdk.Stack {
           treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
         });
       }
+    }
+    for (const entry of schedule()) {
+      if (entry.kind !== 'fees' || entry.mode !== 'sweep' || !entry.venue) continue;
+      alarm(`fees-${entry.venue}-unreadable`, `fees-${entry.venue}-Unreadable-Warning`, {
+        alarmDescription: `${entry.venue} charges a fee type whose schedule couldn't be read; its listings pay the exchange default`,
+        metric: syncMetric('Unreadable', 'fees', 'sweep', entry.venue, 'Maximum', cdk.Duration.hours(1)),
+        threshold: 0,
+        comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_THRESHOLD,
+        evaluationPeriods: 1,
+        treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+      });
     }
     // While Kalshi's changed-since read is only shadowing the full read: a move it didn't name.
     alarm('specs-KALSHI-changed-missed', 'specs-KALSHI-ChangedMissed-Warning', {

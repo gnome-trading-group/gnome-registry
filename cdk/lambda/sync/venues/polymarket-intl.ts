@@ -5,6 +5,9 @@ import {
   PRICE_SCALE, scaleDecimal, SETTLEMENT_LOOKBACK_MS, SIZE_SCALE, VenueCredit, VenueReading, VenueSettlement,
 } from './types';
 import { IncentiveProgramReading } from './types';
+import { feeRate, VenueFeeRead, VenueFeeSchedule } from './fees';
+import { IFeeDefinition, IFeeRounding } from '../../fees/definition';
+import { hashOf } from '../metadata/snapshot';
 import {
   chunks, inParallel, pause, PRICE_SCALE as SPEC_PRICE_SCALE, ReadOptions, SIZE_SCALE as SPEC_SIZE_SCALE, units, VenueSpec,
 } from './specs';
@@ -440,4 +443,173 @@ export async function readPolymarketIntlTick(tokenId: string): Promise<number | 
   const res = await fetchWithRetry(`${CLOB_API}/tick-size?token_id=${encodeURIComponent(tokenId)}`);
   if (!res.ok) return null;
   return units(((await res.json()) as Record<string, unknown>).minimum_tick_size, SPEC_PRICE_SCALE);
+}
+
+// ----- fee schedules -----
+
+// Polymarket International charges fees in collateral, rounded to $0.00001 (docs.polymarket.com/trading/fees).
+const POLYMARKET_INTL_FEE_ROUNDING: IFeeRounding = { mode: 'HALF_UP', increment: 0.00001, scope: 'FILL' };
+// Every market of a Gamma feeType carries the same feeSchedule. Gamma doesn't say when a type's rate began, so these
+// are the dates the venue announced (pineanalytics.substack.com/p/polymarket-fee-rollout for the rollout;
+// docs.polymarket.com/programs/fee-and-rebate-changes-november-2026 for the change at 2026-11-20 23:59 UTC), each with
+// the rate it began at. A type seen at a rate none of its entries lists holds from when the sync first sees it.
+// The types on the November change's 15-minute crypto entry keep their rate: only their market rebate ended then.
+const NOVEMBER_2026 = '2026-11-20T23:59:00Z';
+const POLYMARKET_INTL_FEE_TYPES: Record<string, { from: string; rate: number; exponent: number }[]> = {
+  crypto_15_min: [{ from: '2026-01-05', rate: 0.25, exponent: 2 }, { from: NOVEMBER_2026, rate: 0.25, exponent: 2 }],
+  sports_fees: [{ from: '2026-02-18', rate: 0.0175, exponent: 1 }],
+  crypto_fees_v2: [{ from: '2026-03-30', rate: 0.07, exponent: 1 }, { from: NOVEMBER_2026, rate: 0.01, exponent: 1 }],
+  crypto_btc_5m_15m_fees: [{ from: NOVEMBER_2026, rate: 0.05, exponent: 1 }],
+  sports_fees_v2: [{ from: '2026-03-30', rate: 0.03, exponent: 1 }, { from: NOVEMBER_2026, rate: 0.05, exponent: 1 }],
+  politics_fees: [{ from: '2026-03-30', rate: 0.04, exponent: 1 }, { from: NOVEMBER_2026, rate: 0.01, exponent: 1 }],
+  politics_elections_fees: [{ from: NOVEMBER_2026, rate: 0.05, exponent: 1 }],
+  finance_prices_fees: [{ from: '2026-03-30', rate: 0.04, exponent: 1 }, { from: NOVEMBER_2026, rate: 0.05, exponent: 1 }],
+  economics_fees: [{ from: '2026-03-30', rate: 0.05, exponent: 1 }, { from: NOVEMBER_2026, rate: 0.01, exponent: 1 }],
+  culture_fees: [{ from: '2026-03-30', rate: 0.05, exponent: 1 }, { from: NOVEMBER_2026, rate: 0.01, exponent: 1 }],
+  weather_fees: [{ from: '2026-03-30', rate: 0.05, exponent: 1 }, { from: NOVEMBER_2026, rate: 0.01, exponent: 1 }],
+  tech_fees: [{ from: '2026-03-30', rate: 0.04, exponent: 1 }, { from: NOVEMBER_2026, rate: 0.05, exponent: 1 }],
+  mentions_fees: [{ from: '2026-03-30', rate: 0.04, exponent: 1 }, { from: NOVEMBER_2026, rate: 0.01, exponent: 1 }],
+  general_fees: [{ from: '2026-03-30', rate: 0.05, exponent: 1 }, { from: NOVEMBER_2026, rate: 0.05, exponent: 1 }],
+  // Not announced; the dates are their earliest markets'.
+  sports_fees_v3: [{ from: '2026-07-11', rate: 0.05, exponent: 1 }, { from: NOVEMBER_2026, rate: 0.05, exponent: 1 }],
+  sports_fees_nfl_cfb_oct26: [{ from: '2026-08-21', rate: 0.03, exponent: 1 }, { from: NOVEMBER_2026, rate: 0.05, exponent: 1 }],
+  // Geopolitics.
+  zero_fees: [{ from: NOVEMBER_2026, rate: 0, exponent: 1 }],
+};
+// Makers earned back a share of each market's taker fees, paid daily apart from the fill (Gamma's
+// feeSchedule.rebateRate; docs.polymarket.com/developers/market-makers/maker-rebates-program). The docs date only the
+// sports cut from 25% to 15% on 2026-07-10, before sports_fees_v3 began; any other type's rebate holds from the first
+// sync to see it.
+const POLYMARKET_INTL_REBATES: Record<string, { from: string; share: number }> = {
+  sports_fees_v3: { from: '2026-07-11', share: 0.15 },
+};
+// From then the maker rebate is the account's, by its 30-day volume tier, not the market's: no schedule carries one.
+// The change ended every type's market rebate, so no row read after it dates from before it; a rate no entry lists,
+// read this soon after it, is the change's rate (Gamma moving its markets over), and later, a change of its own.
+const MARKET_REBATES_UNTIL = new Date(NOVEMBER_2026);
+const CHANGE_SETTLES_MS = 2 * DAY_MS;
+const EVENTS_PAGE_LIMIT = 500;
+const MAX_EVENT_PAGES = 1000;
+
+/**
+ * A market's fee schedule (Gamma's feeSchedule), or null when fees are off on it. A type charging nothing gets a
+ * zero schedule, so every market keyed to a type has one.
+ */
+export function polymarketIntlFeeDefinition(market: Record<string, any>): IFeeDefinition | null {
+  const schedule = market.feeSchedule;
+  if (!market.feesEnabled || schedule === null || typeof schedule !== 'object') return null;
+  const rate = schedule.rate;
+  if (typeof rate !== 'number' || !Number.isFinite(rate)) return null;
+  const definition: IFeeDefinition = {
+    currency: 'USD',
+    components: [{
+      kind: 'PRICE_CURVE',
+      taker: feeRate(rate),
+      maker: schedule.takerOnly ?? true ? 0 : feeRate(rate),
+      exponent: schedule.exponent ?? 1,
+    }],
+    rounding: { ...POLYMARKET_INTL_FEE_ROUNDING },
+  };
+  const rebate = schedule.rebateRate;
+  if (typeof rebate === 'number' && rebate > 0 && rebate <= 1) definition.makerRebate = { share: feeRate(rebate) };
+  return definition;
+}
+
+function sameDefinition(a: IFeeDefinition | null, b: IFeeDefinition | null): boolean {
+  return a !== null && b !== null && hashOf(a) === hashOf(b);
+}
+
+/**
+ * The schedules of each fee type, from the definition its markets carry now. A type at a rate one of its entries lists
+ * holds from that entry's date; at any other, from `now`, the first sync to see it. Until market rebates ended, a type
+ * with a maker rebate kept its dated schedule without one and added the rebate from when its rebate is dated, else
+ * from `now`. After, a market's rebate is left out, and a type's schedule holds from the change at the earliest.
+ */
+export function polymarketIntlFeeSchedules(definitions: Map<string, IFeeDefinition>, now: Date): VenueFeeSchedule[] {
+  const schedules: VenueFeeSchedule[] = [];
+  const add = (feeType: string, definition: IFeeDefinition, from: Date, dated: boolean) => schedules.push({
+    feeGroup: feeType, effectiveFrom: from.toISOString(), definition, dated,
+    sourceRef: `polymarket_intl:fee_type:${feeType}:${hashOf(definition).slice(0, 12)}`
+      + (dated && from.getTime() >= MARKET_REBATES_UNTIL.getTime() ? `:${from.toISOString()}` : ''),
+  });
+  const rebatesEnded = now.getTime() >= MARKET_REBATES_UNTIL.getTime();
+  for (const [feeType, definition] of definitions) {
+    const { makerRebate, ...fees } = definition;
+    // The latest matching entry already begun, else the next to begin (a rate Gamma shows ahead of its date).
+    const matching = (POLYMARKET_INTL_FEE_TYPES[feeType] ?? []).filter(e => sameDefinition(fees, polymarketIntlFeeDefinition({
+      feesEnabled: true, feeSchedule: { rate: e.rate, exponent: e.exponent, takerOnly: true },
+    })));
+    const begun = matching.filter(e => Date.parse(e.from) <= now.getTime());
+    const entry = begun.length > 0 ? begun[begun.length - 1] : matching[0];
+    const from = entry ? new Date(entry.from) : null;
+    if (rebatesEnded) {
+      const settling = now.getTime() < MARKET_REBATES_UNTIL.getTime() + CHANGE_SETTLES_MS;
+      if (from || settling) {
+        add(feeType, fees, from && from.getTime() > MARKET_REBATES_UNTIL.getTime() ? from : MARKET_REBATES_UNTIL, true);
+      } else {
+        add(feeType, fees, now, false);
+      }
+      continue;
+    }
+    if (from && from.getTime() >= MARKET_REBATES_UNTIL.getTime()) {
+      add(feeType, fees, from, true);
+      continue;
+    }
+    if (!from) {
+      console.warn(`Polymarket International fee type ${feeType} charges ${JSON.stringify(definition.components)}, `
+        + 'which no dated entry lists; holding it from now');
+      add(feeType, definition, now, false);
+      continue;
+    }
+    add(feeType, fees, from, true);
+    if (makerRebate) {
+      const dated = POLYMARKET_INTL_REBATES[feeType];
+      const rebateDated = dated !== undefined && dated.share === makerRebate.share;
+      add(feeType, definition, rebateDated ? new Date(dated.from) : now, rebateDated);
+    }
+  }
+  return schedules;
+}
+
+/**
+ * Each fee type's definition, from every open market of every open event (Gamma's /events/keyset, about 180 pages).
+ * Markets of one type should agree; when they don't, the last one read wins and the disagreement is logged. A type
+ * charged on markets none of whose schedules could be read is unreadable: its listings are keyed to it with no
+ * schedule.
+ */
+export async function readPolymarketIntlFeeTypes(): Promise<{ definitions: Map<string, IFeeDefinition>; unreadable: string[] }> {
+  const definitions = new Map<string, IFeeDefinition>();
+  const charged = new Set<string>();
+  let cursor: string | null = null;
+  for (let page = 0; page < MAX_EVENT_PAGES; page++) {
+    const query = `active=true&closed=false&limit=${EVENTS_PAGE_LIMIT}` + (cursor ? `&after_cursor=${encodeURIComponent(cursor)}` : '');
+    // Gamma refuses large event pages without gzip.
+    const res = await fetchWithRetry(`${GAMMA_API}/events/keyset?${query}`, () => ({ headers: { 'Accept-Encoding': 'gzip' } }));
+    if (!res.ok) throw new Error(`Polymarket Gamma GET /events/keyset failed: ${res.status} ${await res.text()}`);
+    const body = await res.json() as { events?: Record<string, any>[]; next_cursor?: string | null };
+    for (const event of body.events ?? []) {
+      for (const market of event.markets ?? []) {
+        if (market.closed || typeof market.feeType !== 'string' || !market.feesEnabled) continue;
+        charged.add(market.feeType);
+        const definition = polymarketIntlFeeDefinition(market);
+        if (definition === null) continue;
+        const previous = definitions.get(market.feeType);
+        if (previous && !sameDefinition(previous, definition)) {
+          console.warn(`Polymarket International fee type ${market.feeType} changed from `
+            + `${JSON.stringify(previous)} to ${JSON.stringify(definition)}`);
+        }
+        definitions.set(market.feeType, definition);
+      }
+    }
+    cursor = body.next_cursor ?? null;
+    if (!cursor || (body.events ?? []).length === 0) {
+      return { definitions, unreadable: [...charged].filter(t => !definitions.has(t)).sort() };
+    }
+  }
+  throw new Error(`Polymarket Gamma open events ran past ${MAX_EVENT_PAGES} pages`);
+}
+
+export async function readPolymarketIntlFeeSchedules(now: Date): Promise<VenueFeeRead> {
+  const { definitions, unreadable } = await readPolymarketIntlFeeTypes();
+  return { schedules: polymarketIntlFeeSchedules(definitions, now), unreadable };
 }

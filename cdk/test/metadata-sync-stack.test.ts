@@ -6,7 +6,8 @@ import { CacheStack } from '../lib/stacks/cache-stack';
 import { DatabaseStack } from '../lib/stacks/database-stack';
 import { MetadataSyncStack } from '../lib/stacks/metadata-sync-stack';
 import { SPEC_SYNC_EXCHANGES } from '../lambda/endpoints/spec-refresh-queue';
-import { heartbeatGaps, INCENTIVE_VENUES, schedule, scheduleOverlaps } from '../lambda/sync/metadata/schedule';
+import { FEE_VENUES, heartbeatGaps, INCENTIVE_VENUES, schedule, scheduleOverlaps } from '../lambda/sync/metadata/schedule';
+import { VENUES as FEE_READERS } from '../lambda/sync/metadata/fees';
 import { VENUES as INCENTIVE_READERS } from '../lambda/sync/metadata/incentives';
 import { READERS as SPEC_READERS } from '../lambda/sync/metadata/specs';
 
@@ -30,12 +31,14 @@ describe('the metadata sync schedule', () => {
     for (const venue of SPEC_SYNC_EXCHANGES) expect(modes('specs', venue).sort()).toEqual(['missing', 'reconcile', 'sweep']);
     for (const venue of INCENTIVE_VENUES) expect(modes('incentives', venue)).toEqual(expect.arrayContaining(['reconcile', 'sweep']));
     expect(modes('incentives', 'KALSHI')).toContain('sweep:payouts');
+    for (const venue of FEE_VENUES) expect(modes('fees', venue).sort()).toEqual(['reconcile', 'sweep']);
     expect(schedule().filter(e => e.kind === 'specs' && e.mode === 'new')).toEqual([expect.objectContaining({ everyMinute: true })]);
   });
 
   it('covers exactly the venues each kind has readers for', () => {
     expect([...SPEC_SYNC_EXCHANGES].sort()).toEqual(Object.keys(SPEC_READERS).sort());
     expect([...INCENTIVE_VENUES].sort()).toEqual(Object.keys(INCENTIVE_READERS).sort());
+    expect([...FEE_VENUES].sort()).toEqual(Object.keys(FEE_READERS).sort());
   });
 });
 
@@ -60,11 +63,12 @@ describe('MetadataSyncStack', () => {
   });
 
   it('runs each kind in its own function outside the VPC, never retried, with its own part of the cache', () => {
-    template.resourcePropertiesCountIs('AWS::Lambda::Function', { Timeout: 900, VpcConfig: Match.absent() }, 2);
-    template.resourcePropertiesCountIs('AWS::Lambda::EventInvokeConfig', { MaximumRetryAttempts: 0 }, 2);
+    template.resourcePropertiesCountIs('AWS::Lambda::Function', { Timeout: 900, VpcConfig: Match.absent() }, 3);
+    template.resourcePropertiesCountIs('AWS::Lambda::EventInvokeConfig', { MaximumRetryAttempts: 0 }, 3);
     const policies = JSON.stringify(template.findResources('AWS::IAM::Policy'));
     expect(policies).toContain('/specs/*');
     expect(policies).toContain('/incentives/*');
+    expect(policies).toContain('/fees/*');
   });
 
   it('reads refreshes from the FIFO queue the API sends to, retrying a few times before the dead-letter queue', () => {
@@ -86,12 +90,15 @@ describe('MetadataSyncStack', () => {
     for (const name of names) expect(name).toMatch(/^Registry--MetadataSync-.+-(Error|Warning)$/);
     expect(names).toEqual(expect.arrayContaining([
       'Registry--MetadataSync-specs-Fault-Error', 'Registry--MetadataSync-incentives-Fault-Error',
+      'Registry--MetadataSync-fees-Fault-Error', 'Registry--MetadataSync-fees-POLYMARKET_INTL-sweep-Heartbeat-Error',
+      'Registry--MetadataSync-fees-KALSHI-reconcile-Heartbeat-Error', 'Registry--MetadataSync-fees-KALSHI-NoSnapshot-Warning',
+      'Registry--MetadataSync-fees-POLYMARKET_INTL-Unreadable-Warning',
       'Registry--MetadataSync-specs-refresh-Fault-Error', 'Registry--MetadataSync-specs-Refresh-Dlq-Warning',
       'Registry--MetadataSync-specs-KALSHI-sweep-Heartbeat-Error', 'Registry--MetadataSync-incentives-POLYMARKET_US-reconcile-Heartbeat-Error',
       'Registry--MetadataSync-specs-KALSHI-NoSnapshot-Warning', 'Registry--MetadataSync-specs-KALSHI-ChangedMissed-Warning',
     ]));
     const heartbeats = names.filter(n => n.endsWith('Heartbeat-Error'));
-    expect(heartbeats).toHaveLength(2 * (SPEC_SYNC_EXCHANGES.length + INCENTIVE_VENUES.length));
+    expect(heartbeats).toHaveLength(2 * (SPEC_SYNC_EXCHANGES.length + INCENTIVE_VENUES.length + FEE_VENUES.length));
     template.hasResourceProperties('AWS::CloudWatch::Alarm', {
       AlarmName: 'Registry--MetadataSync-specs-KALSHI-sweep-Heartbeat-Error', TreatMissingData: 'breaching', MetricName: 'Ok',
     });

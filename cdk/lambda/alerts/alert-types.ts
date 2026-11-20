@@ -156,6 +156,14 @@ export const ALERT_TYPES: Record<string, AlertType> = {
     debounce: 1,
   },
   GATEWAY_VENUE_RATE_LIMITED: { severity: 'WARNING', debounce: 1 },
+  // From an account's held-order check. An order the gateway ended because the venue no longer had it: an end event
+  // was missed, worth a look even though the check put it right.
+  GATEWAY_ORDER_GONE_AT_VENUE: { severity: 'WARNING', debounce: 1 },
+  // An order ended with fills the venue made that no session was told of: the ledger is short until they're booked.
+  GATEWAY_UNBOOKED_FILL: { severity: 'ERROR', debounce: 1 },
+  // More orders gone at once than a check ends: a closed market, or the venue misreading working orders.
+  GATEWAY_HELD_CHECK_CAPPED: { severity: 'ERROR', debounce: 1 },
+  GATEWAY_HELD_CHECK_FAILED: { severity: 'WARNING', debounce: 1 },
   // A paper gateway past its caps refuses new paper sessions until others leave or another instance takes them.
   PAPER_GATEWAY_FULL: { severity: 'WARNING', debounce: 1 },
   // Raised by the gateway itself after five minutes over, so it isn't debounced again here.

@@ -23,6 +23,7 @@ const SLOT_MINUTES = 12;
 // The daily whole-population passes run in these hours, in the slots the hourly specs reconcile leaves free.
 const SPECS_MISSING_HOUR = 8;
 const INCENTIVES_RECONCILE_HOUR = 9;
+const FEES_RECONCILE_HOUR = 10;
 const HOURLY = [...Array(24).keys()].filter(h => h !== SPECS_MISSING_HOUR && h !== INCENTIVES_RECONCILE_HOUR);
 
 // Each spec venue's slot in the hour; a venue's runs of every kind sit at fixed offsets from it.
@@ -30,6 +31,10 @@ const slot = (venue: string) => SPEC_SYNC_EXCHANGES.indexOf(venue) * SLOT_MINUTE
 const every15 = (start: number) => [0, 15, 30, 45].map(m => (start + m) % 60).sort((a, b) => a - b);
 
 export const INCENTIVE_VENUES = ['KALSHI', 'POLYMARKET_INTL', 'POLYMARKET_US'];
+export const FEE_VENUES = ['KALSHI', 'POLYMARKET_INTL'];
+// Minutes past a fee venue's slot its runs start, in gaps its other runs and the hourly specs reconciles leave.
+const FEE_SWEEP_OFFSET: Record<string, number> = { KALSHI: 16, POLYMARKET_INTL: 13 };
+const FEE_RECONCILE_OFFSET: Record<string, number> = { KALSHI: 29, POLYMARKET_INTL: 29 };
 
 export function schedule(): ScheduleEntry[] {
   const entries: ScheduleEntry[] = [{ kind: 'specs', mode: 'new', everyMinute: true, budgetMinutes: 0 }];
@@ -47,6 +52,13 @@ export function schedule(): ScheduleEntry[] {
     entries.push(
       { kind: 'incentives', mode: 'sweep', venue, minutes: every15(r + 10), budgetMinutes: 3 },
       { kind: 'incentives', mode: 'reconcile', venue, minutes: [r], hours: [INCENTIVES_RECONCILE_HOUR], budgetMinutes: 5 },
+    );
+  }
+  for (const venue of FEE_VENUES) {
+    const r = slot(venue);
+    entries.push(
+      { kind: 'fees', mode: 'sweep', venue, minutes: [(r + FEE_SWEEP_OFFSET[venue]) % 60], budgetMinutes: 3 },
+      { kind: 'fees', mode: 'reconcile', venue, minutes: [(r + FEE_RECONCILE_OFFSET[venue]) % 60], hours: [FEES_RECONCILE_HOUR], budgetMinutes: 3 },
     );
   }
   // Kalshi pays around 06:00 ET; this read also takes the programs it paid in the last weeks.
