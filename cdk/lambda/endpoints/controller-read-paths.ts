@@ -4,6 +4,7 @@ export const CONTROLLER_READ_PATHS = [
   'pnl/series',
   'pnl/daily',
   'pnl/groups',
+  'pnl/exchanges',
   'monitoring/attention',
   'monitoring/tables',
   'risk/usage',

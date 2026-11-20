@@ -14,6 +14,11 @@ const CENT = 10_000_000;
 const UNIT = 1_000_000;
 const HALF_HOUR = 30 * 60 * 1000;
 const cents = (value: number) => String(value * CENT);
+// Volume in cents traded as maker and as taker, each fill paying 1c.
+const volume = (makerCents: number, takerCents: number) => ({
+  notional: cents(makerCents + takerCents), maker: cents(makerCents), taker: cents(takerCents),
+  fills: (makerCents ? 1 : 0) + (takerCents ? 1 : 0), fees: cents((makerCents ? 1 : 0) + (takerCents ? 1 : 0)),
+});
 const outside = (terms: {
   settlements?: number; manual?: number; adjustments?: number; resets?: number; rewards?: number; carry?: number;
 }) => {
@@ -155,7 +160,10 @@ describeDb('PnL derived from the ledger, against Postgres', () => {
 
     const firm = await summarize(client, { mode: 'paper' }, now) as any;
     expect(firm.strategies).toEqual([
-      { strategyId: 1, lifetime: cents(144), today: cents(144), unrealized: cents(90), rewards: cents(0), openPositions: 1 },
+      {
+        strategyId: 1, lifetime: cents(144), today: cents(144), unrealized: cents(90), rewards: cents(0), openPositions: 1,
+        volumeToday: volume(400, 216),
+      },
     ]);
 
     const page = await summarize(client, { sessionIds: 'new,old' }, now) as any;
@@ -172,6 +180,9 @@ describeDb('PnL derived from the ledger, against Postgres', () => {
     expect(s.listings[0].netQuantity).toEqual([String(10 * UNIT), String(10 * UNIT), String(6 * UNIT)]);
     expect([s.listingCount, s.other]).toEqual([1, ['0', '0', '0']]);
     expect(s.events.map((e: any) => e.kind)).toEqual(['SESSION_START']);
+    // The sale at 12:40 lands in the point after it; a listing that isn't a binary ties up what its position cost.
+    expect([s.volume, s.maker, s.taker]).toEqual([['0', '0', cents(216)], ['0', '0', '0'], ['0', '0', cents(216)]]);
+    expect(s.capital).toEqual([400, 400, 240].map(cents));
 
     const tail = await series(client, {
       sessionId: 'new', resolution: String(HALF_HOUR), since: String(Date.parse('2026-10-06T12:30:00Z')),
@@ -187,6 +198,11 @@ describeDb('PnL derived from the ledger, against Postgres', () => {
     }, now) as any;
     // 10:00, 10:30 (bought, marked 45c), 11:00, 11:30 (50c), 12:00, 12:30 (55c), 13:00 (sold 4)
     expect(s.total).toEqual([0, 49, 49, 99, 99, 149, 144].map(cents));
+    expect(s.volume).toEqual([0, 400, 0, 0, 0, 0, 216].map(cents));
+    expect(s.maker).toEqual([0, 400, 0, 0, 0, 0, 0].map(cents));
+    expect(s.capital).toEqual([0, 400, 400, 400, 400, 400, 240].map(cents));
+    const firm = await series(client, { mode: 'paper', start: '2026-10-06T10:00:00Z', resolution: String(HALF_HOUR) }, now) as any;
+    expect([firm.volume, firm.capital]).toEqual([s.volume, s.capital]);
     expect(s.events.map((e: any) => [e.kind, e.sessionId]))
       .toEqual([['SESSION_START', 'old'], ['SESSION_STOP', 'old'], ['SESSION_START', 'new']]);
   });
@@ -433,6 +449,41 @@ describeDb('PnL derived from the ledger, against Postgres', () => {
     expect(m.mark).toEqual([cents(41), cents(43), cents(45)]);
     expect(m.ask).toEqual([cents(42), cents(44), cents(45)]);
     await expect(marks(client, {}, now)).rejects.toThrow(/listingId/);
+  });
+
+  it("a binary contract's capital is its worst loss at settlement: the rest of the dollar on a short", async () => {
+    await client.query('UPDATE sm.security SET asset_class = 5');
+    await session('s', '2026-10-06T12:00:00Z');
+    await fill('s', '2026-10-06T12:10:00Z', { clientOidCounter: 1, cumQtyAfter: 10 * UNIT, side: 1,
+      fillQty: 10 * UNIT, fillPrice: 30 * CENT, fee: 0, netQuantityAfter: -10 * UNIT, totalCostAfter: 300 * CENT,
+      realizedPnlAfter: 0, feesAfter: 0, positionVersion: 1, liquidity: 'MAKER' });
+    const s = await series(client, { sessionId: 's', resolution: String(HALF_HOUR) }, now) as any;
+    expect(s.capital).toEqual([0, 700, 700].map(cents));
+  });
+
+  it('volume is the money traded in venue fills, by session, by strategy today and for the firm', async () => {
+    await story();
+    const old = await summarize(client, { sessionId: 'old' }, now) as any;
+    expect(old.volume).toEqual(volume(400, 0));
+    const page = await summarize(client, { sessionIds: 'new,old' }, now) as any;
+    expect(page.map((s: any) => s.volume)).toEqual([volume(0, 216), volume(400, 0)]);
+
+    // A settlement moves the position but isn't trading.
+    await client.query(`INSERT INTO ledger.fill (source, strategy_id, listing_id, mode, fill_qty, fill_price, fee,
+      net_quantity_after, total_cost_after, realized_pnl_after, fees_after, recorded_at)
+      VALUES ('SETTLEMENT', 1, 500, 'paper', $1, $2, 0, 0, 0, 0, 0, '2026-10-06T12:50:00Z')`, [6 * UNIT, 100 * CENT]);
+    const strategy = await summarize(client, { strategyId: '1', mode: 'paper' }, now) as any;
+    expect(strategy.volumeToday).toEqual(volume(400, 216));
+    // In Pago Pago (UTC-11) the day began at 11:00 UTC, after the old session's fill.
+    const pagoPago = await summarize(client, { strategyId: '1', mode: 'paper', tz: 'Pacific/Pago_Pago' }, now) as any;
+    expect(pagoPago.volumeToday).toEqual(volume(0, 216));
+    const firm = await summarize(client, { mode: 'paper', tz: 'Pacific/Pago_Pago' }, now) as any;
+    expect(firm.volumeToday).toEqual(volume(0, 216));
+    expect((await summarize(client, { mode: 'live' }, now) as any).volumeToday).toEqual(volume(0, 0));
+
+    const days = await daily(client, { mode: 'paper', days: '2', tz: 'Pacific/Pago_Pago', byStrategy: 'true' }, now);
+    expect(days.days.map(d => d.volume)).toEqual([volume(400, 0), volume(0, 216)]);
+    expect(days.strategies?.[0].days.map(d => d.volume)).toEqual([volume(400, 0), volume(0, 216)]);
   });
 
   it('daily PnL is the change between local midnights, so the days add up to the lifetime change', async () => {

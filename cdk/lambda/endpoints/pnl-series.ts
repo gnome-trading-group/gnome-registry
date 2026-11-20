@@ -1,10 +1,11 @@
 import { APIGatewayProxyEvent } from 'aws-lambda';
 import { PoolClient } from 'pg';
 import { connectLedgerDatabase, createResponse, isSessionId, parseMode, parsePositiveInt } from './ledger-common';
-import { MarkInputs, PositionState, toBigInt } from './ledger-math';
+import { heldCapital, MarkInputs, PositionState, toBigInt } from './ledger-math';
 import { pickResolution, pointTimes, sessionPnl } from './pnl-math';
-import { FLAT, loadListingInfo, loadSessionStates } from './pnl-state';
+import { FLAT, loadBinaryListings, loadListingInfo, loadSessionStates } from './pnl-state';
 import { FillRow, fillPosition, inOrder, loadMarkChanges, SeriesEvent, strategyTotals, walkLifetime } from './pnl-walk';
+import { Volume, volumeBetween } from './pnl-volume';
 
 // PnL over time for a chart, one point per resolution step (the smallest that keeps the series within a bounded
 // number of points), each the state at that moment: the position the newest fill left, valued at the newest mark.
@@ -19,6 +20,8 @@ import { FillRow, fillPosition, inOrder, loadMarkChanges, SeriesEvent, strategyT
 //   listingIds=1,2         exactly these lines (and `other`): a poll keeps the lines its chart already draws
 //   listingId= (strategy)  that listing alone; implies its line
 // Every listing is carried forward between its own updates, so the totals always equal the lines plus `other`.
+// Beside the PnL, each point carries the money traded since the point before it (volume, maker, taker; pnl-volume) and
+// capital, what the positions held then tie up (ledger-math heldCapital: a binary's worst loss at settlement).
 
 export const MAX_SERIES_LISTINGS = 25;
 
@@ -66,6 +69,10 @@ function seriesShape(w: Window) {
     realized: [] as string[],
     unrealized: [] as string[],
     fees: [] as string[],
+    volume: [] as string[],
+    maker: [] as string[],
+    taker: [] as string[],
+    capital: [] as string[],
     listings: [] as { listingId: number; symbol: string | null; lotSize: string | null; total: string[]; netQuantity: string[] }[],
     listingCount: 0,
     other: null as string[] | null,
@@ -80,6 +87,12 @@ interface Line {
 }
 
 const abs = (v: bigint) => (v < 0n ? -v : v);
+
+function drawVolume(series: { volume: string[]; maker: string[]; taker: string[] }, volumes: Volume[]) {
+  series.volume = volumes.map(v => v.notional.toString());
+  series.maker = volumes.map(v => v.maker.toString());
+  series.taker = volumes.map(v => v.taker.toString());
+}
 const moved = (line: Line) => abs((line.total.at(-1) ?? 0n) - (line.total[0] ?? 0n));
 
 // Draws the chosen lines into the series: those asked for by id, else the ones that moved most. `active` are the
@@ -152,10 +165,12 @@ export async function sessionSeries(client: PoolClient, sessionId: string, param
     }
   }
 
+  const binary = await loadBinaryListings(client, listingIds);
   const lines: Line[] = states.map(s => ({ listingId: s.listingId, total: [], net: [] }));
   const totals: bigint[] = [];
+  const times = pointTimes(w.fromMs, w.toMs, w.stepMs);
   let next = 0;
-  for (const t of pointTimes(w.fromMs, w.toMs, w.stepMs)) {
+  for (const t of times) {
     for (; next < changes.length && changes[next].timeMs <= t; next++) {
       const change = changes[next];
       if (change.mark !== undefined) {
@@ -178,7 +193,9 @@ export async function sessionSeries(client: PoolClient, sessionId: string, param
     let realized = 0n;
     let unrealized = 0n;
     let fees = 0n;
+    let capital = 0n;
     states.forEach((state, i) => {
+      capital += heldCapital(position.get(state.listingId) ?? FLAT, binary.has(state.listingId));
       const p = sessionPnl({
         opening: state.opening, openingMark: state.openingMark,
         current: position.get(state.listingId) ?? FLAT, mark: mark.get(state.listingId) ?? null,
@@ -198,7 +215,9 @@ export async function sessionSeries(client: PoolClient, sessionId: string, param
     series.realized.push(realized.toString());
     series.unrealized.push(unrealized.toString());
     series.fees.push(fees.toString());
+    series.capital.push(capital.toString());
   }
+  drawVolume(series, volumeBetween(fills, times));
   if (byListing) {
     const traded = new Set(fills.map(f => f.listing_id));
     const active = lines.filter(l => traded.has(l.listingId) || l.net.some(n => n !== 0n) || requested?.includes(l.listingId));
@@ -219,9 +238,10 @@ export async function strategySeries(
   const listingId = parsePositiveInt(params.listingId);
   if (Number.isNaN(listingId)) throw new BadRequest('listingId must be a positive integer');
   const requested = listingId === undefined ? parseListingIds(params.listingIds) : [listingId];
+  const times = pointTimes(w.fromMs, w.toMs, w.stepMs);
   const walk = await walkLifetime(client, {
     mode, strategyId, listingId, fromMs: w.fromMs, toMs: w.toMs, markStepMs: w.stepMs,
-    times: pointTimes(w.fromMs, w.toMs, w.stepMs), sessionEvents: true, keepListingIds: requested,
+    times, sessionEvents: true, keepListingIds: requested,
   });
   const series = seriesShape(w);
   if (params.byListing === 'true' || requested !== undefined) {
@@ -233,6 +253,8 @@ export async function strategySeries(
   series.realized = walk.realized.map(String);
   series.unrealized = walk.unrealized.map(String);
   series.fees = walk.fees.map(String);
+  series.capital = walk.capital.map(String);
+  drawVolume(series, volumeBetween(walk.fills, times));
   series.events = walk.events;
   return series;
 }
@@ -244,10 +266,12 @@ export async function firmSeries(client: PoolClient, mode: string, params: Recor
   const start = parseTime(params.start, 'start') ?? first ?? now;
   const until = parseTime(params.end, 'end');
   const w = window(start, until && until < now ? until : now, params);
+  const times = pointTimes(w.fromMs, w.toMs, w.stepMs);
   const walk = await walkLifetime(client, {
-    mode, strategyId: null, fromMs: w.fromMs, toMs: w.toMs, markStepMs: w.stepMs,
-    times: pointTimes(w.fromMs, w.toMs, w.stepMs), sessionEvents: false,
+    mode, strategyId: null, fromMs: w.fromMs, toMs: w.toMs, markStepMs: w.stepMs, times, sessionEvents: false,
   });
+  const volume = { volume: [] as string[], maker: [] as string[], taker: [] as string[] };
+  drawVolume(volume, volumeBetween(walk.fills, times));
   return {
     resolutionMs: w.stepMs,
     t: walk.t,
@@ -255,6 +279,8 @@ export async function firmSeries(client: PoolClient, mode: string, params: Recor
     realized: walk.realized.map(String),
     unrealized: walk.unrealized.map(String),
     fees: walk.fees.map(String),
+    ...volume,
+    capital: walk.capital.map(String),
     listings: [],
     listingCount: 0,
     other: null,

@@ -1,7 +1,7 @@
 import { PoolClient } from 'pg';
-import { MarkInputs, PositionState, pricedMark, toBigInt } from './ledger-math';
+import { heldCapital, MarkInputs, PositionState, pricedMark, toBigInt } from './ledger-math';
 import { lifetimePnl } from './pnl-math';
-import { FLAT, loadRewards, loadStrategyState, toMark } from './pnl-state';
+import { FLAT, loadBinaryListings, loadRewards, loadStrategyState, toMark } from './pnl-state';
 
 // Walks the ledger forward through a window, applying fills and marks in time order, and records the PnL at each of
 // the given moments. Every PnL-over-time view (a strategy's chart, the firm's chart with each strategy's line, the
@@ -23,6 +23,10 @@ export interface FillRow {
   listing_id: number;
   account_id: number | null;
   recorded_at: Date;
+  fill_qty: string | null;
+  fill_price: string | null;
+  fee: string | null;
+  liquidity: string | null;
   net_quantity_after: string;
   total_cost_after: string;
   realized_pnl_after: string | null;
@@ -100,6 +104,8 @@ export interface LifetimeWalk {
   realized: bigint[];
   unrealized: bigint[];
   fees: bigint[];
+  // What the positions held at each point tie up (heldCapital); dormant listings are flat and tie up nothing.
+  capital: bigint[];
   // [key][point]
   keyTotal: bigint[][];
   keyNet: bigint[][];
@@ -107,6 +113,8 @@ export interface LifetimeWalk {
   rewards: Map<number, bigint[]>;
   nonTrading: bigint[];
   events: SeriesEvent[];
+  // Every fill recorded in the window, in booking order.
+  fills: FillRow[];
 }
 
 // Lifetime PnL (see pnl-math): each session's realized PnL and fees summed, plus the unrealized PnL of the position
@@ -175,9 +183,9 @@ export async function walkLifetime(client: PoolClient, options: LifetimeWalkOpti
   const strategyIds = [...new Set([...[...keyed.values()].map(k => k.strategyId), ...rewardStrategies])].sort((a, b) => a - b);
   const walk: LifetimeWalk = {
     keys, strategyIds, dormantTotal,
-    t: [], total: [], realized: [], unrealized: [], fees: [],
+    t: [], total: [], realized: [], unrealized: [], fees: [], capital: [],
     keyTotal: keys.map(() => []), keyNet: keys.map(() => []),
-    rewards: new Map([...new Set(rewardStrategies)].map(id => [id, []])), nonTrading: [], events: [],
+    rewards: new Map([...new Set(rewardStrategies)].map(id => [id, []])), nonTrading: [], events: [], fills,
   };
   for (const r of rewardRows) {
     if (r.occurredAt.getTime() <= fromMs) continue;
@@ -220,6 +228,9 @@ export async function walkLifetime(client: PoolClient, options: LifetimeWalkOpti
     .reduce((net, held) => net + (position.get(held) ?? FLAT).netQuantity, 0n);
 
   const listingIds = [...new Set(keys.map(k => k.listingId))];
+  const binary = await loadBinaryListings(client, listingIds);
+  const capitalOf = (key: { strategyId: number; listingId: number }) => [...accountsOf.get(keyOf(key.strategyId, key.listingId)) ?? []]
+    .reduce((sum, held) => sum + heldCapital(position.get(held) ?? FLAT, binary.has(key.listingId)), 0n);
   const changes = inOrder([
     ...await loadMarkChanges(client, listingIds, fromMs, toMs, options.markStepMs),
     ...fills.map(fill => ({ timeMs: fill.recorded_at.getTime(), listingId: fill.listing_id, fill })),
@@ -271,7 +282,9 @@ export async function walkLifetime(client: PoolClient, options: LifetimeWalkOpti
     let realized = dormant.realized;
     let unrealized = 0n;
     let fees = dormant.fees;
+    let capital = 0n;
     keys.forEach((key, i) => {
+      capital += capitalOf(key);
       const p = valued(key);
       total += p.total;
       realized += p.realized;
@@ -294,6 +307,7 @@ export async function walkLifetime(client: PoolClient, options: LifetimeWalkOpti
     walk.realized.push(realized);
     walk.unrealized.push(unrealized);
     walk.fees.push(fees);
+    walk.capital.push(capital);
   }
   walk.events.sort((a, b) => a.time.localeCompare(b.time));
   return walk;

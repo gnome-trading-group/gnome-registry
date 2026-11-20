@@ -15,6 +15,8 @@ CDK and Lambdas (TypeScript), from `cdk/`:
 - `npm test` - all jest tests; one file: `npx jest test/ledger-math.test.ts`; one case: add `-t '<name>'`
 - `npm run runbooks` - regenerate `lambda/alerts/runbooks.generated.json` after editing `docs/runbooks/`
 - `npx cdk synth` - synth the pipeline and both stages; `npm run diff-substacks` - diff every stage stack
+- `npx cdk` resolves to this package's own `cdk` bin (the package is named `cdk`), which only synthesizes the app
+  and exits 0, so a `npx cdk deploy` deploys nothing. Call the CLI as `./node_modules/.bin/cdk` or `npm run cdk --`.
 - `npx ts-node scripts/poll-once.ts --exchange KALSHI --credentials <file>` - read one venue account as the venue
   poller does, posting nothing (other flags in the script header)
 
@@ -43,6 +45,14 @@ synth step, so run `npm test` yourself before handing off.
 - `cdk/lib/constructs/db-init-lambda.ts` - migration Lambda and the ad-hoc query Lambda
 - `cdk/lambda/endpoints/` - one handler per API resource; `base.ts` has `ResourceHandler`, `withTransaction`, actor helpers
 - `cdk/lambda/endpoints/ledger-*.ts`, `pnl-*.ts` - ledger writes/reads and PnL derived from fills and marks
+  - `pnl-volume.ts` - trading volume: money traded (qty × price) in VENUE and RECOVERY fills only, maker/taker
+    split from `ledger.fill.liquidity`, fills and fees; summed unscaled and scaled once. `/pnl/summary` carries it
+    (`volume` per session, `volumeToday` per strategy and firm), `/pnl/daily` per day, `/pnl/series` per point
+    (since the point before) beside `capital` (ledger-math `heldCapital`: a binary's worst loss at settlement, binary
+    = security `asset_class` PREDICTION).
+  - `pnl-exchanges.ts` - `GET /pnl/exchanges?mode=&tz=&days=[&exchangeId=]`: volume per exchange, by venue account
+    (live) and strategy, the rewards it paid (live: `REWARD` transfers on its accounts; paper: accrual estimates) and
+    net cost per $100 traded; daily volume with `exchangeId`. Fee tiers aren't modelled yet.
 - `cdk/lambda/endpoints/controller-reads.ts` + `controller-read-paths.ts` - one Lambda for the controller's GET reads
 - `cdk/lambda/endpoints/samples.ts` - samples: subject kinds (`SUBJECT_KINDS`), parsing, storing, ingest and paged
   reads (the samples API's Lambda; the heartbeat uses it too)

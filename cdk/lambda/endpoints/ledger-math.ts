@@ -124,6 +124,14 @@ function saturate(value: bigint): bigint {
   return value > LONG_MAX ? LONG_MAX : value;
 }
 
+// What a held position alone ties up, with no working orders: its worst loss if it settles against it, for a binary.
+export function heldCapital(position: PositionState, binary: boolean): bigint {
+  return committedCapital({
+    binary, netQuantity: position.netQuantity, totalCost: position.totalCost,
+    leavesBuyQty: 0n, leavesBuyNotional: 0n, leavesSellQty: 0n, leavesSellNotional: 0n,
+  });
+}
+
 export function committedCapital(c: CommittedInputs): bigint {
   if (!c.binary) return saturate(abs(c.totalCost) + c.leavesBuyNotional + c.leavesSellNotional);
   const net = c.netQuantity;

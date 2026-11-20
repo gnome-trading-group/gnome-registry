@@ -9,6 +9,7 @@ import {
   loadStrategyState, OutOfSessionSource, PositionFill, RewardRow, SessionListingState, startOfDay, StrategyListingState,
   sumRewards,
 } from './pnl-state';
+import { NO_VOLUME, sessionVolumes, strategyVolumeSince, sumVolumes, volumeFields } from './pnl-volume';
 
 // The PnL the controller shows, computed here once so the page never sums scaled integers itself. Money, prices and
 // quantities are scaled-integer strings; times are ISO UTC.
@@ -87,6 +88,7 @@ export async function sessionSummary(client: PoolClient, sessionId: string, now:
   const refusals = (await client.query(
     'SELECT listing_id, reason, count FROM ledger.reject_count WHERE session_id = $1 ORDER BY count DESC',
     [sessionId])).rows;
+  const volume = (await sessionVolumes(client, [sessionId])).get(sessionId) ?? NO_VOLUME;
   const accruals = await latestAccruals(client, { sessionId });
   const rewardTotals = sessionRewardTotals(accruals);
 
@@ -110,6 +112,7 @@ export async function sessionSummary(client: PoolClient, sessionId: string, now:
       openOrders: Number(counts.open_orders),
       refused: refusals.reduce((acc, r) => acc + Number(r.count), 0),
     },
+    volume: volumeFields(volume),
     refusals: refusals.map(r => ({ listingId: r.listing_id, reason: r.reason, count: Number(r.count) })),
     // The session's own estimate of venue liquidity rewards (paper), outside its trading PnL; none in live.
     rewards: {
@@ -214,10 +217,7 @@ function sessionListingRow(
 
 export async function sessionsTotals(client: PoolClient, sessionIds: string[], now: Date) {
   const states = await loadSessionStates(client, sessionIds, now);
-  const fills = (await client.query(`
-    SELECT session_id, count(*) AS fills FROM ledger.fill
-    WHERE session_id = ANY($1::text[]) AND source IN ('VENUE', 'RECOVERY') GROUP BY session_id`,
-  [sessionIds])).rows;
+  const volumes = await sessionVolumes(client, sessionIds);
   const rewardGross = await sessionsRewardGross(client, sessionIds);
   return sessionIds.map(sessionId => {
     const own = states.filter(s => s.sessionId === sessionId);
@@ -225,7 +225,8 @@ export async function sessionsTotals(client: PoolClient, sessionIds: string[], n
       sessionId,
       opening: own.some(s => s.startedFlat) ? 'FLAT' : own.some(s => s.opening.netQuantity !== 0n) ? 'INHERITED' : 'NONE',
       totals: strings(sessionTotals(own.map(s => sessionPnl(s)))),
-      fills: Number(fills.find(f => f.session_id === sessionId)?.fills ?? 0),
+      fills: volumes.get(sessionId)?.fills ?? 0,
+      volume: volumeFields(volumes.get(sessionId) ?? NO_VOLUME),
       rewardsEstimated: (rewardGross.get(sessionId) ?? 0n).toString(),
     };
   });
@@ -308,6 +309,7 @@ export async function strategySummary(
   const modes = (await client.query(
     'SELECT DISTINCT mode FROM strategy.session WHERE strategy_id = $1', [strategyId])).rows.map(r => r.mode);
   const review = await needsReview(client, strategyId, mode);
+  const volumeToday = (await strategyVolumeSince(client, mode, strategyId, dayStart)).get(strategyId) ?? NO_VOLUME;
 
   const active = current.listings.filter(l => activeToday(l, review, dayStart));
   const history = lifetimeTotals(current.listings.filter(l => !activeToday(l, review, dayStart)));
@@ -333,6 +335,7 @@ export async function strategySummary(
         lifetime.total + rewards - sessionPnls.reduce((acc, p) => acc + p.total, 0n), outside, rewards),
     },
     openPositions: current.listings.filter(l => l.position.netQuantity !== 0n).length,
+    volumeToday: volumeFields(volumeToday),
     history: {
       count: current.listings.length - active.length,
       ...strings({ total: history.total, realized: history.realized, fees: history.fees }),
@@ -367,6 +370,7 @@ export async function firmSummary(client: PoolClient, mode: string, timeZone: st
   const rewardRows = await loadRewards(client, mode, { strategyId: null, firm: true }, now);
   const given = rewardRows.filter(r => r.strategyId !== null);
   const firmOnly = rewardRows.filter(r => r.strategyId === null);
+  const volumes = await strategyVolumeSince(client, mode, null, dayStart);
   const strategyIds = [...new Set([...current.listings.map(l => l.strategyId), ...given.map(r => r.strategyId as number)])]
     .sort((a, b) => a - b);
   const strategies = strategyIds.map(strategyId => {
@@ -384,6 +388,7 @@ export async function firmSummary(client: PoolClient, mode: string, timeZone: st
         rewards,
       }),
       openPositions: own.filter(l => l.position.netQuantity !== 0n).length,
+      volumeToday: volumeFields(volumes.get(strategyId) ?? NO_VOLUME),
     };
   });
   const trading = lifetimeTotals(current.listings);
@@ -410,6 +415,7 @@ export async function firmSummary(client: PoolClient, mode: string, timeZone: st
       byProgram: nonTrading.byProgram,
       byExchange: nonTrading.byExchange,
     },
+    volumeToday: volumeFields(sumVolumes(volumes.values())),
     strategies,
   };
 }

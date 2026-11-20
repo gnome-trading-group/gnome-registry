@@ -2,6 +2,7 @@ import { PoolClient } from 'pg';
 import { accrualDeltas } from '../rewards/accruals';
 import { MarkInputs, PositionState, pricedMark, toBigInt } from './ledger-math';
 import { PriceBand } from './price-bands';
+import { AssetClass } from '../sync/venues/exchange-types';
 
 // Reads the ledger state PnL is derived from: positions from fills (GAP rows carry no position of their own) and
 // marks as of a moment. Every lookup is an as-of query on an indexed (key, time) pair.
@@ -96,6 +97,16 @@ export async function loadListingInfo(client: PoolClient, listingIds: number[]):
     });
   }
   return info;
+}
+
+// The listings among these that are binary contracts, which pay $1 or nothing and so can lose at most what was paid
+// for a long and the rest of the dollar for a short.
+export async function loadBinaryListings(client: PoolClient, listingIds: number[]): Promise<Set<number>> {
+  if (listingIds.length === 0) return new Set();
+  const rows = (await client.query(`
+    SELECT l.listing_id FROM sm.listing l JOIN sm.security s USING (security_id)
+    WHERE l.listing_id = ANY($1::int[]) AND s.asset_class = $2`, [listingIds, AssetClass.PREDICTION])).rows;
+  return new Set(rows.map(r => r.listing_id as number));
 }
 
 // Each session's listings: what it inherited when it started (nothing if it started flat), what it holds now (or
