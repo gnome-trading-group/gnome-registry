@@ -8,7 +8,7 @@ interface Props extends cdk.StackProps {
 }
 
 // What the venue syncs last read from their venues (one object per kind of data and venue, under a prefix per kind),
-// so a sync reads the database only for what changed. Derived: a full pass rebuilds it, so it may be lost.
+// so a sync reads the database only for what changed. Derived: a reconcile rebuilds it, so it may be lost.
 export class CacheStack extends cdk.Stack {
   public readonly bucket: s3.Bucket;
 

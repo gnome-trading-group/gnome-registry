@@ -246,7 +246,7 @@ export class ApiStack extends cdk.Stack {
     }));
     this.route('gateways/ensure', new apigw.LambdaIntegration(gatewayWanted, { scopePermissionToMethod: false }),
       { POST: [SERVICE, PERSON] });
-    // A shard saw a venue announce a listing's new tick: queued for the spec sync (SpecSyncStack), which reads the venue
+    // A shard saw a venue announce a listing's new tick: queued for the specs sync (MetadataSyncStack), which reads the venue
     // and records the change dated when the shard saw it. Outside the VPC, to reach the queue, which it names.
     const specRefresh = new lambda.NodejsFunction(this, 'listing-spec-refresh-lambda', {
       entry: join(__dirname, '..', '..', 'lambda', 'endpoints', 'listing-spec-refresh.ts'),

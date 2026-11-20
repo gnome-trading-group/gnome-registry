@@ -1,4 +1,4 @@
-// The queue POST /listing-specs/refresh puts a listing a shard saw change on, which the spec sync (SpecSyncStack) reads;
+// The queue POST /listing-specs/refresh puts a listing a shard saw change on, which the specs sync (MetadataSyncStack) reads;
 // by name, so the API stack needn't depend on the stack that owns it.
 export const SPEC_REFRESH_QUEUE = 'listing-spec-refresh.fifo';
 

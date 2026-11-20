@@ -3,9 +3,13 @@ import { join } from 'path';
 import { ValidationError } from '../lambda/endpoints/base';
 import { dollars, parseProgram, ProgramVersion, trimToWindow } from '../lambda/endpoints/incentive-programs';
 import { validateIncentiveDefinition } from '../lambda/incentives/definition';
-import { isKalshiPayoutRun, postInChunks, syncVenue, unlistedEnded } from '../lambda/sync/incentive-sync';
+import {
+  IncentiveSnapshot, incentivesKind, postInChunks, ReadOpen, reconcile, sweep, termsHash, termsOf, unlistedEnded, VenueSync,
+} from '../lambda/sync/metadata/incentives';
+import { runScheduled } from '../lambda/sync/metadata/kind';
+import { memorySnapshots } from './memory-snapshots';
 import { parseKalshiIncentiveProgram, readKalshiIncentivePrograms, UNPAID_INCENTIVE_STATUSES } from '../lambda/sync/venues/kalshi';
-import { parsePolymarketIntlRewardMarket } from '../lambda/sync/venues/polymarket-intl';
+import { parsePolymarketIntlRewardMarket, polymarketIntlUnlistedEnd } from '../lambda/sync/venues/polymarket-intl';
 import {
   easternDayStart, kickoffTime, nextEasternMidnight, parsePolymarketUsIncentiveMarket, polymarketUsUnlistedEnd,
   readPolymarketUsIncentivePrograms,
@@ -49,12 +53,6 @@ describe('Kalshi incentive programs', () => {
     for (const p of programs.map(parseKalshiIncentiveProgram).filter(Boolean)) {
       expect(() => validateIncentiveDefinition('KALSHI', p!.definition)).not.toThrow();
     }
-  });
-
-  it('sweeps payouts only on the first run after 11:00 UTC', () => {
-    expect(isKalshiPayoutRun(new Date('2026-11-12T11:07:00Z'))).toBe(true);
-    expect(isKalshiPayoutRun(new Date('2026-11-12T11:15:00Z'))).toBe(false);
-    expect(isKalshiPayoutRun(new Date('2026-11-12T10:59:00Z'))).toBe(false);
   });
 
   it('reads a payout sweep of hundreds of thousands of programs', async () => {
@@ -288,16 +286,16 @@ describe('Polymarket US incentive programs', () => {
       expect(easternDayStart(new Date('2026-11-17T04:59:59Z')).toISOString()).toBe('2026-11-16T05:00:00.000Z');
     });
 
-    it('closes the market\'s programs once, through the sync, and leaves the ones still listed', async () => {
+    it('closes the market\'s programs once, through a reconcile, and leaves the ones still listed', async () => {
       const posted: IncentiveProgramReading[][] = [];
-      const result = await syncVenue('POLYMARKET_US', {
+      const result = await reconcile('POLYMARKET_US', {
         read: async () => ({ programs: [live], stopped: new Set([daily.venueMarket]) }),
         closeUnlisted: (program, at, venueRead) => polymarketUsUnlistedEnd(program, at, venueRead.stopped!),
       }, now, async (rows) => {
         posted.push(rows);
         return { inserted: rows.length, unchanged: 0 };
-      }, async () => [live, daily]);
-      expect(result).toMatchObject({ read: 1, ended: 1 });
+      }, async () => [live, daily], memorySnapshots<IncentiveSnapshot>().snapshots);
+      expect(result).toMatchObject({ Read: 1, Ended: 1 });
       expect(posted[1]).toEqual([{ ...daily, periodEnd: '2026-11-17T05:00:00.000Z' }]);
     });
   });
@@ -378,16 +376,127 @@ describe('incentive sync', () => {
 
   it('closes unlisted programs at the UTC day start for a venue that lists only current programs', async () => {
     const posted: { rows: IncentiveProgramReading[]; source: string }[] = [];
-    const result = await syncVenue('POLYMARKET_INTL', {
+    const result = await reconcile('POLYMARKET_INTL', {
       read: async () => ({ programs: [reading('a')] }),
-      closeUnlisted: (_program, now) => new Date(Math.floor(now.getTime() / 86_400_000) * 86_400_000),
+      closeUnlisted: (_program, now) => polymarketIntlUnlistedEnd(now),
     }, new Date('2026-11-12T17:30:00Z'),
     async (rows, _code, source) => {
       posted.push({ rows, source });
       return { inserted: rows.length, unchanged: 0 };
     },
-    async () => [reading('a'), reading('gone')]);
-    expect(result).toMatchObject({ venue: 'POLYMARKET_INTL', read: 1, ended: 1, inserted: 2 });
+    async () => [reading('a'), reading('gone')], memorySnapshots<IncentiveSnapshot>().snapshots);
+    expect(result).toMatchObject({ Read: 1, Ended: 1, Written: 2 });
     expect(posted[1].rows).toEqual([{ ...reading('gone'), periodEnd: '2026-11-12T00:00:00.000Z' }]);
+  });
+
+  describe('a sweep', () => {
+    const now = new Date('2026-11-12T17:30:00Z');
+    const posting = () => {
+      const posted: IncentiveProgramReading[][] = [];
+      const post = async (rows: IncentiveProgramReading[]) => { posted.push(rows); return { inserted: rows.length, unchanged: 0 }; };
+      return { posted, post };
+    };
+    // A sweep never pages the registry's open programs: that is the daily reconcile's read.
+    const noOpenRead: ReadOpen = async () => { throw new Error('a sweep read the registry\'s open programs'); };
+    const pmIntl = (programs: IncentiveProgramReading[]): VenueSync => ({
+      read: async () => ({ programs }), closeUnlisted: (_p, at) => polymarketIntlUnlistedEnd(at),
+    });
+    const held = (...programs: IncentiveProgramReading[]): IncentiveSnapshot =>
+      ({ programs: Object.fromEntries(programs.map(p => [p.venueProgramId, [termsHash(p), termsOf(p)]])) });
+
+    it('posts only the programs that are new or whose terms moved, never for their raw payload alone', async () => {
+      const { snapshots } = memorySnapshots<IncentiveSnapshot>({ POLYMARKET_INTL: held(reading('a'), reading('b')) });
+      const { posted, post } = posting();
+      const read = [
+        { ...reading('a'), raw: { fetchedAt: 'now' }, sourceRef: 'y' },
+        { ...reading('b'), reward: '6' },
+        reading('c'),
+      ];
+      const counts = await sweep('POLYMARKET_INTL', pmIntl(read), now, post, noOpenRead, snapshots);
+      expect(posted.flat().map(p => p.venueProgramId)).toEqual(['b', 'c']);
+      expect(counts).toMatchObject({ Read: 3, Moved: 2, Written: 2, Ended: 0 });
+    });
+
+    it('ends a program a complete read stops listing from the terms it holds, once', async () => {
+      const { snapshots, held: heldNow } = memorySnapshots<IncentiveSnapshot>({ POLYMARKET_INTL: held(reading('a'), reading('gone')) });
+      const { posted, post } = posting();
+      expect(await sweep('POLYMARKET_INTL', pmIntl([reading('a')]), now, post, noOpenRead, snapshots))
+        .toMatchObject({ Moved: 0, Ended: 1 });
+      expect(posted.flat()).toEqual([{ ...reading('gone'), sourceRef: 'registry', raw: null, periodEnd: '2026-11-12T00:00:00.000Z' }]);
+      expect(heldNow('POLYMARKET_INTL')!.programs.gone[1]!.periodEnd).toBe('2026-11-12T00:00:00.000Z');
+      posted.length = 0;
+      expect(await sweep('POLYMARKET_INTL', pmIntl([reading('a')]), now, post, noOpenRead, snapshots)).toMatchObject({ Ended: 0 });
+      expect(posted.flat()).toEqual([]);
+    });
+
+    it('keeps only hashes for a venue that never ends programs itself, and leaves the ones it stops listing', async () => {
+      const kalshi: VenueSync = { read: async () => ({ programs: [reading('a')] }) };
+      const { snapshots, held: heldNow } = memorySnapshots<IncentiveSnapshot>({ KALSHI: { programs: { paid: ['h', null] } } });
+      const { posted, post } = posting();
+      expect(await sweep('KALSHI', kalshi, now, post, noOpenRead, snapshots)).toMatchObject({ Moved: 1, Ended: 0 });
+      expect(heldNow('KALSHI')!.programs).toEqual({ paid: ['h', null], a: [termsHash(reading('a')), null] });
+      expect(posted.flat().map(p => p.venueProgramId)).toEqual(['a']);
+    });
+
+    it('drops programs that ended long ago from the snapshot', async () => {
+      const old = { ...reading('old'), periodEnd: '2026-08-01T00:00:00.000Z' };
+      const { snapshots, held: heldNow } = memorySnapshots<IncentiveSnapshot>({ POLYMARKET_INTL: held(reading('a'), old) });
+      const { post } = posting();
+      await sweep('POLYMARKET_INTL', pmIntl([reading('a')]), now, post, noOpenRead, snapshots);
+      expect(Object.keys(heldNow('POLYMARKET_INTL')!.programs)).toEqual(['a']);
+    });
+
+    it("lets Kalshi's payouts sweep post only the programs whose payout is new, after a reconcile", async () => {
+      const unpaid = reading('open');
+      const paid = { ...reading('paid'), paidOut: true };
+      const flipped = { ...reading('closed'), paidOut: false };
+      let payNow = false;
+      const kalshi: VenueSync = {
+        reconcileVariant: 'payouts',
+        read: async (_now, variant) => ({
+          programs: variant === 'payouts' ? [unpaid, paid, payNow ? { ...flipped, paidOut: true } : flipped] : [unpaid, flipped],
+        }),
+      };
+      const { snapshots } = memorySnapshots<IncentiveSnapshot>();
+      const { posted, post } = posting();
+      await reconcile('KALSHI', kalshi, now, post, noOpenRead, snapshots);
+      expect(posted.flat().map(p => p.venueProgramId)).toEqual(['open', 'paid', 'closed']);
+      posted.length = 0;
+      expect(await sweep('KALSHI', kalshi, now, post, noOpenRead, snapshots, 'payouts')).toMatchObject({ Moved: 0 });
+      payNow = true;
+      expect(await sweep('KALSHI', kalshi, now, post, noOpenRead, snapshots, 'payouts')).toMatchObject({ Moved: 1 });
+      expect(posted.flat()).toEqual([{ ...flipped, paidOut: true }]);
+    });
+
+    it("keeps a reconcile's snapshot when a sweep running alongside it saves after", async () => {
+      const { snapshots, held: heldNow } = memorySnapshots<IncentiveSnapshot>({ POLYMARKET_INTL: held(reading('a')) });
+      const { post } = posting();
+      const warn = jest.spyOn(console, 'warn').mockImplementation(() => undefined);
+      const racing: VenueSync = {
+        read: async () => {
+          await snapshots({ venue: 'POLYMARKET_INTL' }).replace(held(reading('rebuilt')));
+          return { programs: [reading('a'), reading('b')] };
+        },
+        closeUnlisted: (_p, at) => polymarketIntlUnlistedEnd(at),
+      };
+      await sweep('POLYMARKET_INTL', racing, now, post, noOpenRead, snapshots);
+      expect(Object.keys(heldNow('POLYMARKET_INTL')!.programs)).toEqual(['rebuilt']);
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining('another run saved the snapshot first'));
+      warn.mockRestore();
+    });
+
+    it('reconciles to make a snapshot when it has none, and reports that through the harness', async () => {
+      const lines: string[] = [];
+      jest.spyOn(console, 'log').mockImplementation((line: unknown) => { lines.push(String(line)); });
+      jest.spyOn(console, 'warn').mockImplementation(() => undefined);
+      const { snapshots, held: heldNow } = memorySnapshots<IncentiveSnapshot>();
+      const { post } = posting();
+      const kind = incentivesKind(post, async () => [], { POLYMARKET_INTL: pmIntl([reading('a')]) });
+      await runScheduled(kind, { mode: 'sweep', venue: 'POLYMARKET_INTL' }, { now, snapshots });
+      expect(Object.keys(heldNow('POLYMARKET_INTL')!.programs)).toEqual(['a']);
+      const metrics = lines.map(l => { try { return JSON.parse(l); } catch { return null; } }).find(m => m?._aws);
+      expect(metrics).toMatchObject({ Kind: 'incentives', Mode: 'sweep', Venue: 'POLYMARKET_INTL', Ok: 0, NoSnapshot: 1 });
+      jest.restoreAllMocks();
+    });
   });
 });

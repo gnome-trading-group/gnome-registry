@@ -11,8 +11,7 @@ import { SettlementSweeperStack } from "./stacks/settlement-sweeper-stack";
 import { SamplesApiStack } from "./stacks/samples-api-stack";
 import { VenuePollerStack } from "./stacks/venue-poller-stack";
 import { MarkPollerStack } from "./stacks/mark-poller-stack";
-import { IncentiveSyncStack } from "./stacks/incentive-sync-stack";
-import { SpecSyncStack } from "./stacks/spec-sync-stack";
+import { MetadataSyncStack } from "./stacks/metadata-sync-stack";
 import { CacheStack } from "./stacks/cache-stack";
 import { MonitoringStack } from "./stacks/monitoring-stack";
 import { AlertingStack } from "./stacks/alerting-stack";
@@ -71,14 +70,9 @@ class AppStage extends cdk.Stage {
       apiKey: apiStack.apiKey,
     });
 
-    new IncentiveSyncStack(this, "IncentiveSyncStack", {
-      api: apiStack.api,
-      apiKey: apiStack.apiKey,
-    });
-
     const cacheStack = new CacheStack(this, "CacheStack", { stage: config.account.stage });
 
-    new SpecSyncStack(this, "SpecSyncStack", {
+    new MetadataSyncStack(this, "MetadataSyncStack", {
       api: apiStack.api,
       apiKey: apiStack.apiKey,
       cache: cacheStack.bucket,

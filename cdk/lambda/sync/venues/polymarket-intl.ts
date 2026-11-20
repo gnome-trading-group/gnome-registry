@@ -322,6 +322,14 @@ export function parsePolymarketIntlRewardMarket(m: Record<string, any>): Incenti
   });
 }
 
+/**
+ * When a program a complete read no longer lists ended: Polymarket pays per UTC day and doesn't say whether a part day
+ * is paid, so the day it went missing isn't.
+ */
+export function polymarketIntlUnlistedEnd(now: Date): Date {
+  return new Date(Math.floor(now.getTime() / DAY_MS) * DAY_MS);
+}
+
 // Every page, or an error: a partial list would read as programs ending.
 export async function readPolymarketIntlIncentivePrograms(): Promise<IncentiveProgramReading[]> {
   const programs: IncentiveProgramReading[] = [];

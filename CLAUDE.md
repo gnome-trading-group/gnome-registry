@@ -59,8 +59,9 @@ synth step, so run `npm test` yourself before handing off.
 - `cdk/lambda/db-init/migrations/NNN_*.sql` - schema migrations, applied in filename order
 - `cdk/lambda/alerts/` - ingest, router, store, sinks (Slack, incident.io), `alert-types.ts` (type catalog + severity)
 - `cdk/lambda/monitoring/rules/` - findings shared by the controller overview and the alert tick
-- `cdk/lambda/sync/` - scheduled jobs: exchange sync, venue poller, mark poller, incentive sync, spec sync, settlement
-  sweeper, strategy-session monitor, sample partitions. What each job reads from a venue lives in that venue's file in
+- `cdk/lambda/sync/` - scheduled jobs: exchange sync, venue poller, mark poller, settlement sweeper, strategy-session
+  monitor, sample partitions; `sync/metadata/` the venue metadata syncs (`kind.ts` the shared run, `schedule.ts` every
+  kind's rules, `snapshot.ts`, `metrics.ts`, one file per kind: `specs.ts`, `incentives.ts`). What each job reads from a venue lives in that venue's file in
   `sync/venues/` (`kalshi.ts`, `polymarket-intl.ts`, `polymarket-us.ts`, `hyperliquid.ts`, `lighter.ts`); exchange
   sync's adapter interface and registry are `exchange-types.ts` and `exchange-adapters.ts` there
 - `cdk/lambda/fees/`, `cdk/lambda/simulation/` - fee calculator/timeline and simulation-parameter resolution
@@ -123,8 +124,8 @@ synth step, so run `npm test` yourself before handing off.
 - Deploys: push to `main` runs the Maven release (bump + publish jar + tag); the tag push force-updates the `release`
   branch, which `RegistryPipeline` (in the InfraPipelines account) builds: synth, `Dev` stage, manual `ApproveProd`,
   `Prod` stage. Dev and prod are separate AWS accounts. Stacks per stage: `Dev-`/`Prod-` + `DatabaseStack`,
-  `ApiStack`, `ExchangeSyncStack`, `SpecSyncStack`, `StrategySessionMonitorStack`, `SettlementSweeperStack`, `VenuePollerStack`,
-  `MarkPollerStack`, `IncentiveSyncStack`, `CacheStack`, `SamplesApiStack`, `MonitoringStack`, `AlertingStack`. New migrations apply
+  `ApiStack`, `ExchangeSyncStack`, `MetadataSyncStack`, `StrategySessionMonitorStack`, `SettlementSweeperStack`, `VenuePollerStack`,
+  `MarkPollerStack`, `CacheStack`, `SamplesApiStack`, `MonitoringStack`, `AlertingStack`. New migrations apply
   during the `DatabaseStack` deploy of each stage (see Migrations).
 - What runs:
   - ApiStack: the Registry API (stage `api`), one Lambda per resource in the VPC; the strategy-session launcher
@@ -208,7 +209,16 @@ synth step, so run `npm test` yourself before handing off.
     status flag) and `volume_24h` (the venue's 24h notional, which market-data `listing_filter` rules rank by), and
     retires an active listing the venue stopped returning, only of a security type the fetch returned and only where
     the fetch covered it (a Hyperliquid sub-DEX that failed to load covers nothing).
-  - SpecSyncStack: the only writer of listing specs (`sm.listing_spec`; migration 084: each spec's prices are
+  - MetadataSyncStack: the venue metadata the registry keeps, one Lambda per kind (specs, incentives; fee schedules
+    and fee tiers to come), all in `sync/metadata/`. `kind.ts` runs a mode for a venue's units (a unit is a venue, or
+    an account on it), keeps each unit's snapshot (`<kind>/<venue>[/<scope>].json.gz` in the cache bucket, derived: a
+    lost one costs a reconcile) and turns each unit's counts into `Registry/MetadataSync` metrics (Kind, Mode, Venue:
+    `Ok` and the kind's counts); a refused write fails the run, a sweep that found no snapshot reports `Ok` 0 and
+    `NoSnapshot` 1. `schedule.ts` places every kind × venue × mode run with a read budget so no two reads of one venue,
+    and no two whole-population passes, overlap (the stack's test checks it); the daily passes run at 08:00 and 09:00
+    UTC, the hours the hourly specs reconcile skips. The stack holds its own alarms (fault per kind, a heartbeat per
+    kind × venue on sweep and reconcile, `NoSnapshot`, Kalshi `ChangedMissed`) and exports nothing.
+  - Listing specs (the `specs` kind): the only writer of listing specs (`sm.listing_spec`; migration 084: each spec's prices are
     `price_bands`, contiguous `{start, end, step}` bands from 0, the Java client's `PriceGrid`). Readers per venue in
     `sync/venues/<venue>.ts` (Kalshi `price_ranges`, mirrored for `:no`; Polymarket Intl Gamma then the CLOB, never a
     default; Polymarket US by slug; Hyperliquid's significant-figure decade grid, outcome contracts by rule; Lighter).
@@ -219,13 +229,12 @@ synth step, so run `npm test` yourself before handing off.
       `min_updated_ts`, non-trading changes only, never multivariate markets) is also read for its markets changed
       since the snapshot, in shadow: the sweep logs and counts (`ChangedRead`, `ChangedMissed`) the moved listings
       that read didn't name, while the full read still decides what is written.
-    - `full` hourly, staggered: every active listing (keyset-paged, paced) against its venue; it rebuilds the
-      venue's snapshot.
+    - `reconcile` hourly (not 08:00 or 09:00 UTC), staggered: every active listing (keyset-paged, paced) against its
+      venue; it rebuilds the venue's snapshot. A sweep with no snapshot reconciles first.
     - `missing` daily at 08:xx UTC: first specs for older listings still without one.
-    A snapshot (`specs/<EXCHANGE>.json.gz` in CacheStack's `gnome-registry-cache-<stage>`, `sync/metadata/`) holds,
-    per active listing, the hash of the spec its venue last gave. It is derived: a lost one costs a full pass. Each run
-    emits `Registry/MetadataSync` metrics (Kind, Mode, Venue: Ok, Listings, Moved, Written, Refused, Unknown). A
-    listing's first spec holds since the epoch; a change is dated when seen. `POST /listing-specs/refresh` (shards; outside the VPC) puts a listing a venue announced
+    Its snapshot holds, per active listing, the hash of the spec its venue last gave. Counts: Listings, Moved,
+    Written, Refused, Unknown (and ChangedRead, ChangedMissed while shadowing). A listing's first spec holds since the
+    epoch; a change is dated when seen. `POST /listing-specs/refresh` (shards; outside the VPC) puts a listing a venue announced
     a new tick for on FIFO queue `listing-spec-refresh.fifo`, whose Lambda reads the venue and dates the change when
     the shard saw it; one the venue never confirms goes to `listing-spec-refresh-dlq.fifo` (alarmed). After a listing's
     first spec, the insert trigger refuses a spec that is neither dated (`effectiveFrom`) nor a `correction`. Running
@@ -275,12 +284,15 @@ synth step, so run `npm test` yourself before handing off.
     `RewardRow`s (`source: 'ESTIMATE'`), so paper PnL's rewards terms count them; the session summary carries
     `rewards` (gross, paid once a period ended, per program) outside its trading PnL. `GET /ledger/reward-accruals`
     (`sessionId`, or `strategyId` + `mode`) gives each listing and program's latest snapshot.
-  - IncentiveSyncStack: every 15 min, reads the venues' incentive programs (Kalshi liquidity incentives, Polymarket
+  - Incentive programs (the `incentives` kind, MetadataSyncStack): reads the venues' incentive programs (Kalshi liquidity incentives, Polymarket
     Intl liquidity rewards, Polymarket US liquidity programs) from their public APIs and posts them to
     `/incentive-programs`, which keeps new and changed ones in `sm.incentive_program` (append-only, point in time like
-    fee schedules; the registry sets
-    `effective_from`). Kalshi: the unpaid programs every run, plus a sweep of paid ones in the first run after 11:00
-    UTC; `scripts/backfill-incentive-programs.ts` loads older ones. Polymarket Intl lists only current programs, so one
+    fee schedules; the registry sets `effective_from`). `sweep` every 15 min per venue posts only the programs new or
+    whose terms moved against the venue's snapshot (each program's terms hash, never its raw payload), and ends a
+    program a complete read stops listing from the terms the snapshot holds (kept only for venues that end programs);
+    `reconcile` daily at 09:xx UTC posts every program and pages the registry's open programs, then rebuilds the
+    snapshot. Kalshi: the unpaid programs every sweep, plus its `payouts` sweep (daily at 11:xx UTC) of the ones paid in
+    the last 45 days; `scripts/backfill-incentive-programs.ts` loads older ones. Polymarket Intl lists only current programs, so one
     that drops off a complete read is ended at that UTC day's start. Polymarket US (the gateway's
     `/v1/incentives`, which reads `page_size`/`page_token`, not the documented camelCase) gives one program per
     (programId, market, period), whose reward is the programId's one pool, shared by score across every market naming
@@ -303,8 +315,10 @@ synth step, so run `npm test` yourself before handing off.
   `alertrouter`). Orchestrator logs, which this API's own `strategy-sessions/logs` route reads, are under `/gnome/orchestrator/*`.
 - Alarms and alerts it raises:
   - `Registry-*` (MonitoringStack): API 5xx (Error), Lambda faults for ExchangeSync, SettlementSweeper, VenuePoller,
-    MarkPoller, IncentiveSync, SpecSync, SpecRefresh, StrategySessionMonitor, SamplePartitions (Error); a spec refresh in
-    the dead-letter queue (Warning); samples API 5xx (Warning), RDS free storage < 5 GiB and CPU > 80% (Warning). No actions; they
+    MarkPoller, StrategySessionMonitor, SamplePartitions (Error); samples API 5xx (Warning), RDS free storage < 5 GiB,
+    CPU > 80% and EBS byte or IO burst balance < 50% (Warning). `Registry--MetadataSync-*` (MetadataSyncStack): each
+    kind's fault and the specs refresh fault (Error), a heartbeat per kind × venue on sweep and reconcile (Error), a
+    sweep with no snapshot, a refresh in the dead-letter queue, Kalshi's `ChangedMissed` (Warning). No actions; they
     reach the router as `CLOUDWATCH_ALARM`. Runbook: `docs/runbooks/cloudwatch/Registry.md`.
   - `AlertingMeta-<RouterErrors|StoreErrors|IngestErrors|Dlq|TickNotRunning|Undelivered>-Critical`: alerting's own
     health; bypass the router (SNS to incident.io in prod, and email). Runbook: `docs/runbooks/cloudwatch/AlertingMeta.md`.

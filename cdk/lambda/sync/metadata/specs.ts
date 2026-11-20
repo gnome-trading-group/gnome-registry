@@ -1,25 +1,26 @@
 import { SQSBatchResponse, SQSEvent } from 'aws-lambda';
-import { RefreshRequest } from '../endpoints/listing-spec-refresh';
-import { PriceBand, validatePriceBands } from '../endpoints/price-bands';
-import { readHyperliquidSpecs } from './venues/hyperliquid';
-import { readLighterSpecs } from './venues/lighter';
-import { registryFetch, registryFetchAll, resolveApiKey } from './registry-client';
-import { readKalshiChangedSpecs, readKalshiSpecs } from './venues/kalshi';
-import { readPolymarketIntlSpecs } from './venues/polymarket-intl';
-import { readPolymarketUsSpecs } from './venues/polymarket-us';
-import { emitSyncMetrics } from './metadata/metrics';
-import { hashOf, s3Snapshot, SnapshotStore } from './metadata/snapshot';
-import { chunks, pause, ReadChangedSpecs, ReadSpecs, sameSpec, VenueSpec } from './venues/specs';
+import { RefreshRequest } from '../../endpoints/listing-spec-refresh';
+import { PriceBand, validatePriceBands } from '../../endpoints/price-bands';
+import { readHyperliquidSpecs } from '../venues/hyperliquid';
+import { readLighterSpecs } from '../venues/lighter';
+import { registryFetch, registryFetchAll, resolveApiKey } from '../registry-client';
+import { readKalshiChangedSpecs, readKalshiSpecs } from '../venues/kalshi';
+import { readPolymarketIntlSpecs } from '../venues/polymarket-intl';
+import { readPolymarketUsSpecs } from '../venues/polymarket-us';
+import { Counts, Kind, Mode, runScheduled, RunRequest, s3Snapshots, Snapshots } from './kind';
+import { hashOf } from './snapshot';
+import { chunks, pause, ReadChangedSpecs, ReadSpecs, sameSpec, VenueSpec } from '../venues/specs';
 
 // The one writer of listing specs (sm.listing_spec): each venue's reader says what the venue publishes for a listing
 // now, and a listing whose spec differs gets a new row. A listing's first spec holds since the epoch; a later change is
 // dated when it was seen: now for a scheduled pass, or when a shard saw the venue announce it (a refresh). Three ways in:
 // - mode `new` (every minute): active listings created in the last NEW_LISTING_WINDOW_MS with no spec yet, so a new
 //   listing is tradable within a minute and one its venue doesn't list yet is tried again each minute meanwhile;
-// - mode `full` (hourly, one run per venue): every active listing the venue lists as trading, against its spec in
-//   force now; it also rebuilds the venue's snapshot (what the venue gave for each active listing);
+// - mode `reconcile` (hourly, one run per venue): every active listing the venue lists as trading, against its spec
+//   in force now; it also rebuilds the venue's snapshot (what the venue gave for each active listing);
 // - mode `sweep` (every 15 minutes, one run per venue): reads the venue for the snapshot's listings and the ones
-//   created since, and checks against the registry only the listings whose venue spec moved;
+//   created since, and checks against the registry only the listings whose venue spec moved (with no snapshot yet,
+//   it reconciles first, which makes one);
 // - mode `missing` (daily, one run per venue): active listings older than that window still without a spec;
 // - the refresh queue: one listing a shard saw change (POST /listing-specs/refresh), checked against the venue.
 // Only the minute's pass runs every minute, and it reads only recent listings; the passes over every active listing
@@ -134,7 +135,7 @@ export interface SpecSnapshot {
   listings: Record<string, [string, string | null]>;
 }
 
-export type SpecSnapshots = (exchangeCode: string) => SnapshotStore<SpecSnapshot>;
+export type SpecSnapshots = Snapshots<SpecSnapshot>;
 
 export function specOf(row: SpecResponse): VenueSpec {
   return {
@@ -236,10 +237,6 @@ export async function postInChunks(rows: SpecRow[], send: (body: SpecRow[] | Spe
 
 // ----- passes -----
 
-export const MODES = ['new', 'full', 'missing', 'sweep'] as const;
-export type Mode = typeof MODES[number];
-const isMode = (mode: unknown): mode is Mode => MODES.includes(mode as Mode);
-
 export interface VenueResult {
   venue: string;
   targets: number;
@@ -252,6 +249,8 @@ export interface VenueResult {
   failed?: number;
   // A sweep whose snapshot another run saved first: its reads are dropped, and the next sweep does them again.
   snapshotSaved?: boolean;
+  // A sweep that found no snapshot and reconciled instead, to make one.
+  noSnapshot?: boolean;
   // With a changed-since read: how many listings it named, and how many listings that moved (with a spec recorded
   // before) it didn't name.
   changedRead?: number;
@@ -267,7 +266,7 @@ function result(venue: string, targets: number, plan: Plan, posted: Posted, star
 }
 
 // Each listing without a spec belongs to exactly one of `new` and `missing`, by when it was created, so no two passes
-// race to give it a first spec (the second would be refused): `full` and `sweep` leave them all to those two.
+// race to give it a first spec (the second would be refused): `reconcile` and `sweep` leave them all to those two.
 async function firstSpecs(
   exchangeCode: string, exchangeId: number, mode: 'new' | 'missing', registry: Registry, now: Date, read: ReadSpecs,
 ): Promise<VenueResult> {
@@ -304,7 +303,7 @@ async function fullPass(
   const posted = await registry.post(plan.rows);
   // Rebuilt from every active listing, so it also drops the ones no longer active; a sweep saving meanwhile only
   // loses work the next sweep redoes.
-  await snapshots(exchangeCode).replace(snapshotOf(active, specs, posted.refused, now));
+  await snapshots({ venue: exchangeCode }).replace(snapshotOf(active, specs, posted.refused, now));
   return result(exchangeCode, targets.length, plan, posted, started);
 }
 
@@ -312,11 +311,11 @@ async function sweep(
   exchangeCode: string, exchangeId: number, registry: Registry, now: Date, read: ReadSpecs, snapshots: SpecSnapshots,
   readChanged?: ReadChangedSpecs,
 ): Promise<VenueResult> {
-  const store = snapshots(exchangeCode);
+  const store = snapshots({ venue: exchangeCode });
   const stored = await store.load();
   if (!stored) {
-    console.warn(`Spec sweep for ${exchangeCode}: no snapshot yet; the next full pass makes one`);
-    return { venue: exchangeCode, targets: 0 };
+    console.warn(`Spec sweep for ${exchangeCode}: no snapshot; reconciling to make one`);
+    return { ...await fullPass(exchangeCode, exchangeId, registry, now, read, snapshots), noSnapshot: true };
   }
   const { listings } = stored.value;
   const since = new Date(Date.parse(stored.value.listedThrough) - LISTED_OVERLAP_MS);
@@ -362,7 +361,7 @@ export async function syncVenue(
   switch (mode) {
     case 'new':
     case 'missing': return firstSpecs(exchangeCode, exchangeId, mode, registry, now, read);
-    case 'full': return fullPass(exchangeCode, exchangeId, registry, now, read, snapshots);
+    case 'reconcile': return fullPass(exchangeCode, exchangeId, registry, now, read, snapshots);
     case 'sweep': return sweep(exchangeCode, exchangeId, registry, now, read, snapshots, changeReaders[exchangeCode]);
   }
 }
@@ -398,34 +397,36 @@ function isSqsEvent(event: unknown): event is SQSEvent {
   return Array.isArray((event as SQSEvent)?.Records);
 }
 
-// The passes over every active listing run one venue per invocation, so the slowest venue can't run the others past
-// the Lambda's timeout.
-export async function scheduled(
-  mode: Mode, registry: Registry, snapshots: SpecSnapshots, venue?: string, readers: Record<string, ReadSpecs> = READERS,
+/** A venue's outcome as the counts the harness reports. */
+export function countsOf(result: VenueResult): Counts {
+  return {
+    Listings: result.targets,
+    Moved: result.moved ?? 0,
+    Written: result.written ?? 0,
+    Refused: result.failed ?? 0,
+    Unknown: result.unknown ?? 0,
+    ...(result.noSnapshot ? { NoSnapshot: 1 } : {}),
+    ...(result.changedRead !== undefined ? { ChangedRead: result.changedRead, ChangedMissed: result.changedMissed ?? 0 } : {}),
+  };
+}
+
+/** Listing specs as a kind of venue metadata: one unit per venue. */
+export function specsKind(
+  registry: Registry, readers: Record<string, ReadSpecs> = READERS,
   changeReaders: Record<string, ReadChangedSpecs> = CHANGE_READERS,
-) {
-  const exchangeIds = await registry.exchangeIds();
-  const now = new Date();
-  const venues = Object.keys(readers).filter(code => exchangeIds.has(code) && (venue === undefined || code === venue));
-  const settled = await Promise.allSettled(
-    venues.map(code => syncVenue(code, exchangeIds.get(code)!, mode, registry, now, readers, snapshots, changeReaders)));
-  const failed = venues.filter((code, i) => {
-    const outcome = settled[i];
-    if (outcome.status === 'rejected') {
-      console.error(`Spec sync (${mode}) for ${code} failed:`, outcome.reason instanceof Error ? outcome.reason.stack : outcome.reason);
-      emitSyncMetrics('specs', mode, code, { Ok: 0 }, now);
-      return true;
-    }
-    const { targets, moved = 0, written = 0, failed = 0, unknown = 0, changedRead, changedMissed } = outcome.value;
-    // Refused writes leave specs stale, so they fail the run like a venue that couldn't be read: the alarm fires.
-    emitSyncMetrics('specs', mode, code, {
-      Ok: failed > 0 ? 0 : 1, Listings: targets, Moved: moved, Written: written, Refused: failed, Unknown: unknown,
-      ...(changedRead !== undefined ? { ChangedRead: changedRead, ChangedMissed: changedMissed ?? 0 } : {}),
-    }, now);
-    return failed > 0;
-  });
-  console.log(`Spec sync (${mode}):`, JSON.stringify(settled.flatMap(s => (s.status === 'fulfilled' ? [s.value] : []))));
-  if (failed.length > 0) throw new Error(`Spec sync (${mode}) failed for ${failed.join(', ')}`);
+): Kind<SpecSnapshot> {
+  let exchangeIds: Promise<Map<string, number>> | undefined;
+  return {
+    name: 'specs',
+    venues: Object.keys(readers),
+    modes: ['new', 'sweep', 'reconcile', 'missing'],
+    async run(mode: Mode, unit, ctx) {
+      exchangeIds ??= registry.exchangeIds();
+      const exchangeId = (await exchangeIds).get(unit.venue);
+      if (exchangeId === undefined) throw new Error(`The registry has no exchange ${unit.venue}`);
+      return countsOf(await syncVenue(unit.venue, exchangeId, mode, registry, ctx.now, readers, ctx.snapshots, changeReaders));
+    },
+  };
 }
 
 export async function refreshes(event: SQSEvent, registry: Registry, readers = READERS): Promise<SQSBatchResponse> {
@@ -451,17 +452,10 @@ export async function refreshes(event: SQSEvent, registry: Registry, readers = R
   return { batchItemFailures };
 }
 
-export function s3SpecSnapshots(bucket: string): SpecSnapshots {
-  return exchangeCode => s3Snapshot<SpecSnapshot>(bucket, `specs/${exchangeCode}.json.gz`);
-}
-
-export const handler = async (event: { mode?: Mode; venue?: string } | SQSEvent) => {
+export const handler = async (event: RunRequest | SQSEvent) => {
   const registry = apiRegistry(await resolveApiKey());
   if (isSqsEvent(event)) return refreshes(event, registry);
-  const { mode, venue } = event;
-  if (!isMode(mode)) throw new Error(`Spec sync needs mode ${MODES.join(', ')}, not ${mode}`);
-  if (venue !== undefined && !READERS[venue]) throw new Error(`Spec sync has no reader for venue ${venue}`);
   const bucket = process.env.CACHE_BUCKET;
-  if (!bucket) throw new Error('Spec sync needs CACHE_BUCKET for its snapshots');
-  return scheduled(mode, registry, s3SpecSnapshots(bucket), venue);
+  if (!bucket) throw new Error('The specs sync needs CACHE_BUCKET for its snapshots');
+  return runScheduled(specsKind(registry), event, { now: new Date(), snapshots: s3Snapshots(bucket, 'specs') });
 };

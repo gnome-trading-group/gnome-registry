@@ -2,7 +2,7 @@
 type: LISTING_SPEC_MISSING
 summary: Active listings on an exchange have no listing spec, so the OMS refuses every order on them.
 first_steps:
-  - Check the spec sync's latest runs in its Lambda log (`SpecSyncStack`, the `spec-sync-lambda` function).
+  - Check the specs sync's latest runs in its Lambda log (`MetadataSyncStack`, the `specs-sync-lambda` function).
   - Look at one of the example listings at its venue: does the venue still list the market?
 ---
 
@@ -21,7 +21,8 @@ can't run either.
 
 - The spec sync's log shows each pass per venue: `targets`, `unknown` (the venue didn't answer for a listing),
   `invalid` (it answered with a grid the registry refuses) and `failed` (the registry refused the write). A venue
-  that fails outright also raises the `Registry-SpecSync` Lambda alarm.
+  that fails outright also raises the `Registry--MetadataSync-specs-Fault-Error` alarm, and a venue whose runs stop
+  its `Registry--MetadataSync-specs-<venue>-<mode>-Heartbeat-Error`.
 - `unknown` listings: the venue no longer lists the market under that id (delisted, renamed), or its reader can't
   find it (a closed Polymarket Intl market Gamma omits; a Kalshi market only under `/historical/markets`).
 - `invalid`: the venue's tick structure isn't contiguous from 0 or has an edge off its step; the warning in the log

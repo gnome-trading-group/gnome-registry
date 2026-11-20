@@ -7,7 +7,7 @@
 //
 // --pause-ms waits between posts. Inserting hundreds of thousands of rows back to back slowed the shared database
 // enough that other endpoints couldn't open connections, so pace it in prod.
-import { postInChunks, registryPost } from '../lambda/sync/incentive-sync';
+import { postInChunks, registryPost } from '../lambda/sync/metadata/incentives';
 import { resolveApiKey } from '../lambda/sync/registry-client';
 import { parseKalshiIncentiveProgram, readKalshiIncentivePages } from '../lambda/sync/venues/kalshi';
 import { IncentiveProgramReading } from '../lambda/sync/venues/types';
