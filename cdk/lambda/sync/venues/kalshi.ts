@@ -351,15 +351,50 @@ export async function readKalshiSpecs(exchangeSecurityIds: string[], options: Re
   for (const [ticker, ids] of listingsByTicker) {
     const bands = bandsByTicker.get(ticker);
     if (!bands) continue;
-    for (const id of ids) {
-      specs.set(id, {
-        priceBands: kalshiMarketOf(id).complement ? complementBands(bands) : bands,
-        lotSize: KALSHI_LOT_SIZE,
-        minNotional: 0,
-        minSize: 0,
-        contractMultiplier: SPEC_PRICE_SCALE,
-      });
-    }
+    for (const id of ids) specs.set(id, kalshiSpec(bands, kalshiMarketOf(id).complement));
   }
   return specs;
+}
+
+function kalshiSpec(bands: PriceBand[], complement: boolean): VenueSpec {
+  return {
+    priceBands: complement ? complementBands(bands) : bands,
+    lotSize: KALSHI_LOT_SIZE,
+    minNotional: 0,
+    minSize: 0,
+    contractMultiplier: SPEC_PRICE_SCALE,
+  };
+}
+
+// Kalshi pages a metadata-updated read 1000 at a time; a day of changes is a few pages.
+const CHANGED_PAGE = 1000;
+const MAX_CHANGED_PAGES = 50;
+
+/**
+ * Specs of the Kalshi markets whose metadata changed since `since`, under every key a listing of them may have:
+ * `min_updated_ts` tracks non-trading changes only, so this reads a few hundred markets where a full read reads every
+ * open one. It can only be combined with `mve_filter=exclude`, so multivariate markets are never in it.
+ */
+export async function readKalshiChangedSpecs(since: Date): Promise<Map<string, VenueSpec>> {
+  const specs = new Map<string, VenueSpec>();
+  let cursor = '';
+  for (let page = 0; page < MAX_CHANGED_PAGES; page++) {
+    const query = `min_updated_ts=${Math.floor(since.getTime() / 1000)}&mve_filter=exclude&limit=${CHANGED_PAGE}`
+      + (cursor ? `&cursor=${encodeURIComponent(cursor)}` : '');
+    const res = await fetchWithRetry(`${kalshiPublicUrl()}${MARKETS_PATH}?${query}`);
+    if (!res.ok) throw new Error(`Kalshi GET ${MARKETS_PATH} (changed since) failed: ${res.status} ${await res.text()}`);
+    const body = (await res.json()) as { markets?: Record<string, any>[]; cursor?: string };
+    for (const market of body.markets ?? []) {
+      const bands = kalshiPriceBands(market);
+      if (!bands) continue;
+      // A YES listing is keyed by the bare ticker or ticker:yes (kalshiMarketOf reads both); NO by ticker:no.
+      for (const id of [market.ticker, `${market.ticker}:yes`, `${market.ticker}:no`]) {
+        specs.set(id, kalshiSpec(bands, kalshiMarketOf(id).complement));
+      }
+    }
+    cursor = body.cursor ?? '';
+    if (!cursor) return specs;
+    await pause(PAUSE_BETWEEN_REQUESTS_MS);
+  }
+  throw new Error(`Kalshi changed-since read ran past ${MAX_CHANGED_PAGES} pages`);
 }

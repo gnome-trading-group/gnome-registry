@@ -15,6 +15,7 @@ Alarms named `Registry-…`:
 |---|---|
 | RegistryApi 5xx | the API's server errors rise |
 | RegistryDatabase storage / CPU | the database is filling up or busy |
+| RegistryDatabase EBS byte / IO balance | the burstable database has spent over half its EBS burst balance: some reader reads far more than usual, and once it is spent every read waits on the baseline (the API, alerting and syncs time out together). Find the reader: `log_min_duration_statement` on the parameter group for an hour, or the per-table block reads in `pg_statio_user_tables` |
 | ExchangeSync fault | the security-master sync (every 15 minutes) failed |
 | SettlementSweeper fault | the 5-minute sweeper failed to book a settled position (it fails on purpose when a booking fails) |
 | VenuePoller fault | the 5-minute balance poller crashed (a failed account read is an ERROR snapshot instead, seen as RECON_STALE) |

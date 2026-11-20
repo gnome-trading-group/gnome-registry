@@ -1,8 +1,8 @@
 import * as cdk from 'aws-cdk-lib';
+import * as cloudwatch from 'aws-cdk-lib/aws-cloudwatch';
 import * as apigw from 'aws-cdk-lib/aws-apigateway';
 import * as lambda from 'aws-cdk-lib/aws-lambda';
 import * as rds from 'aws-cdk-lib/aws-rds';
-import * as sqs from 'aws-cdk-lib/aws-sqs';
 import { Construct } from 'constructs';
 import { DefaultDashboardFactory, MonitoringFacade, noopAction } from 'cdk-monitoring-constructs';
 
@@ -12,11 +12,6 @@ interface Props extends cdk.StackProps {
   settlementSweeperLambda: lambda.IFunction;
   venuePollerLambda: lambda.IFunction;
   markPollerLambda: lambda.IFunction;
-  incentiveSyncLambda: lambda.IFunction;
-  specSyncLambda: lambda.IFunction;
-  specRefreshLambda: lambda.IFunction;
-  specRefreshQueue: sqs.IQueue;
-  specRefreshDeadLetters: sqs.IQueue;
   sessionMonitorLambda: lambda.IFunction;
   samplesApi: apigw.RestApi;
   samplePartitionsLambda: lambda.IFunction;
@@ -89,40 +84,6 @@ export class MonitoringStack extends cdk.Stack {
         },
       })
       .monitorLambdaFunction({
-        lambdaFunction: props.incentiveSyncLambda,
-        humanReadableName: 'Incentive Sync',
-        alarmFriendlyName: 'IncentiveSync',
-        addFaultCountAlarm: {
-          Error: { maxErrorCount: 0 },
-        },
-      })
-      .monitorLambdaFunction({
-        lambdaFunction: props.specSyncLambda,
-        humanReadableName: 'Spec Sync',
-        alarmFriendlyName: 'SpecSync',
-        addFaultCountAlarm: {
-          Error: { maxErrorCount: 0 },
-        },
-      })
-      .monitorLambdaFunction({
-        lambdaFunction: props.specRefreshLambda,
-        humanReadableName: 'Spec Refresh',
-        alarmFriendlyName: 'SpecRefresh',
-        addFaultCountAlarm: {
-          Error: { maxErrorCount: 0 },
-        },
-      })
-      // A refresh the venue never confirmed: the next full pass records the change anyway, dated later.
-      .monitorSqsQueueWithDlq({
-        queue: props.specRefreshQueue,
-        deadLetterQueue: props.specRefreshDeadLetters,
-        humanReadableName: 'Spec Refresh Queue',
-        alarmFriendlyName: 'SpecRefresh',
-        addDeadLetterQueueMaxSizeAlarm: {
-          Warning: { maxMessageCount: 0 },
-        },
-      })
-      .monitorLambdaFunction({
         lambdaFunction: props.sessionMonitorLambda,
         humanReadableName: 'Strategy Session Monitor',
         alarmFriendlyName: 'StrategySessionMonitor',
@@ -158,5 +119,25 @@ export class MonitoringStack extends cdk.Stack {
           Warning: { maxUsagePercent: 80 },
         },
       });
+
+    // A burstable instance reads at full speed only while it has burst balance; spent, every read waits on the
+    // baseline and the API, alerting and syncs time out together. Half spent is the time to find the reader.
+    for (const [metricName, label] of [['EBSByteBalance%', 'Byte'], ['EBSIOBalance%', 'IO']] as const) {
+      new cloudwatch.Alarm(this, `RegistryDatabaseEbs${label}Balance`, {
+        alarmName: `Registry--RegistryDatabase-EBS-${label}-Balance-Warning`,
+        alarmDescription: `The registry database has spent over half its EBS ${label.toLowerCase()} burst balance`,
+        metric: new cloudwatch.Metric({
+          namespace: 'AWS/RDS',
+          metricName,
+          dimensionsMap: { DBInstanceIdentifier: props.database.instanceIdentifier },
+          statistic: 'Minimum',
+          period: cdk.Duration.minutes(15),
+        }),
+        threshold: 50,
+        comparisonOperator: cloudwatch.ComparisonOperator.LESS_THAN_THRESHOLD,
+        evaluationPeriods: 2,
+        treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+      });
+    }
   }
 }

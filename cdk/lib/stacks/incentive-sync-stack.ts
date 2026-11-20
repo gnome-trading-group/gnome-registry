@@ -52,5 +52,9 @@ export class IncentiveSyncStack extends cdk.Stack {
       schedule: events.Schedule.rate(cdk.Duration.minutes(15)),
     });
     rule.addTarget(new targets.LambdaFunction(this.syncLambda));
+
+    // MonitoringStack imported this until it stopped alarming on this stack; kept so its update can drop the import
+    // before this stack goes (CloudFormation refuses to remove an export another stack still imports).
+    this.exportValue(this.syncLambda.functionName);
   }
 }

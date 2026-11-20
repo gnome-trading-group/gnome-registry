@@ -110,5 +110,11 @@ export class SpecSyncStack extends cdk.Stack {
     this.refreshLambda = new lambda.NodejsFunction(this, 'spec-refresh-lambda', { ...shared, timeout: cdk.Duration.seconds(60) });
     this.refreshLambda.addToRolePolicy(readApiKey);
     this.refreshLambda.addEventSource(new SqsEventSource(this.refreshQueue, { batchSize: 10, reportBatchItemFailures: true }));
+
+    // MonitoringStack imported these until it stopped alarming on this stack; kept so its update can drop the imports
+    // before this stack goes (CloudFormation refuses to remove an export another stack still imports).
+    this.exportValue(this.syncLambda.functionName);
+    this.exportValue(this.refreshLambda.functionName);
+    this.exportValue(this.refreshDeadLetters.queueName);
   }
 }

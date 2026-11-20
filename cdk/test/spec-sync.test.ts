@@ -10,7 +10,7 @@ import {
   SpecSnapshot, SpecSnapshots, syncVenue, Target,
 } from '../lambda/sync/spec-sync';
 import { hashOf, SnapshotStore, Stored } from '../lambda/sync/metadata/snapshot';
-import { kalshiPriceBands, readKalshiSpecs } from '../lambda/sync/venues/kalshi';
+import { kalshiPriceBands, readKalshiChangedSpecs, readKalshiSpecs } from '../lambda/sync/venues/kalshi';
 import { readPolymarketIntlSpecs } from '../lambda/sync/venues/polymarket-intl';
 import { readPolymarketUsSpecs } from '../lambda/sync/venues/polymarket-us';
 import { complementBands, VenueSpec } from '../lambda/sync/venues/specs';
@@ -84,6 +84,31 @@ describe('Kalshi specs', () => {
     const specs = await readKalshiSpecs(['PRES-2024-DJT:yes'], { listedOnly: true });
     expect(specs.has('PRES-2024-DJT:yes')).toBe(false);
     expect(urls.some(u => u.includes('/historical/markets'))).toBe(false);
+  });
+});
+
+describe('Kalshi specs changed since a time', () => {
+  const markets: Record<string, any>[] = fixture('kalshi-markets.json').markets;
+  const tapered = markets.find(m => m.price_level_structure === 'tapered_deci_cent')!;
+
+  it('pages through the metadata-updated markets, keying each under its YES and NO listings', async () => {
+    const urls: string[] = [];
+    jest.spyOn(global, 'fetch').mockImplementation(async (url) => {
+      urls.push(String(url));
+      return json(urls.length === 1 ? { markets: [tapered], cursor: 'next' } : { markets: [], cursor: '' });
+    });
+    const specs = await readKalshiChangedSpecs(new Date('2026-11-20T17:00:00Z'));
+    expect(urls[0]).toContain('min_updated_ts=1795194000');
+    expect(urls[0]).toContain('mve_filter=exclude');
+    expect(urls[1]).toContain('cursor=next');
+    expect(specs.get(tapered.ticker)).toEqual(spec(TAPERED));
+    expect(specs.get(`${tapered.ticker}:yes`)).toEqual(spec(TAPERED));
+    expect(specs.get(`${tapered.ticker}:no`)!.priceBands).toEqual(complementBands(TAPERED));
+  });
+
+  it('fails when Kalshi does', async () => {
+    jest.spyOn(global, 'fetch').mockImplementation(async () => new Response('down', { status: 503 }));
+    await expect(readKalshiChangedSpecs(new Date())).rejects.toThrow('changed since');
   });
 });
 
@@ -437,6 +462,22 @@ describe('the snapshot', () => {
       listedThrough: now.toISOString(),
       listings: { 1: ['M1', hashOf(spec())], 2: ['M2', hashOf(tick)], 3: ['M3', null], 4: ['M4', null] },
     });
+  });
+
+  it("counts the moves a venue's changed-since read would have missed, leaving listings with nothing recorded out", async () => {
+    const { snapshots } = memorySnapshots({ KALSHI: {
+      listedThrough: '2026-11-18T11:45:00.000Z',
+      listings: { 1: ['M1', hashOf(spec())], 2: ['M2', hashOf(spec())], 3: ['M3', null] },
+    } });
+    const { registry } = fakeRegistry({ current: new Map([[1, spec()], [2, spec()]]) });
+    const warn = jest.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const asked: Date[] = [];
+    const changed = async (since: Date) => { asked.push(since); return new Map([['M1', tick]]); };
+    const read = async () => new Map([['M1', tick], ['M2', tick], ['M3', spec()]]);
+    const result = await syncVenue('KALSHI', 1, 'sweep', registry, now, { KALSHI: read }, snapshots, { KALSHI: changed });
+    expect(asked).toEqual([new Date('2026-11-18T11:40:00.000Z')]);
+    expect(result).toMatchObject({ moved: 3, written: 2, changedRead: 1, changedMissed: 1 });
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('missed 1 moved listings, e.g. M2'));
   });
 
   it('keeps nothing recorded for a listing the registry refused, so the next sweep tries it again', async () => {

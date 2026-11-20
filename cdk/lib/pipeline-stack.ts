@@ -71,14 +71,14 @@ class AppStage extends cdk.Stage {
       apiKey: apiStack.apiKey,
     });
 
-    const incentiveSyncStack = new IncentiveSyncStack(this, "IncentiveSyncStack", {
+    new IncentiveSyncStack(this, "IncentiveSyncStack", {
       api: apiStack.api,
       apiKey: apiStack.apiKey,
     });
 
     const cacheStack = new CacheStack(this, "CacheStack", { stage: config.account.stage });
 
-    const specSyncStack = new SpecSyncStack(this, "SpecSyncStack", {
+    new SpecSyncStack(this, "SpecSyncStack", {
       api: apiStack.api,
       apiKey: apiStack.apiKey,
       cache: cacheStack.bucket,
@@ -90,11 +90,6 @@ class AppStage extends cdk.Stage {
       settlementSweeperLambda: settlementSweeperStack.sweeperLambda,
       venuePollerLambda: venuePollerStack.pollerLambda,
       markPollerLambda: markPollerStack.pollerLambda,
-      incentiveSyncLambda: incentiveSyncStack.syncLambda,
-      specSyncLambda: specSyncStack.syncLambda,
-      specRefreshLambda: specSyncStack.refreshLambda,
-      specRefreshQueue: specSyncStack.refreshQueue,
-      specRefreshDeadLetters: specSyncStack.refreshDeadLetters,
       sessionMonitorLambda: sessionMonitorStack.monitorLambda,
       samplesApi: samplesApiStack.api,
       samplePartitionsLambda: samplesApiStack.partitionsLambda,

@@ -19,6 +19,9 @@ export interface ReadOptions {
 /** Reads the specs of these listings (by exchange security id) from the venue; one it doesn't know is left out. */
 export type ReadSpecs = (exchangeSecurityIds: string[], options?: ReadOptions) => Promise<Map<string, VenueSpec>>;
 
+/** Reads the specs of the venue's markets that changed since a time, keyed by exchange security id. */
+export type ReadChangedSpecs = (since: Date) => Promise<Map<string, VenueSpec>>;
+
 export const PRICE_SCALE = 1_000_000_000;
 export const SIZE_SCALE = 1_000_000;
 

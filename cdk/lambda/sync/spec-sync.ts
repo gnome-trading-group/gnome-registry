@@ -4,12 +4,12 @@ import { PriceBand, validatePriceBands } from '../endpoints/price-bands';
 import { readHyperliquidSpecs } from './venues/hyperliquid';
 import { readLighterSpecs } from './venues/lighter';
 import { registryFetch, registryFetchAll, resolveApiKey } from './registry-client';
-import { readKalshiSpecs } from './venues/kalshi';
+import { readKalshiChangedSpecs, readKalshiSpecs } from './venues/kalshi';
 import { readPolymarketIntlSpecs } from './venues/polymarket-intl';
 import { readPolymarketUsSpecs } from './venues/polymarket-us';
 import { emitSyncMetrics } from './metadata/metrics';
 import { hashOf, s3Snapshot, SnapshotStore } from './metadata/snapshot';
-import { chunks, pause, ReadSpecs, sameSpec, VenueSpec } from './venues/specs';
+import { chunks, pause, ReadChangedSpecs, ReadSpecs, sameSpec, VenueSpec } from './venues/specs';
 
 // The one writer of listing specs (sm.listing_spec): each venue's reader says what the venue publishes for a listing
 // now, and a listing whose spec differs gets a new row. A listing's first spec holds since the epoch; a later change is
@@ -32,6 +32,12 @@ export const READERS: Record<string, ReadSpecs> = {
   POLYMARKET_US: readPolymarketUsSpecs,
   HYPERLIQUID: readHyperliquidSpecs,
   LIGHTER: readLighterSpecs,
+};
+
+// Venues that can say which of their markets changed since a time. A sweep reads it beside its full read and counts
+// the moves it would have missed, before it replaces the full read.
+export const CHANGE_READERS: Record<string, ReadChangedSpecs> = {
+  KALSHI: readKalshiChangedSpecs,
 };
 
 const POST_CHUNK = 200;
@@ -246,6 +252,10 @@ export interface VenueResult {
   failed?: number;
   // A sweep whose snapshot another run saved first: its reads are dropped, and the next sweep does them again.
   snapshotSaved?: boolean;
+  // With a changed-since read: how many listings it named, and how many listings that moved (with a spec recorded
+  // before) it didn't name.
+  changedRead?: number;
+  changedMissed?: number;
   seconds?: number;
 }
 
@@ -300,6 +310,7 @@ async function fullPass(
 
 async function sweep(
   exchangeCode: string, exchangeId: number, registry: Registry, now: Date, read: ReadSpecs, snapshots: SpecSnapshots,
+  readChanged?: ReadChangedSpecs,
 ): Promise<VenueResult> {
   const store = snapshots(exchangeCode);
   const stored = await store.load();
@@ -314,13 +325,21 @@ async function sweep(
   }
   const entries = Object.entries(listings);
   const started = Date.now();
+  const changed = readChanged ? await readChanged(since) : null;
   const specs = await read(entries.map(([, [exchangeSecurityId]]) => exchangeSecurityId), { listedOnly: true });
   const moved = entries.flatMap(([id, [exchangeSecurityId, hash]]) => {
     const spec = specs.get(exchangeSecurityId);
-    return spec && hashOf(spec) !== hash ? [{ listingId: Number(id), exchangeSecurityId }] : [];
+    return spec && hashOf(spec) !== hash ? [{ listingId: Number(id), exchangeSecurityId, recorded: hash !== null }] : [];
   });
+  // A listing with nothing recorded yet moved only in the snapshot, not at the venue.
+  const missed = changed ? moved.filter(m => m.recorded && !changed.has(m.exchangeSecurityId)) : [];
+  if (missed.length > 0) {
+    console.warn(`Spec sweep for ${exchangeCode}: the changed-since read missed ${missed.length} moved listings, e.g. `
+      + missed.slice(0, 10).map(m => m.exchangeSecurityId).join(', '));
+  }
   const current = await registry.currentSpecs(moved.map(m => m.listingId));
-  const targets = moved.filter(m => current.has(m.listingId)).map(m => ({ ...m, current: current.get(m.listingId)! }));
+  const targets = moved.filter(m => current.has(m.listingId))
+    .map(({ listingId, exchangeSecurityId }) => ({ listingId, exchangeSecurityId, current: current.get(listingId)! }));
   const plan = planSpecs(targets, specs, now);
   const posted = await registry.post(plan.rows);
   const refused = new Set(posted.refused);
@@ -329,19 +348,22 @@ async function sweep(
   }
   const snapshotSaved = await store.save({ listedThrough: now.toISOString(), listings }, stored.version);
   if (!snapshotSaved) console.warn(`Spec sweep for ${exchangeCode}: another run saved the snapshot first`);
-  return { ...result(exchangeCode, entries.length, plan, posted, started), moved: moved.length, snapshotSaved };
+  return {
+    ...result(exchangeCode, entries.length, plan, posted, started), moved: moved.length, snapshotSaved,
+    ...(changed ? { changedRead: changed.size, changedMissed: missed.length } : {}),
+  };
 }
 
 export async function syncVenue(
   exchangeCode: string, exchangeId: number, mode: Mode, registry: Registry, now: Date, readers: Record<string, ReadSpecs>,
-  snapshots: SpecSnapshots,
+  snapshots: SpecSnapshots, changeReaders: Record<string, ReadChangedSpecs> = {},
 ): Promise<VenueResult> {
   const read = readers[exchangeCode];
   switch (mode) {
     case 'new':
     case 'missing': return firstSpecs(exchangeCode, exchangeId, mode, registry, now, read);
     case 'full': return fullPass(exchangeCode, exchangeId, registry, now, read, snapshots);
-    case 'sweep': return sweep(exchangeCode, exchangeId, registry, now, read, snapshots);
+    case 'sweep': return sweep(exchangeCode, exchangeId, registry, now, read, snapshots, changeReaders[exchangeCode]);
   }
 }
 
@@ -380,12 +402,13 @@ function isSqsEvent(event: unknown): event is SQSEvent {
 // the Lambda's timeout.
 export async function scheduled(
   mode: Mode, registry: Registry, snapshots: SpecSnapshots, venue?: string, readers: Record<string, ReadSpecs> = READERS,
+  changeReaders: Record<string, ReadChangedSpecs> = CHANGE_READERS,
 ) {
   const exchangeIds = await registry.exchangeIds();
   const now = new Date();
   const venues = Object.keys(readers).filter(code => exchangeIds.has(code) && (venue === undefined || code === venue));
   const settled = await Promise.allSettled(
-    venues.map(code => syncVenue(code, exchangeIds.get(code)!, mode, registry, now, readers, snapshots)));
+    venues.map(code => syncVenue(code, exchangeIds.get(code)!, mode, registry, now, readers, snapshots, changeReaders)));
   const failed = venues.filter((code, i) => {
     const outcome = settled[i];
     if (outcome.status === 'rejected') {
@@ -393,10 +416,12 @@ export async function scheduled(
       emitSyncMetrics('specs', mode, code, { Ok: 0 }, now);
       return true;
     }
-    const { targets, moved = 0, written = 0, failed = 0, unknown = 0 } = outcome.value;
+    const { targets, moved = 0, written = 0, failed = 0, unknown = 0, changedRead, changedMissed } = outcome.value;
     // Refused writes leave specs stale, so they fail the run like a venue that couldn't be read: the alarm fires.
-    emitSyncMetrics('specs', mode, code,
-      { Ok: failed > 0 ? 0 : 1, Listings: targets, Moved: moved, Written: written, Refused: failed, Unknown: unknown }, now);
+    emitSyncMetrics('specs', mode, code, {
+      Ok: failed > 0 ? 0 : 1, Listings: targets, Moved: moved, Written: written, Refused: failed, Unknown: unknown,
+      ...(changedRead !== undefined ? { ChangedRead: changedRead, ChangedMissed: changedMissed ?? 0 } : {}),
+    }, now);
     return failed > 0;
   });
   console.log(`Spec sync (${mode}):`, JSON.stringify(settled.flatMap(s => (s.status === 'fulfilled' ? [s.value] : []))));

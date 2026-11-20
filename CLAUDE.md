@@ -215,7 +215,10 @@ synth step, so run `npm test` yourself before handing off.
     Modes, per venue except `new`; no recurring pass reads every active listing from the database more than hourly:
     - `new` every minute: first specs for active listings created in the last 2 hours (`createdAfter`).
     - `sweep` every 15 minutes: reads the venue for every listing in the venue's snapshot plus those created since,
-      and reads and writes the registry only for listings whose venue spec moved.
+      and reads and writes the registry only for listings whose venue spec moved. A venue in `CHANGE_READERS` (Kalshi:
+      `min_updated_ts`, non-trading changes only, never multivariate markets) is also read for its markets changed
+      since the snapshot, in shadow: the sweep logs and counts (`ChangedRead`, `ChangedMissed`) the moved listings
+      that read didn't name, while the full read still decides what is written.
     - `full` hourly, staggered: every active listing (keyset-paged, paced) against its venue; it rebuilds the
       venue's snapshot.
     - `missing` daily at 08:xx UTC: first specs for older listings still without one.
