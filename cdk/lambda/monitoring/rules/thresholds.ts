@@ -51,3 +51,6 @@ export const CLOCK_STATUS_MAX_AGE_MS = 60_000;
 // The spec sync gives a new listing its spec within a minute; a listing still without one this much later can't be
 // traded (the OMS refuses orders on a listing with no spec).
 export const SPEC_MISSING_AFTER_MS = 5 * 60_000;
+// As far back as the spec sync's every-minute pass looks for new listings without a spec; older ones are its daily
+// pass's.
+export const SPEC_MISSING_WITHIN_MS = 2 * 60 * 60_000;

@@ -7,15 +7,19 @@ import { registryFetch, registryFetchAll, resolveApiKey } from './registry-clien
 import { readKalshiSpecs } from './venues/kalshi';
 import { readPolymarketIntlSpecs } from './venues/polymarket-intl';
 import { readPolymarketUsSpecs } from './venues/polymarket-us';
-import { chunks, ReadSpecs, sameSpec, VenueSpec } from './venues/specs';
+import { chunks, pause, ReadSpecs, sameSpec, VenueSpec } from './venues/specs';
 
 // The one writer of listing specs (sm.listing_spec): each venue's reader says what the venue publishes for a listing
 // now, and a listing whose spec differs gets a new row. A listing's first spec holds since the epoch; a later change is
 // dated when it was seen: now for a scheduled pass, or when a shard saw the venue announce it (a refresh). Three ways in:
-// - mode `full` (every 15 minutes, one run per venue): every active listing the venue lists as trading, against its
-//   spec in force now;
-// - mode `missing` (every minute): active listings with no spec yet, so a new listing is tradable within a minute;
+// - mode `new` (every minute): active listings created in the last NEW_LISTING_WINDOW_MS with no spec yet, so a new
+//   listing is tradable within a minute and one its venue doesn't list yet is tried again each minute meanwhile;
+// - mode `full` (hourly, one run per venue): every active listing the venue lists as trading, against its spec in
+//   force now;
+// - mode `missing` (daily, one run per venue): active listings older than that window still without a spec;
 // - the refresh queue: one listing a shard saw change (POST /listing-specs/refresh), checked against the venue.
+// Only the minute's pass runs every minute, and it reads only recent listings; the passes over every active listing
+// page through them with a pause between pages, so they never take the registry's database from its other readers.
 // A venue that fails doesn't stop the others, but fails the run, so its alarm fires.
 
 export const READERS: Record<string, ReadSpecs> = {
@@ -27,6 +31,8 @@ export const READERS: Record<string, ReadSpecs> = {
 };
 
 const POST_CHUNK = 200;
+// Long enough that a listing whose venue is slow to list it gets many tries before the daily pass is its backstop.
+export const NEW_LISTING_WINDOW_MS = 2 * 60 * 60_000;
 
 export interface Target {
   listingId: number;
@@ -92,7 +98,8 @@ interface SpecResponse {
 export interface Registry {
   exchangeIds(): Promise<Map<string, number>>;
   activeTargets(exchangeId: number): Promise<Target[]>;
-  missingTargets(exchangeId: number): Promise<Target[]>;
+  // Active listings with no spec, created in [after, before).
+  unspeccedTargets(exchangeId: number, created: { after?: Date; before?: Date }): Promise<Target[]>;
   target(exchangeId: number, exchangeSecurityId: string): Promise<Target | null>;
   post(rows: SpecRow[]): Promise<{ written: number; failed: number }>;
 }
@@ -107,17 +114,19 @@ export function specOf(row: SpecResponse): VenueSpec {
   };
 }
 
-const SPEC_PAGE = 5000;
+const PAGE = 5000;
+const PAUSE_BETWEEN_PAGES_MS = 250;
 
-// The specs in force of an exchange's active listings, a page at a time after the last listing seen.
-async function activeSpecs(exchangeId: number, apiKey: string): Promise<SpecResponse[]> {
-  let specs: SpecResponse[] = [];
+// Every row a listing-keyed GET lists, a page at a time after the last listing seen: an offset would read every row
+// before it again.
+async function pagesByListing<T extends { listing_id: number }>(path: string, apiKey: string): Promise<T[]> {
+  let rows: T[] = [];
   for (let after = 0; ;) {
-    const page = await registryFetch<SpecResponse[]>(
-      `/listing-specs?exchangeId=${exchangeId}&activeListings=true&afterListingId=${after}&limit=${SPEC_PAGE}`, 'GET', apiKey);
-    specs = specs.concat(page);
-    if (page.length < SPEC_PAGE) return specs;
+    const page = await registryFetch<T[]>(`${path}&afterListingId=${after}&limit=${PAGE}`, 'GET', apiKey);
+    rows = rows.concat(page);
+    if (page.length < PAGE) return rows;
     after = page[page.length - 1].listing_id;
+    await pause(PAUSE_BETWEEN_PAGES_MS);
   }
 }
 
@@ -128,18 +137,19 @@ export function apiRegistry(apiKey: string): Registry {
       return new Map(rows.map(r => [r.exchange_code, r.exchange_id]));
     },
     async activeTargets(exchangeId) {
-      const [listings, specs] = await Promise.all([
-        registryFetchAll<ListingRow>(`/listings?exchangeId=${exchangeId}&active=true`, apiKey),
-        activeSpecs(exchangeId, apiKey),
-      ]);
+      const listings = await pagesByListing<ListingRow>(
+        `/listings?exchangeId=${exchangeId}&active=true&sortBy=listing_id`, apiKey);
+      const specs = await pagesByListing<SpecResponse>(`/listing-specs?exchangeId=${exchangeId}&activeListings=true`, apiKey);
       const specById = new Map(specs.map(s => [s.listing_id, specOf(s)]));
       return listings.map(l => ({
         listingId: l.listing_id, exchangeSecurityId: l.exchange_security_id, current: specById.get(l.listing_id) ?? null,
       }));
     },
-    async missingTargets(exchangeId) {
-      const listings = await registryFetchAll<ListingRow>(
-        `/listings?exchangeId=${exchangeId}&active=true&withoutSpec=true`, apiKey);
+    async unspeccedTargets(exchangeId, created) {
+      const window = (created.after ? `&createdAfter=${created.after.toISOString()}` : '')
+        + (created.before ? `&createdBefore=${created.before.toISOString()}` : '');
+      const listings = await pagesByListing<ListingRow>(
+        `/listings?exchangeId=${exchangeId}&active=true&withoutSpec=true&sortBy=listing_id${window}`, apiKey);
       return listings.map(l => ({ listingId: l.listing_id, exchangeSecurityId: l.exchange_security_id, current: null }));
     },
     async target(exchangeId, exchangeSecurityId) {
@@ -181,16 +191,25 @@ export async function postInChunks(rows: SpecRow[], send: (body: SpecRow[] | Spe
 
 // ----- passes -----
 
-export type Mode = 'full' | 'missing';
+export const MODES = ['new', 'full', 'missing'] as const;
+export type Mode = typeof MODES[number];
+const isMode = (mode: unknown): mode is Mode => MODES.includes(mode as Mode);
+
+// Each listing without a spec belongs to exactly one pass, by when it was created, so no two passes race to give it a
+// first spec (the second would be refused): a full pass leaves them all to the other two.
+function targetsOf(mode: Mode, exchangeId: number, registry: Registry, now: Date): Promise<Target[]> {
+  const windowStart = new Date(now.getTime() - NEW_LISTING_WINDOW_MS);
+  switch (mode) {
+    case 'new': return registry.unspeccedTargets(exchangeId, { after: windowStart });
+    case 'missing': return registry.unspeccedTargets(exchangeId, { before: windowStart });
+    case 'full': return registry.activeTargets(exchangeId).then(targets => targets.filter(t => t.current !== null));
+  }
+}
 
 export async function syncVenue(
   exchangeCode: string, exchangeId: number, mode: Mode, registry: Registry, now: Date, readers = READERS,
 ) {
-  // A full pass leaves listings with no spec to the missing pass, which may give one its first meanwhile: two first
-  // specs would race, and the second is refused.
-  const targets = mode === 'full'
-    ? (await registry.activeTargets(exchangeId)).filter(t => t.current !== null)
-    : await registry.missingTargets(exchangeId);
+  const targets = await targetsOf(mode, exchangeId, registry, now);
   if (targets.length === 0) return { venue: exchangeCode, targets: 0 };
   const started = Date.now();
   const read = await readers[exchangeCode](targets.map(t => t.exchangeSecurityId), { listedOnly: mode === 'full' });
@@ -233,7 +252,8 @@ function isSqsEvent(event: unknown): event is SQSEvent {
   return Array.isArray((event as SQSEvent)?.Records);
 }
 
-// A full pass runs one venue per invocation, so the slowest venue can't run the others past the Lambda's timeout.
+// The passes over every active listing run one venue per invocation, so the slowest venue can't run the others past
+// the Lambda's timeout.
 export async function scheduled(mode: Mode, registry: Registry, venue?: string, readers = READERS) {
   const exchangeIds = await registry.exchangeIds();
   const now = new Date();
@@ -280,7 +300,7 @@ export const handler = async (event: { mode?: Mode; venue?: string } | SQSEvent)
   const registry = apiRegistry(await resolveApiKey());
   if (isSqsEvent(event)) return refreshes(event, registry);
   const { mode, venue } = event;
-  if (mode !== 'full' && mode !== 'missing') throw new Error(`Spec sync needs mode full or missing, not ${mode}`);
+  if (!isMode(mode)) throw new Error(`Spec sync needs mode ${MODES.join(', ')}, not ${mode}`);
   if (venue !== undefined && !READERS[venue]) throw new Error(`Spec sync has no reader for venue ${venue}`);
   return scheduled(mode, registry, venue);
 };

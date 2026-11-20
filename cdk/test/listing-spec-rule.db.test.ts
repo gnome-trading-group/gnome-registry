@@ -28,7 +28,7 @@ describeDb('LISTING_SPEC_MISSING against Postgres', () => {
   async function listing(id: number, exchangeId: number, symbol: string, active: boolean, createdMinutesAgo: number,
     withSpec = false) {
     await client.query(`INSERT INTO sm.listing (listing_id, exchange_id, security_id, exchange_security_id,
-      exchange_security_symbol, active, date_created) VALUES ($1, $2, $2, $3, $3, $4, $5)`,
+      exchange_security_symbol, active, date_created) VALUES ($1, $2, $2, $3, $3, $4, $5::timestamptz AT TIME ZONE 'UTC')`,
     [id, exchangeId, symbol, active, new Date(now.getTime() - createdMinutesAgo * 60_000)]);
     if (withSpec) {
       await client.query(`INSERT INTO sm.listing_spec (listing_id, price_bands, lot_size)
@@ -51,6 +51,11 @@ describeDb('LISTING_SPEC_MISSING against Postgres', () => {
       title: '2 active KALSHI listings have no spec', detail: 'e.g. KX-A:yes, KX-B:yes',
       since: '2026-11-18T11:30:00.000Z', facts: { missing: 2 }, visibleIn: ['live', 'paper'],
     });
+  });
+
+  it("leaves listings older than the spec sync's every-minute window to its daily pass", async () => {
+    await listing(1, 1, 'KX-A:yes', true, 3 * 60);
+    expect(await listingSpecs(client, now)).toEqual([]);
   });
 
   it('finds nothing when every active listing has a spec', async () => {

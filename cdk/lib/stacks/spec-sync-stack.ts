@@ -17,9 +17,10 @@ interface Props extends cdk.StackProps {
   apiKey: apigw.ApiKey;
 }
 
-// The spec sync, the only writer of listing specs: every 15 minutes it checks every active listing's spec against its
-// venue, every minute it gives listings with none their first, and it checks a listing a shard saw change as soon as
-// the refresh queue has it. Outside the VPC, like the other venue readers; it needs no venue credentials.
+// The spec sync, the only writer of listing specs: every minute it gives new listings their first spec, hourly it checks
+// every active listing's spec against its venue, daily it looks for older listings still without one, and it checks a
+// listing a shard saw change as soon as the refresh queue has it. Outside the VPC, like the other venue readers; it
+// needs no venue credentials.
 export class SpecSyncStack extends cdk.Stack {
   public readonly syncLambda: lambda.NodejsFunction;
   public readonly refreshLambda: lambda.NodejsFunction;
@@ -44,26 +45,37 @@ export class SpecSyncStack extends cdk.Stack {
     const readApiKey = new iam.PolicyStatement({ actions: ['apigateway:GET'], resources: [props.apiKey.keyArn] });
 
     // A venue's full pass reads every listing it trades: Kalshi's ~90k take about two minutes, Polymarket Intl's ~600
-    // Gamma pages about as long. One rule per venue, so one slow venue can't hold up or time out the rest.
-    // A failed pass isn't retried: the next one starts within minutes, and a retry of a timed-out pass would run past
-    // it, reading the same venue twice at once.
+    // Gamma pages about as long. One rule per venue, so one slow venue can't hold up or time out the rest, each at its
+    // own minute of the hour so no two read every active listing from the database at once.
+    // A failed pass isn't retried: the next one is due anyway, and a retry of a timed-out pass could run into it,
+    // reading the same venue twice at once.
     this.syncLambda = new lambda.NodejsFunction(this, 'spec-sync-lambda', {
       ...shared, timeout: cdk.Duration.minutes(15), retryAttempts: 0,
     });
     this.syncLambda.addToRolePolicy(readApiKey);
-    for (const venue of SPEC_SYNC_EXCHANGES) {
+    const minutesApart = Math.floor(60 / SPEC_SYNC_EXCHANGES.length);
+    SPEC_SYNC_EXCHANGES.forEach((venue, i) => {
+      const minute = String(i * minutesApart);
       new events.Rule(this, `SpecSyncFullRule${venue}`, {
         description: `Spec sync: checks every active ${venue} listing spec against the venue`,
-        schedule: events.Schedule.rate(cdk.Duration.minutes(15)),
+        schedule: events.Schedule.cron({ minute }),
         targets: [new targets.LambdaFunction(this.syncLambda, {
           event: events.RuleTargetInput.fromObject({ mode: 'full', venue }),
         })],
       });
-    }
-    new events.Rule(this, 'SpecSyncMissingRule', {
-      description: 'Spec sync: gives listings with no spec their first',
+      // Off the full passes' minutes, at night in the US.
+      new events.Rule(this, `SpecSyncMissingRule${venue}`, {
+        description: `Spec sync: gives older active ${venue} listings still without a spec their first`,
+        schedule: events.Schedule.cron({ minute: String(i * minutesApart + Math.floor(minutesApart / 2)), hour: '8' }),
+        targets: [new targets.LambdaFunction(this.syncLambda, {
+          event: events.RuleTargetInput.fromObject({ mode: 'missing', venue }),
+        })],
+      });
+    });
+    new events.Rule(this, 'SpecSyncNewRule', {
+      description: 'Spec sync: gives new listings their first spec',
       schedule: events.Schedule.rate(cdk.Duration.minutes(1)),
-      targets: [new targets.LambdaFunction(this.syncLambda, { event: events.RuleTargetInput.fromObject({ mode: 'missing' }) })],
+      targets: [new targets.LambdaFunction(this.syncLambda, { event: events.RuleTargetInput.fromObject({ mode: 'new' }) })],
     });
 
     // A venue's API can trail its feed by a moment, so a refresh that doesn't see the new tick yet is read again after

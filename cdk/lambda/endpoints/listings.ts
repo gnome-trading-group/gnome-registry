@@ -1,5 +1,6 @@
 import { APIGatewayProxyEvent, APIGatewayProxyEventQueryStringParameters } from 'aws-lambda';
 import { parseIdList, ResourceHandler, ValidationError } from './base';
+import { isoTimestamp } from './fees';
 import { ICreateListing, IDeleteListing } from '../types';
 import { anyId, NOW, raw, set, Sql, sql, where } from './sql';
 
@@ -19,6 +20,12 @@ function securityTypes(value: string): number[] {
     throw new ValidationError(`securityTypes must be security type codes, got ${value}`);
   }
   return codes;
+}
+
+function listingId(name: string, value: string): number {
+  const id = Number(value);
+  if (!Number.isInteger(id) || id < 0) throw new ValidationError(`${name} must be a listing id, got ${value}`);
+  return id;
 }
 
 export class ListingHandler extends ResourceHandler {
@@ -82,6 +89,11 @@ export class ListingHandler extends ResourceHandler {
       params?.exchangeSecuritySymbol && sql`l.exchange_security_symbol = ${params.exchangeSecuritySymbol}`,
       params?.search && params?.denormalize === 'true' && sql`l.exchange_security_symbol ILIKE ${pattern}`,
       params?.active !== undefined && sql`l.active = ${params.active === 'true'}`,
+      // date_created is UTC wall-clock time without a zone.
+      params?.createdAfter && sql`l.date_created >= (${isoTimestamp('createdAfter', params.createdAfter)}::timestamptz AT TIME ZONE 'UTC')`,
+      params?.createdBefore && sql`l.date_created < (${isoTimestamp('createdBefore', params.createdBefore)}::timestamptz AT TIME ZONE 'UTC')`,
+      // Pages by listing: an offset deep into an exchange's listings reads every row before it again.
+      params?.afterListingId && sql`l.listing_id > ${listingId('afterListingId', params.afterListingId)}`,
       // Listings no spec has been recorded for yet: the spec sync gives each its first.
       params?.withoutSpec === 'true' && sql`NOT EXISTS (SELECT 1 FROM sm.listing_spec s WHERE s.listing_id = l.listing_id)`,
     ])}`;

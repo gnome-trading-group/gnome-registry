@@ -6,7 +6,7 @@ import {
 } from './types';
 import { IncentiveProgramReading } from './types';
 import { PriceBand } from '../../endpoints/price-bands';
-import { chunks, complementBands, pause, PRICE_SCALE as SPEC_PRICE_SCALE, units, VenueSpec } from './specs';
+import { chunks, complementBands, pause, PRICE_SCALE as SPEC_PRICE_SCALE, ReadOptions, units, VenueSpec } from './specs';
 
 // Kalshi reports money in cents rounded down, and to four decimals in its *_dollars fields, which sub-cent prices
 // need; a position per market ticker, signed: YES positive, NO negative. Collateral is split by exchange shard; the
@@ -326,16 +326,17 @@ async function kalshiMarkets(path: string, tickers: string[]): Promise<Record<st
 
 /**
  * Specs for Kalshi listings: each market's price_ranges, mirrored for its NO listing. A market settled before Kalshi's
- * historical cutoff is only under /historical/markets, so tickers the live endpoint doesn't return are asked there.
+ * historical cutoff is only under /historical/markets, so tickers the live endpoint doesn't return are asked there,
+ * unless only listed markets are wanted.
  */
-export async function readKalshiSpecs(exchangeSecurityIds: string[]): Promise<Map<string, VenueSpec>> {
+export async function readKalshiSpecs(exchangeSecurityIds: string[], options: ReadOptions = {}): Promise<Map<string, VenueSpec>> {
   const listingsByTicker = new Map<string, string[]>();
   for (const id of exchangeSecurityIds) {
     const { ticker } = kalshiMarketOf(id);
     listingsByTicker.set(ticker, [...(listingsByTicker.get(ticker) ?? []), id]);
   }
   const bandsByTicker = new Map<string, PriceBand[]>();
-  for (const path of [MARKETS_PATH, HISTORICAL_MARKETS_PATH]) {
+  for (const path of options.listedOnly ? [MARKETS_PATH] : [MARKETS_PATH, HISTORICAL_MARKETS_PATH]) {
     const wanted = [...listingsByTicker.keys()].filter(t => !bandsByTicker.has(t));
     for (const batch of chunks(wanted, TICKERS_PER_REQUEST)) {
       for (const market of await kalshiMarkets(path, batch)) {

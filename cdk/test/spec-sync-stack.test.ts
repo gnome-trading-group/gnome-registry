@@ -17,18 +17,20 @@ describe('SpecSyncStack', () => {
   const template = Template.fromStack(new SpecSyncStack(app, 'Specs', { env: ENV, api: api.api, apiKey: api.apiKey }));
   const apiTemplate = Template.fromStack(api);
 
-  it('runs a full pass per venue every 15 minutes and a missing-spec pass every minute, outside the VPC', () => {
-    for (const venue of SPEC_SYNC_EXCHANGES) {
-      template.hasResourceProperties('AWS::Events::Rule', {
-        ScheduleExpression: 'rate(15 minutes)',
-        Targets: [Match.objectLike({ Input: JSON.stringify({ mode: 'full', venue }) })],
-      });
-    }
-    template.resourcePropertiesCountIs('AWS::Events::Rule', { ScheduleExpression: 'rate(15 minutes)' },
-      SPEC_SYNC_EXCHANGES.length);
-    template.hasResourceProperties('AWS::Events::Rule', {
-      ScheduleExpression: 'rate(1 minute)', Targets: [Match.objectLike({ Input: '{"mode":"missing"}' })],
-    });
+  it('runs new listings every minute, and a full pass hourly and a missing-spec pass daily per venue, outside the VPC', () => {
+    const rules = template.findResources('AWS::Events::Rule');
+    const schedules = (mode: string) => Object.values(rules)
+      .filter((r: any) => r.Properties.Targets.some((t: any) => JSON.parse(t.Input).mode === mode))
+      .map((r: any) => ({ schedule: r.Properties.ScheduleExpression, venue: JSON.parse(r.Properties.Targets[0].Input).venue }));
+    expect(schedules('new')).toEqual([{ schedule: 'rate(1 minute)', venue: undefined }]);
+    const full = schedules('full');
+    const missing = schedules('missing');
+    expect(full.map(r => r.venue).sort()).toEqual([...SPEC_SYNC_EXCHANGES].sort());
+    expect(missing.map(r => r.venue).sort()).toEqual([...SPEC_SYNC_EXCHANGES].sort());
+    for (const r of full) expect(r.schedule).toMatch(/^cron\(\d+ \* \* \* \? \*\)$/);
+    for (const r of missing) expect(r.schedule).toMatch(/^cron\(\d+ 8 \* \* \? \*\)$/);
+    const minutes = [...full, ...missing].map(r => Number(r.schedule.match(/^cron\((\d+)/)![1]));
+    expect(new Set(minutes).size).toBe(minutes.length);
     template.hasResourceProperties('AWS::Lambda::Function', { VpcConfig: Match.absent(), Timeout: 900 });
     template.hasResourceProperties('AWS::Lambda::EventInvokeConfig', { MaximumRetryAttempts: 0 });
   });

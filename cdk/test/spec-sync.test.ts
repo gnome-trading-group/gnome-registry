@@ -6,7 +6,7 @@ import { readLighterSpecs } from '../lambda/sync/venues/lighter';
 import { SQSEvent } from 'aws-lambda';
 import { SPEC_SYNC_EXCHANGES } from '../lambda/endpoints/spec-refresh-queue';
 import {
-  planSpecs, postInChunks, READERS, refreshes, refreshListing, Registry, scheduled, SpecRow, syncVenue, Target,
+  NEW_LISTING_WINDOW_MS, planSpecs, postInChunks, READERS, refreshes, refreshListing, Registry, scheduled, SpecRow, syncVenue, Target,
 } from '../lambda/sync/spec-sync';
 import { kalshiPriceBands, readKalshiSpecs } from '../lambda/sync/venues/kalshi';
 import { readPolymarketIntlSpecs } from '../lambda/sync/venues/polymarket-intl';
@@ -53,6 +53,17 @@ describe('Kalshi specs', () => {
     expect(specs.get('PRES-2024-DJT:yes')).toEqual(spec(LINEAR));
     expect(specs.has('GONE-1:yes')).toBe(false);
     expect(urls.filter(u => u.includes('/historical/markets'))[0]).toContain('tickers=PRES-2024-DJT,GONE-1');
+  });
+
+  it('asks only the live endpoint when only listed markets are wanted', async () => {
+    const urls: string[] = [];
+    jest.spyOn(global, 'fetch').mockImplementation(async (url) => {
+      urls.push(String(url));
+      return json(fixture('kalshi-markets.json'));
+    });
+    const specs = await readKalshiSpecs(['PRES-2024-DJT:yes'], { listedOnly: true });
+    expect(specs.has('PRES-2024-DJT:yes')).toBe(false);
+    expect(urls.some(u => u.includes('/historical/markets'))).toBe(false);
   });
 });
 
@@ -219,7 +230,7 @@ describe('a refresh', () => {
   const registry = (current: VenueSpec | null, exists = true): Registry => ({
     exchangeIds: async () => new Map([['POLYMARKET_INTL', 7]]),
     activeTargets: async () => [],
-    missingTargets: async () => [],
+    unspeccedTargets: async () => [],
     target: async (_id, exchangeSecurityId) => (exists ? { listingId: 9, exchangeSecurityId, current } : null),
     post: async (rows) => { posted.push(rows); return { written: rows.length, failed: 0 }; },
   });
@@ -270,11 +281,11 @@ describe('a refresh', () => {
 });
 
 describe('a pass', () => {
-  it('reads the venue only when there are listings to check, and leaves first specs to the missing pass', async () => {
+  it('reads the venue only when there are listings to check, and leaves first specs to the other passes', async () => {
     const read = jest.fn(async () => new Map([['M1', spec(TAPERED)], ['M2', spec(TAPERED)]]));
     const posted: SpecRow[] = [];
     const registry = {
-      missingTargets: async () => [],
+      unspeccedTargets: async () => [],
       activeTargets: async () => [
         { listingId: 1, exchangeSecurityId: 'M1', current: spec() },
         { listingId: 2, exchangeSecurityId: 'M2', current: null },
@@ -287,6 +298,26 @@ describe('a pass', () => {
       .toMatchObject({ venue: 'KALSHI', targets: 1, written: 1 });
     expect(read).toHaveBeenCalledWith(['M1'], { listedOnly: true });
     expect(posted.map(r => r.listingId)).toEqual([1]);
+  });
+
+  it('gives first specs to listings created within the window every minute, and to older ones in the daily pass', async () => {
+    const now = new Date('2026-11-18T12:00:00Z');
+    const windowStart = new Date(now.getTime() - NEW_LISTING_WINDOW_MS);
+    const asked: { after?: Date; before?: Date }[] = [];
+    const read = jest.fn(async () => new Map([['M1', spec()]]));
+    const posted: SpecRow[] = [];
+    const registry = {
+      unspeccedTargets: async (_exchangeId: number, created: { after?: Date; before?: Date }) => {
+        asked.push(created);
+        return [{ listingId: 1, exchangeSecurityId: 'M1', current: null }];
+      },
+      post: async (rows: SpecRow[]) => { posted.push(...rows); return { written: rows.length, failed: 0 }; },
+    } as unknown as Registry;
+    await syncVenue('KALSHI', 1, 'new', registry, now, { KALSHI: read });
+    await syncVenue('KALSHI', 1, 'missing', registry, now, { KALSHI: read });
+    expect(asked).toEqual([{ after: windowStart }, { before: windowStart }]);
+    expect(read).toHaveBeenCalledWith(['M1'], { listedOnly: false });
+    expect(posted).toEqual([{ listingId: 1, ...spec() }, { listingId: 1, ...spec() }]);
   });
 
   it('runs one venue when asked, leaving the others to their own runs', async () => {

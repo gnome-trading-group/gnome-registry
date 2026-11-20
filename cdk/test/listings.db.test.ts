@@ -52,6 +52,17 @@ describeDb('listings by 24h volume, against Postgres', () => {
     expect((await ids({ withoutSpec: 'true', exchangeId: '3', active: 'true' })).sort()).toEqual([11, 12]);
   });
 
+  it('lists listings created in a window, and pages by listing', async () => {
+    await client.query(`UPDATE sm.listing SET date_created = '2026-11-18 12:00:00' WHERE listing_id IN (11, 12)`);
+    await client.query(`UPDATE sm.listing SET date_created = '2026-11-18 14:00:00' WHERE listing_id = 13`);
+    expect(await ids({ createdAfter: '2026-11-18T11:00:00Z', createdBefore: '2026-11-18T13:00:00Z' })).toEqual([11, 12]);
+    expect(await ids({ createdAfter: '2026-11-18T12:00:00Z', createdBefore: '2026-11-18T14:00:00Z' })).toEqual([11, 12]);
+    expect(await ids({ createdAfter: '2026-11-18T13:00:00Z', createdBefore: '2026-11-18T15:00:00Z' })).toEqual([13]);
+    expect(await ids({ afterListingId: '13', sortBy: 'listing_id', limit: '2' })).toEqual([14, 15]);
+    await expect(handler().get({ createdAfter: 'yesterday' })).rejects.toThrow(ValidationError);
+    await expect(handler().get({ afterListingId: '-1' })).rejects.toThrow(ValidationError);
+  });
+
   it('ranks active listings of the given exchanges and security types by volume, largest first', async () => {
     expect(await ids({ exchangeIds: '3,4', securityTypes: '1', active: 'true', sortBy: 'volume_24h', sortOrder: 'desc' }))
       .toEqual([10, 13, 11, 14]);
